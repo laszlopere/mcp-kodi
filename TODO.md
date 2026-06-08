@@ -321,7 +321,7 @@ Everything below this section is original design for *this* project.
     (use `default` when omitted), tool-error JSON shaping (§3.4, §5.1)
     [ ] 11.6.1 `instances` — list configured names + which is `default`
     [ ] 11.6.2 `ping`
-    [ ] 11.6.3 `info`
+    [x] 11.6.3 `info`
     [ ] 11.6.4 `notify`
     [ ] 11.6.5 `players`
     [ ] 11.6.6 `playpause`

@@ -490,6 +490,80 @@ schema_rpc (MkTools *self)
   return json_builder_get_root (b);
 }
 
+/* ---- Shared argument resolution -------------------------------------------
+ *
+ * Helpers handlers (§11.6.1+) use to read tool arguments uniformly.
+ */
+
+/**
+ * arg_instance:
+ * @args: the tool-call arguments object, or NULL.
+ *
+ * Reads the optional `instance` argument (§5.1). The returned string is
+ * borrowed from @args.
+ *
+ * @return the instance name, or NULL to mean "the configured default".
+ */
+static const char *
+arg_instance (JsonObject *args)
+{
+  if (args == NULL || !json_object_has_member (args, "instance"))
+    return NULL;
+  return json_object_get_string_member_with_default (args, "instance", NULL);
+}
+
+/* ---- Per-tool handlers ----------------------------------------------------
+ *
+ * Each handler reads @args, drives @self->kodi, and returns the result payload
+ * as a newly allocated JsonNode (or NULL with @error set). Wired into the table
+ * below; a tool with no handler yet dispatches to a "not implemented" result.
+ */
+
+/**
+ * props_params:
+ * @props: NULL-terminated array of Kodi property names to request.
+ *
+ * Builds a `{ "properties": [ ... ] }` params node for the various
+ * `*.GetProperties` methods.
+ *
+ * @return a newly allocated JsonNode; free with json_node_unref().
+ */
+static JsonNode *
+props_params (const char *const *props)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "properties");
+  json_builder_begin_array (b);
+  for (gsize i = 0; props[i] != NULL; i++)
+    json_builder_add_string_value (b, props[i]);
+  json_builder_end_array (b);
+  json_builder_end_object (b);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_info:
+ * @self: the tool table.
+ * @args: the call arguments (optional `instance`), or NULL.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements `info` (§5.2, §11.6.3): reads name/version/volume/muted from the
+ * target instance via `Application.GetProperties` and returns Kodi's `result`
+ * object verbatim.
+ *
+ * @return the properties node, or NULL with @error set.
+ */
+static JsonNode *
+handler_info (MkTools *self, JsonObject *args, GError **error)
+{
+  static const char *const props[] = { "name", "version", "volume", "muted",
+                                       NULL };
+  g_autoptr (JsonNode) params = props_params (props);
+  return mk_kodi_call (self->kodi, arg_instance (args),
+                       "Application.GetProperties", params, error);
+}
+
 /* ---- The tool table -------------------------------------------------------
  *
  * Names and arguments mirror §5.2. Handlers are NULL until implemented
@@ -501,7 +575,7 @@ static const MkToolDef mk_tool_defs[] = {
   { "ping", "Check connectivity to a Kodi instance (expects a pong).",
     schema_instance_only, NULL },
   { "info", "Get a Kodi instance's name, version, volume, and mute state.",
-    schema_instance_only, NULL },
+    schema_instance_only, handler_info },
   { "notify", "Show a popup notification on a Kodi screen.",
     schema_notify, NULL },
   { "players", "List the active players on a Kodi instance.",
@@ -545,30 +619,6 @@ find_tool (const char *name)
     if (g_strcmp0 (mk_tool_defs[i].name, name) == 0)
       return &mk_tool_defs[i];
   return NULL;
-}
-
-/* ---- Shared argument resolution -------------------------------------------
- *
- * Helpers handlers (§11.6.1+) use to read tool arguments uniformly. Provided
- * by the scaffold; the unused attribute keeps the build warning-free until the
- * first handler calls them.
- */
-
-/**
- * arg_instance:
- * @args: the tool-call arguments object, or NULL.
- *
- * Reads the optional `instance` argument (§5.1). The returned string is
- * borrowed from @args.
- *
- * @return the instance name, or NULL to mean "the configured default".
- */
-G_GNUC_UNUSED static const char *
-arg_instance (JsonObject *args)
-{
-  if (args == NULL || !json_object_has_member (args, "instance"))
-    return NULL;
-  return json_object_get_string_member_with_default (args, "instance", NULL);
 }
 
 /* ---- Result shaping -------------------------------------------------------- */
