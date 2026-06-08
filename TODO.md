@@ -90,11 +90,14 @@ Everything below this section is original design for *this* project.
 
   [ ] 4.1 Build requests with `JsonBuilder`:
   `{ "jsonrpc": "2.0", "id": <n>, "method": <m>, "params": <obj> }`.
-  [ ] 4.2 POST to `${KODI_SCHEME}://${KODI_HOST}/jsonrpc` with
-  `Content-Type: application/json` and HTTP Basic auth from `KODI_AUTH`.
-  [ ] 4.3 Reuse one `SoupSession` for the process lifetime. If config indicates
-  a self-signed cert (`-k`), connect the session's `accept-certificate` signal
-  to unconditionally accept (only for the configured host).
+  [ ] 4.2 Calls are made *against a named instance* (see [§7](#7-configuration-file)):
+  resolve the instance to its `scheme`/`host`/`auth`/`insecure`, then POST to
+  `<scheme>://<host>/jsonrpc` with `Content-Type: application/json` and HTTP Basic
+  auth. A tool that omits the instance uses the configured `default`.
+  [ ] 4.3 Reuse one `SoupSession` for the whole process across all instances
+  (it can talk to several hosts). For each instance whose config sets `insecure`,
+  accept the self-signed cert — connect the session's `accept-certificate` signal
+  and accept only for that instance's host, not blanket.
   [ ] 4.4 Synchronous send per tool call (`soup_session_send_and_read`) is fine —
   calls are serialised by the AI and latency is human-scale.
   [ ] 4.5 Parse the response; surface Kodi's `error` member as a tool error.
@@ -108,27 +111,45 @@ Everything below this section is original design for *this* project.
 
 ## 5. Tool surface
 
-  [ ] 5.1 Each tool has a JSON Schema `inputSchema`. Names and arguments:
+  [ ] 5.1 **Instance targeting:** every tool that talks to a player or device
+  takes an optional `instance` arg (a configured instance name, e.g. `hall`,
+  `bedroom`, `kids`). Omitted → the config `default`. The schema documents the
+  available names. `search`/`episodes` are library lookups and may ignore it (any
+  instance shares the same library), but accept it for uniformity.
+  [ ] 5.2 Each tool has a JSON Schema `inputSchema`. Names and arguments:
 
   | Tool        | Args                                   | Kodi method(s) |
   |-------------|----------------------------------------|----------------|
-  | `ping`      | —                                      | `JSONRPC.Ping` |
-  | `info`      | —                                      | `Application.GetProperties` (name, version, volume, muted) |
-  | `notify`    | `title`, `message`, `displaytime?`     | `GUI.ShowNotification` |
-  | `players`   | —                                      | `Player.GetActivePlayers` |
-  | `playpause` | —                                      | `Player.PlayPause` (on active player) |
-  | `stop`      | —                                      | `Player.Stop` (on active player) |
-  | `play`      | `type` (song/album/artist/movie/episode/musicvideo), `id` | `Player.Open` with the matching `item` key |
+  | `instances` | —                                      | none — list configured instance names + which is `default` |
+  | `ping`      | `instance?`                            | `JSONRPC.Ping` |
+  | `info`      | `instance?`                            | `Application.GetProperties` (name, version, volume, muted) |
+  | `notify`    | `instance?`, `title`, `message`, `displaytime?` | `GUI.ShowNotification` |
+  | `players`   | `instance?`                            | `Player.GetActivePlayers` |
+  | `playpause` | `instance?`                            | `Player.PlayPause` (on active player) |
+  | `stop`      | `instance?`                            | `Player.Stop` (on active player) |
+  | `play`      | `instance?`, `type` (song/album/artist/movie/episode/musicvideo), `id` | `Player.Open` with the matching `item` key |
+  | `seek`      | `instance?`, `time` (h/m/s) **or** `percentage` | `Player.Seek` on the active player |
+  | `handoff`   | `from`, `to`                           | capture active item + position on `from` → `Player.Stop` on `from` → `Player.Open` on `to` → `Player.Seek` to that position |
   | `search`    | `type` (tvshow/movie/album/artist/song), `query` | `VideoLibrary.*` / `AudioLibrary.*` Get + filter |
-  | `random`    | `type` (episode/movie/song), `query?`  | resolve filter → pick → `Player.Open` |
+  | `random`    | `instance?`, `type` (episode/movie/song), `query?`  | resolve filter → pick → `Player.Open` |
   | `episodes`  | `show`, `filter?` (SxxExx or text)     | `VideoLibrary.GetEpisodes` |
-  | `status`    | —                                      | `Player.GetActivePlayers` + `Player.GetItem` + `Player.GetProperties` |
-  | `volume`    | `level` (0–100)                        | `Application.SetVolume` |
-  | `mute`      | `state` (on/off/toggle)                | `Application.SetMute` |
-  | `rpc`       | `method`, `params?` (object)           | passthrough — any JSON-RPC method |
+  | `status`    | `instance?` (`"*"` = all)              | `Player.GetActivePlayers` + `Player.GetItem` + `Player.GetProperties`; per instance |
+  | `volume`    | `instance?`, `level` (0–100)           | `Application.SetVolume` |
+  | `mute`      | `instance?`, `state` (on/off/toggle)   | `Application.SetMute` |
+  | `rpc`       | `instance?`, `method`, `params?` (object) | passthrough — any JSON-RPC method |
 
-  [ ] 5.2 `random` and `search` resolve library ids internally (e.g. a show name
+  [ ] 5.3 `random` and `search` resolve library ids internally (e.g. a show name
   → `tvshowid` → episodes) so the AI can act by name, not just numeric id.
+  [ ] 5.4 **`status` with `instance: "*"`** queries every configured instance and
+  returns a per-instance now-playing summary (item, position, paused/playing) —
+  this answers "what's playing everywhere" / "what are the children watching"
+  (target the `kids` instance, or `*` and read its row).
+  [ ] 5.5 **`handoff`** moves playback between instances: read the active player's
+  item id/type and resumable position (`Player.GetProperties` → `time`/
+  `percentage`) on `from`, stop `from`, `Player.Open` the same item on `to`, then
+  `seek` `to` to that position. Records the move in both instances' state (§8).
+  Built on the `seek` primitive; report a clear error if `from` has nothing
+  playing.
 
 ---
 
@@ -162,52 +183,72 @@ Everything below this section is original design for *this* project.
   server's own file. No `cli`/shell config in this project; JSON so it round-trips
   through the json-glib we already use and stays symmetric with the state file
   ([§8](#8-playback-state-file)).
-  [ ] 7.2 **Shape (draft):**
+  [ ] 7.2 **Multiple instances:** the server can drive several Kodi boxes (e.g.
+  `hall`, `bedroom`, `kids`). Config holds a map of named instances and names one
+  `default`. Shape (draft):
   ```json
   {
-    "version": 1,
-    "host": "kodi.example.local:8443",
-    "auth": "kodi:<password>",
-    "scheme": "https",
-    "insecure": true
+    "version": 2,
+    "default": "hall",
+    "instances": {
+      "hall":    { "host": "hall.example.local:8443",    "auth": "kodi:<password>", "scheme": "https", "insecure": true },
+      "bedroom": { "host": "bedroom.example.local:8443", "auth": "kodi:<password>", "scheme": "https", "insecure": true },
+      "kids":    { "host": "kids.example.local:8443",    "auth": "kodi:<password>", "scheme": "https", "insecure": true }
+    }
   }
   ```
   (`auth` is `user:pass` for HTTP Basic; `insecure: true` accepts the self-signed
-  cert — the JSON equivalent of curl `-k`.)
-  [ ] 7.3 **Load:** on startup read the file if present, then overlay environment
-  overrides (`KODI_HOST`, `KODI_AUTH`, `KODI_SCHEME`; `-k` in `KODI_CURL_OPTS`
-  sets `insecure`). No file and no env → a clear error telling the user to
-  configure. Never hardcode host or credentials.
+  cert — the JSON equivalent of curl `-k`. Instance names are free-form user
+  labels; tools reference them, and `default` is used when a tool omits
+  `instance`.)
+  [ ] 7.3 **Load:** on startup read the file if present. Environment overrides
+  apply to the `default` instance only — `KODI_HOST`/`KODI_AUTH`/`KODI_SCHEME`
+  (and `-k` in `KODI_CURL_OPTS` → `insecure`) — so a single-box user can run with
+  no config file at all (env defines one implicit `default` instance). No file and
+  no env → a clear error telling the user to configure. Never hardcode host or
+  credentials.
   [ ] 7.4 **Save:** write the effective config back atomically — temp file in the
   same dir, `fsync`, then `rename()` over the target (same discipline as the state
-  file, §8.4). Create the directory `0700` and the file `0600`; it holds a
-  password.
+  file, §8.4). Create the directory `0700` and the file `0600`; it holds
+  passwords.
   [ ] 7.5 **Save trigger (TBD):** the save primitive lives in `mk-config`
   regardless of caller; the entry point (a first-run/setup path, a `--save` flag,
   or a future `configure` tool) is to be decided.
+  [ ] 7.6 **Back-compat:** a `version: 1` flat file (single `host`/`auth`/… at the
+  top level) is read as one instance named `default`; on next save it is rewritten
+  in the `version: 2` instances shape.
 
 ---
 
 ## 8. Playback state file
 
-  [ ] 8.1 **Purpose:** remember, across stateless calls, *what we started to
-  play* and *the last episode watched per TV show*, so the AI can resume /
-  continue.
+  [ ] 8.1 **Purpose:** remember, across stateless calls and *per instance*, *what
+  we started to play* and *the last episode watched per TV show*, so the AI can
+  resume / continue / hand off between boxes.
   [ ] 8.2 **Location:** `${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/state.json`.
-  [ ] 8.3 **Shape (draft):**
+  [ ] 8.3 **Shape (draft):** state is keyed by instance name, mirroring the config
+  ([§7](#7-configuration-file)):
   ```json
   {
-    "version": 1,
-    "last_played": { "type": "episode", "id": 1234, "label": "...", "at": "<iso8601>" },
-    "shows": { "<tvshowid>": { "last_episode_id": 5678, "season": 3, "episode": 7, "at": "<iso8601>" } }
+    "version": 2,
+    "instances": {
+      "hall": {
+        "last_played": { "type": "episode", "id": 1234, "label": "...", "position": "00:12:34", "at": "<iso8601>" },
+        "shows": { "<tvshowid>": { "last_episode_id": 5678, "season": 3, "episode": 7, "at": "<iso8601>" } }
+      },
+      "bedroom": { "last_played": null, "shows": {} }
+    }
   }
   ```
-  [ ] 8.4 **Writes:** on `play`/`random` (record `last_played`; if it's an
-  episode, update that show's `shows` entry). Atomic: write a temp file in the
-  same dir, `fsync`, then `rename()` over the target.
-  [ ] 8.5 **Reads:** available to handlers that want "what next" context; may
-  later back a `resume` / `next_episode` tool. Keep the file optional — absence =
-  empty state.
+  [ ] 8.4 **Writes:** on `play`/`random`/`handoff` for the target instance (record
+  `last_played` under that instance; if it's an episode, update that instance's
+  `shows` entry). `handoff` also captures the resumed `position`. Atomic: write a
+  temp file in the same dir, `fsync`, then `rename()` over the target.
+  [ ] 8.5 **Reads:** available to handlers that want "what next" context, scoped
+  to an instance; may later back a `resume` / `next_episode` tool. Keep the file
+  optional — absence, or a missing instance key, = empty state for that instance.
+  [ ] 8.6 **Back-compat:** a `version: 1` flat state file is migrated into
+  `instances.default` on first read.
 
 ---
 
@@ -226,9 +267,9 @@ Everything below this section is original design for *this* project.
   [x] 10.1 Spec (this file)
   [x] 10.2 Autotools scaffold (configure.ac, Makefile.am, autogen.sh, src
   skeleton)
-  [ ] 10.3 Config load + save (`mk-config`)
-  [ ] 10.4 Kodi JSON-RPC client (`mk-kodi`)
+  [ ] 10.3 Config load + save, multi-instance (`mk-config`)
+  [ ] 10.4 Kodi JSON-RPC client, per-instance (`mk-kodi`)
   [ ] 10.5 MCP stdio transport + dispatch (`mk-stdio`, `mk-mcp`)
-  [ ] 10.6 Tool table + handlers (`mk-tools`)
-  [ ] 10.7 Playback state file (`mk-state`)
+  [ ] 10.6 Tool table + handlers, incl. `instance` arg, `seek`, `handoff` (`mk-tools`)
+  [ ] 10.7 Playback state file, per-instance (`mk-state`)
   [ ] 10.8 Build clean, test against live Kodi, write README
