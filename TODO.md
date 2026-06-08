@@ -150,6 +150,14 @@ Everything below this section is original design for *this* project.
   `seek` `to` to that position. Records the move in both instances' state (§8).
   Built on the `seek` primitive; report a clear error if `from` has nothing
   playing.
+  [ ] 5.6 **`handoff` assumes a shared library:** it re-opens on `to` by the item
+  id captured from `from`, which is only valid when both boxes resolve that id to
+  the same content (a shared library / common MySQL backend, or identical local
+  libraries). The server does not blindly stop `from` and hope: before stopping,
+  confirm the item is reachable on `to` (verify the id resolves there, e.g.
+  `VideoLibrary.GetEpisodeDetails` / `AudioLibrary.Get*Details`). If it is **not
+  available at `to`**, abort the handoff with a clear error and leave `from`
+  playing untouched — never stop one box for a move that cannot complete.
 
 ---
 
