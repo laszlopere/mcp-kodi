@@ -24,5 +24,7 @@ Makefile.in
 # Build output
 /src/mcp-kodi
 
-# Editor
+# Editor / tooling
 *.swp
+/compile_commands.json
+/.cache/
