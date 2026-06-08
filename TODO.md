@@ -233,30 +233,37 @@ Everything below this section is original design for *this* project.
   [ ] 8.1 **Purpose:** remember, across stateless calls and *per instance*, *what
   we started to play* and *the last episode watched per TV show*, so the AI can
   resume / continue / hand off between boxes.
-  [ ] 8.2 **Location:** `${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/state.json`.
-  [ ] 8.3 **Shape (draft):** state is keyed by instance name, mirroring the config
-  ([§7](#7-configuration-file)):
+  [ ] 8.2 **Location:** one state file **per instance**, under a state directory
+  `${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/instances/`, named for the instance
+  (e.g. `hall.json`, `bedroom.json`). The configuration file ([§7](#7-configuration-file))
+  holds **no** state — config and state live in separate trees so a config edit
+  never races a state write and vice versa. Instance names are simple labels;
+  percent-encode any byte outside `[A-Za-z0-9._-]` to keep filenames safe.
+  [ ] 8.3 **Shape (draft):** each file is one instance's state on its own — no
+  instance keying, no mirror of the config map:
   ```json
   {
-    "version": 2,
-    "instances": {
-      "hall": {
-        "last_played": { "type": "episode", "id": 1234, "label": "...", "position": "00:12:34", "at": "<iso8601>" },
-        "shows": { "<tvshowid>": { "last_episode_id": 5678, "season": 3, "episode": 7, "at": "<iso8601>" } }
-      },
-      "bedroom": { "last_played": null, "shows": {} }
-    }
+    "version": 1,
+    "last_played": { "type": "episode", "id": 1234, "label": "...", "position": "00:12:34", "at": "<iso8601>" },
+    "shows": { "<tvshowid>": { "last_episode_id": 5678, "season": 3, "episode": 7, "at": "<iso8601>" } }
   }
   ```
-  [ ] 8.4 **Writes:** on `play`/`random`/`handoff` for the target instance (record
-  `last_played` under that instance; if it's an episode, update that instance's
-  `shows` entry). `handoff` also captures the resumed `position`. Atomic: write a
-  temp file in the same dir, `fsync`, then `rename()` over the target.
+  An instance with nothing recorded yet has `last_played: null` and `shows: {}`
+  (or simply no file).
+  [ ] 8.4 **Writes:** on `play`/`random`/`handoff` for the target instance, write
+  *that instance's* file (record `last_played`; if it's an episode, update its
+  `shows` entry). `handoff` writes both the source and destination files, and
+  captures the resumed `position` on the destination. Atomic per file: write a
+  temp file in the same dir, `fsync`, then `rename()` over the target. Create the
+  `instances/` dir (0700) on first write.
   [ ] 8.5 **Reads:** available to handlers that want "what next" context, scoped
-  to an instance; may later back a `resume` / `next_episode` tool. Keep the file
-  optional — absence, or a missing instance key, = empty state for that instance.
-  [ ] 8.6 **Back-compat:** a `version: 1` flat state file is migrated into
-  `instances.default` on first read.
+  to one instance by reading that instance's file; may later back a `resume` /
+  `next_episode` tool. Keep files optional — a missing file = empty state for that
+  instance.
+  [ ] 8.6 **Back-compat:** a legacy single `state.json` (the earlier draft's
+  instance-keyed file) is split into per-instance files on first run — one
+  `instances/<name>.json` per key — then the old file is left in place but
+  ignored. No on-disk state has shipped, so this migration is best-effort.
 
 ---
 
