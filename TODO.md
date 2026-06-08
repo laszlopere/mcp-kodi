@@ -26,9 +26,9 @@ carried over:
   (`configure.ac` + `PKG_CHECK_MODULES`).
   [x] 1.2 **JSON:** `json-glib-1.0` for all parsing and serialisation
   (`JsonParser`, `JsonBuilder`, `JsonNode`, `JsonObject`, `JsonGenerator`).
-  [ ] 1.3 **HTTP:** `libsoup-3.0` as the HTTP client (`SoupSession`,
+  [x] 1.3 **HTTP:** `libsoup-3.0` as the HTTP client (`SoupSession`,
   `SoupMessage`, `soup_session_send_and_read`).
-  [ ] 1.4 **Transport to Kodi:** JSON-RPC POSTed over **HTTPS** to a Caddy
+  [x] 1.4 **Transport to Kodi:** JSON-RPC POSTed over **HTTPS** to a Caddy
   reverse proxy in front of Kodi. The proxy uses `tls internal` (a self-signed
   cert), so the client must **accept the untrusted certificate** explicitly
   (equivalent to curl `-k`).
@@ -88,19 +88,19 @@ Everything below this section is original design for *this* project.
 
 ## 4. Kodi JSON-RPC client
 
-  [ ] 4.1 Build requests with `JsonBuilder`:
+  [x] 4.1 Build requests with `JsonBuilder`:
   `{ "jsonrpc": "2.0", "id": <n>, "method": <m>, "params": <obj> }`.
-  [ ] 4.2 Calls are made *against a named instance* (see [§7](#7-configuration-file)):
+  [x] 4.2 Calls are made *against a named instance* (see [§7](#7-configuration-file)):
   resolve the instance to its `scheme`/`host`/`auth`/`insecure`, then POST to
   `<scheme>://<host>/jsonrpc` with `Content-Type: application/json` and HTTP Basic
   auth. A tool that omits the instance uses the configured `default`.
-  [ ] 4.3 Reuse one `SoupSession` for the whole process across all instances
+  [x] 4.3 Reuse one `SoupSession` for the whole process across all instances
   (it can talk to several hosts). For each instance whose config sets `insecure`,
   accept the self-signed cert — connect the session's `accept-certificate` signal
   and accept only for that instance's host, not blanket.
-  [ ] 4.4 Synchronous send per tool call (`soup_session_send_and_read`) is fine —
+  [x] 4.4 Synchronous send per tool call (`soup_session_send_and_read`) is fine —
   calls are serialised by the AI and latency is human-scale.
-  [ ] 4.5 Parse the response; surface Kodi's `error` member as a tool error.
+  [x] 4.5 Parse the response; surface Kodi's `error` member as a tool error.
   Return the `result` member (or a small shaped summary) as the tool's JSON text.
 
   [ ] 4.6 **Server-side setup:** how to enable Kodi's JSON-RPC web server and
@@ -306,7 +306,7 @@ Everything below this section is original design for *this* project.
   [x] 11.2 Autotools scaffold (configure.ac, Makefile.am, autogen.sh, src
   skeleton)
   [x] 11.3 Config load + save, multi-instance (`mk-config`)
-  [ ] 11.4 Kodi JSON-RPC client, per-instance (`mk-kodi`)
+  [x] 11.4 Kodi JSON-RPC client, per-instance (`mk-kodi`)
   [ ] 11.5 MCP stdio transport + dispatch (`mk-stdio`, `mk-mcp`)
   [ ] 11.6 Tool table + handlers, incl. `instance` arg, `seek`, `handoff` (`mk-tools`)
   [ ] 11.7 Playback state file, per-instance (`mk-state`)

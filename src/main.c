@@ -11,6 +11,7 @@
 #include <glib.h>
 
 #include "mk-config.h"
+#include "mk-kodi.h"
 
 int
 main (int argc, char **argv)
@@ -30,6 +31,10 @@ main (int argc, char **argv)
               PACKAGE_NAME, PACKAGE_VERSION,
               mk_config_instance_count (cfg), mk_config_get_default (cfg));
 
-  /* TODO §11.5: set up GMainLoop + stdio MCP transport and run. */
+  g_autoptr (MkKodi) kodi = mk_kodi_new (cfg);
+
+  /* TODO §11.5: set up GMainLoop + stdio MCP transport and run; tool handlers
+   * (§11.6) drive mk_kodi_call() from here. */
+  (void) kodi;
   return 0;
 }
