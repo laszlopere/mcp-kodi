@@ -1,10 +1,10 @@
 bin_PROGRAMS = mcp-kodi
 
 mcp_kodi_SOURCES = \
-	main.c
+	main.c \
+	mk-config.c mk-config.h
 
 # Module sources are added here as they land (see ../TODO.md §6):
-#	mk-config.c mk-config.h \
 #	mk-stdio.c  mk-stdio.h \
 #	mk-mcp.c    mk-mcp.h \
 #	mk-kodi.c   mk-kodi.h \

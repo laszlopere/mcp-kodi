@@ -22,9 +22,9 @@ A separate GLib project of the author's already controls this same Kodi box. The
 *techniques* worth reusing — restated here as our own requirements, with no code
 carried over:
 
-  [ ] 1.1 **Stack:** GLib + GObject + GIO, built with **autotools**
+  [x] 1.1 **Stack:** GLib + GObject + GIO, built with **autotools**
   (`configure.ac` + `PKG_CHECK_MODULES`).
-  [ ] 1.2 **JSON:** `json-glib-1.0` for all parsing and serialisation
+  [x] 1.2 **JSON:** `json-glib-1.0` for all parsing and serialisation
   (`JsonParser`, `JsonBuilder`, `JsonNode`, `JsonObject`, `JsonGenerator`).
   [ ] 1.3 **HTTP:** `libsoup-3.0` as the HTTP client (`SoupSession`,
   `SoupMessage`, `soup_session_send_and_read`).
@@ -32,7 +32,7 @@ carried over:
   reverse proxy in front of Kodi. The proxy uses `tls internal` (a self-signed
   cert), so the client must **accept the untrusted certificate** explicitly
   (equivalent to curl `-k`).
-  [ ] 1.5 **Config from a file + environment, never hardcoded:** read the Kodi
+  [x] 1.5 **Config from a file + environment, never hardcoded:** read the Kodi
   host, HTTP Basic credentials, scheme, and a self-signed-cert flag from
   configuration rather than baking them in. This project uses its own JSON file
   (not the borrowed CLI's shell config) — see [§7](#7-configuration-file) for the
@@ -187,11 +187,11 @@ Everything below this section is original design for *this* project.
 
 ## 7. Configuration file
 
-  [ ] 7.1 **Location:** `${XDG_CONFIG_HOME:-~/.config}/mcp-kodi/config.json` — the
+  [x] 7.1 **Location:** `${XDG_CONFIG_HOME:-~/.config}/mcp-kodi/config.json` — the
   server's own file. No `cli`/shell config in this project; JSON so it round-trips
   through the json-glib we already use and stays symmetric with the state file
   ([§8](#8-playback-state-file)).
-  [ ] 7.2 **Multiple instances:** the server can drive several Kodi boxes (e.g.
+  [x] 7.2 **Multiple instances:** the server can drive several Kodi boxes (e.g.
   `hall`, `bedroom`, `kids`). Config holds a map of named instances and names one
   `default`. Shape (draft):
   ```json
@@ -209,20 +209,20 @@ Everything below this section is original design for *this* project.
   cert — the JSON equivalent of curl `-k`. Instance names are free-form user
   labels; tools reference them, and `default` is used when a tool omits
   `instance`.)
-  [ ] 7.3 **Load:** on startup read the file if present. Environment overrides
+  [x] 7.3 **Load:** on startup read the file if present. Environment overrides
   apply to the `default` instance only — `KODI_HOST`/`KODI_AUTH`/`KODI_SCHEME`
   (and `-k` in `KODI_CURL_OPTS` → `insecure`) — so a single-box user can run with
   no config file at all (env defines one implicit `default` instance). No file and
   no env → a clear error telling the user to configure. Never hardcode host or
   credentials.
-  [ ] 7.4 **Save:** write the effective config back atomically — temp file in the
+  [x] 7.4 **Save:** write the effective config back atomically — temp file in the
   same dir, `fsync`, then `rename()` over the target (same discipline as the state
   file, §8.4). Create the directory `0700` and the file `0600`; it holds
   passwords.
   [ ] 7.5 **Save trigger (TBD):** the save primitive lives in `mk-config`
   regardless of caller; the entry point (a first-run/setup path, a `--save` flag,
   or a future `configure` tool) is to be decided.
-  [ ] 7.6 **Back-compat:** a `version: 1` flat file (single `host`/`auth`/… at the
+  [x] 7.6 **Back-compat:** a `version: 1` flat file (single `host`/`auth`/… at the
   top level) is read as one instance named `default`; on next save it is rewritten
   in the `version: 2` instances shape.
 
@@ -305,7 +305,7 @@ Everything below this section is original design for *this* project.
   [x] 11.1 Spec (this file)
   [x] 11.2 Autotools scaffold (configure.ac, Makefile.am, autogen.sh, src
   skeleton)
-  [ ] 11.3 Config load + save, multi-instance (`mk-config`)
+  [x] 11.3 Config load + save, multi-instance (`mk-config`)
   [ ] 11.4 Kodi JSON-RPC client, per-instance (`mk-kodi`)
   [ ] 11.5 MCP stdio transport + dispatch (`mk-stdio`, `mk-mcp`)
   [ ] 11.6 Tool table + handlers, incl. `instance` arg, `seek`, `handoff` (`mk-tools`)
