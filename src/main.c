@@ -2,8 +2,9 @@
  *
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
- * Entry point. Loads configuration; the MCP stdio loop, Kodi client, and tool
- * table are built out in subsequent steps (see ../TODO.md §11).
+ * Entry point. Loads configuration, builds the Kodi client, tool table, and MCP
+ * dispatcher, then runs the stdio transport until stdin EOF (see ../TODO.md
+ * §11).
  */
 
 #include "config.h"
@@ -12,7 +13,25 @@
 
 #include "mk-config.h"
 #include "mk-kodi.h"
+#include "mk-mcp.h"
+#include "mk-stdio.h"
 #include "mk-tools.h"
+
+/**
+ * dispatch_trampoline:
+ * @message: one parsed JSON-RPC message; borrowed.
+ * @user_data: the MkMcp dispatcher.
+ *
+ * Adapts mk_mcp_dispatch() to the MkStdioDispatch callback signature, so the
+ * transport can route each message into the MCP method dispatch (§3.3).
+ *
+ * @return the response envelope to send, or NULL for notifications.
+ */
+static JsonNode *
+dispatch_trampoline (JsonNode *message, gpointer user_data)
+{
+  return mk_mcp_dispatch (user_data, message);
+}
 
 int
 main (int argc, char **argv)
@@ -38,7 +57,11 @@ main (int argc, char **argv)
   g_printerr ("%s %s — %u tool(s) registered\n", PACKAGE_NAME, PACKAGE_VERSION,
               mk_tools_count (tools));
 
-  /* TODO §11.5: set up GMainLoop + stdio MCP transport and run; mk-mcp routes
-   * tools/list and tools/call into mk_tools_list()/mk_tools_call() from here. */
+  g_autoptr (MkMcp) mcp = mk_mcp_new (tools);
+  g_autoptr (MkStdio) stdio = mk_stdio_new (dispatch_trampoline, mcp);
+
+  g_printerr ("%s %s — listening on stdio\n", PACKAGE_NAME, PACKAGE_VERSION);
+  mk_stdio_run (stdio);
+
   return 0;
 }

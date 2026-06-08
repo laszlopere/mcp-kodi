@@ -314,7 +314,7 @@ Everything below this section is original design for *this* project.
   skeleton)
   [x] 11.3 Config load + save, multi-instance (`mk-config`)
   [x] 11.4 Kodi JSON-RPC client, per-instance (`mk-kodi`)
-  [ ] 11.5 MCP stdio transport + dispatch (`mk-stdio`, `mk-mcp`)
+  [x] 11.5 MCP stdio transport + dispatch (`mk-stdio`, `mk-mcp`)
   [ ] 11.6 Tool table + handlers (`mk-tools`)
     [x] 11.6.0 Table scaffold: per-tool `inputSchema`, `tools/list` output,
     `tools/call` name → handler dispatch, shared `instance` arg resolution
