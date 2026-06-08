@@ -286,6 +286,17 @@ Everything below this section is original design for *this* project.
   itself; or a lightweight external timer keyed to remaining runtime. The
   per-instance `shows` history in state (§8) already records the last episode
   watched, which seeds "what plays next". Design TBD.
+  [ ] 10.2 **Watched / resume awareness:** remember what has been watched and how
+  far. Kodi already tracks most of this in its own video library — per item
+  `playcount` (watched vs unwatched), `lastplayed`, and a `resume` object
+  (`position`/`total` seconds), all readable via `VideoLibrary.Get*Details` /
+  `GetEpisodes`. So the server should *read Kodi's native watched/resume data*
+  rather than duplicate it in our state file (§8); our state stays for
+  cross-instance intent (handoff, "what next"). The harder piece is the Kodi
+  **GUI navigation memory** — the UI remembers the last show → season → episode
+  you browsed to (enter/enter/enter lands on it), which isn't the same as library
+  watched-state and isn't cleanly exposed over JSON-RPC; reproducing "take me back
+  to where I was in the menus" needs its own approach. Design TBD.
 
 ---
 
