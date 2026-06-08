@@ -99,6 +99,10 @@ Everything below this section is original design for *this* project.
   [ ] 4.5 Parse the response; surface Kodi's `error` member as a tool error.
   Return the `result` member (or a small shaped summary) as the tool's JSON text.
 
+  > **Server-side setup:** how to enable Kodi's JSON-RPC web server and front it
+  > with the Caddy HTTPS reverse proxy is documented for end users in
+  > [docs/kodi-server-setup.md](docs/kodi-server-setup.md).
+
 ---
 
 ## 5. Tool surface
