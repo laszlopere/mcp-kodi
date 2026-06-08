@@ -12,6 +12,7 @@
 
 #include "mk-config.h"
 #include "mk-kodi.h"
+#include "mk-tools.h"
 
 int
 main (int argc, char **argv)
@@ -32,9 +33,12 @@ main (int argc, char **argv)
               mk_config_instance_count (cfg), mk_config_get_default (cfg));
 
   g_autoptr (MkKodi) kodi = mk_kodi_new (cfg);
+  g_autoptr (MkTools) tools = mk_tools_new (cfg, kodi);
 
-  /* TODO §11.5: set up GMainLoop + stdio MCP transport and run; tool handlers
-   * (§11.6) drive mk_kodi_call() from here. */
-  (void) kodi;
+  g_printerr ("%s %s — %u tool(s) registered\n", PACKAGE_NAME, PACKAGE_VERSION,
+              mk_tools_count (tools));
+
+  /* TODO §11.5: set up GMainLoop + stdio MCP transport and run; mk-mcp routes
+   * tools/list and tools/call into mk_tools_list()/mk_tools_call() from here. */
   return 0;
 }

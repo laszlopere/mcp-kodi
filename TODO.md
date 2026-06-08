@@ -308,6 +308,26 @@ Everything below this section is original design for *this* project.
   [x] 11.3 Config load + save, multi-instance (`mk-config`)
   [x] 11.4 Kodi JSON-RPC client, per-instance (`mk-kodi`)
   [ ] 11.5 MCP stdio transport + dispatch (`mk-stdio`, `mk-mcp`)
-  [ ] 11.6 Tool table + handlers, incl. `instance` arg, `seek`, `handoff` (`mk-tools`)
+  [ ] 11.6 Tool table + handlers (`mk-tools`)
+    [x] 11.6.0 Table scaffold: per-tool `inputSchema`, `tools/list` output,
+    `tools/call` name → handler dispatch, shared `instance` arg resolution
+    (use `default` when omitted), tool-error JSON shaping (§3.4, §5.1)
+    [ ] 11.6.1 `instances` — list configured names + which is `default`
+    [ ] 11.6.2 `ping`
+    [ ] 11.6.3 `info`
+    [ ] 11.6.4 `notify`
+    [ ] 11.6.5 `players`
+    [ ] 11.6.6 `playpause`
+    [ ] 11.6.7 `stop`
+    [ ] 11.6.8 `play`
+    [ ] 11.6.9 `seek` (`time` h/m/s **or** `percentage`)
+    [ ] 11.6.10 `handoff` (capture → guard target → stop → open → seek; §5.5–5.6)
+    [ ] 11.6.11 `search`
+    [ ] 11.6.12 `random`
+    [ ] 11.6.13 `episodes`
+    [ ] 11.6.14 `status` (incl. `instance: "*"` fan-out; §5.4)
+    [ ] 11.6.15 `volume`
+    [ ] 11.6.16 `mute`
+    [ ] 11.6.17 `rpc` (passthrough escape hatch)
   [ ] 11.7 Playback state file, per-instance (`mk-state`)
   [ ] 11.8 Build clean, test against live Kodi, write README
