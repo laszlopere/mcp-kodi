@@ -323,7 +323,7 @@ Everything below this section is original design for *this* project.
     [ ] 11.6.2 `ping`
     [x] 11.6.3 `info`
     [ ] 11.6.4 `notify`
-    [ ] 11.6.5 `players`
+    [x] 11.6.5 `players`
     [ ] 11.6.6 `playpause`
     [ ] 11.6.7 `stop`
     [ ] 11.6.8 `play`

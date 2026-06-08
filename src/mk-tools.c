@@ -564,6 +564,25 @@ handler_info (MkTools *self, JsonObject *args, GError **error)
                        "Application.GetProperties", params, error);
 }
 
+/**
+ * handler_players:
+ * @self: the tool table.
+ * @args: the call arguments (optional `instance`), or NULL.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements `players` (§5.2, §11.6.5): lists the active players on the target
+ * instance via `Player.GetActivePlayers` (which takes no params) and returns
+ * Kodi's `result` array verbatim.
+ *
+ * @return the active-players array, or NULL with @error set.
+ */
+static JsonNode *
+handler_players (MkTools *self, JsonObject *args, GError **error)
+{
+  return mk_kodi_call (self->kodi, arg_instance (args),
+                       "Player.GetActivePlayers", NULL, error);
+}
+
 /* ---- The tool table -------------------------------------------------------
  *
  * Names and arguments mirror §5.2. Handlers are NULL until implemented
@@ -579,7 +598,7 @@ static const MkToolDef mk_tool_defs[] = {
   { "notify", "Show a popup notification on a Kodi screen.",
     schema_notify, NULL },
   { "players", "List the active players on a Kodi instance.",
-    schema_instance_only, NULL },
+    schema_instance_only, handler_players },
   { "playpause", "Toggle play/pause on the active player.",
     schema_instance_only, NULL },
   { "stop", "Stop the active player.", schema_instance_only, NULL },
