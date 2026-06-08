@@ -270,14 +270,33 @@ Everything below this section is original design for *this* project.
 
 ---
 
-## 10. Status / next steps
+## 10. Future goals (not yet designed)
 
-  [x] 10.1 Spec (this file)
-  [x] 10.2 Autotools scaffold (configure.ac, Makefile.am, autogen.sh, src
+  Parked ideas — recorded so the design stays compatible with them, not committed
+  work.
+
+  [ ] 10.1 **Auto-continue / next-episode playback:** start a TV episode and, when
+  it finishes, automatically play the next episode of the show — binge a season
+  hands-off. The hard part is *noticing* the episode ended **without** a
+  long-lived monitoring loop: this server is built on stateless, self-contained
+  `tools/call`s (§2), so we explicitly do not want a persistent background session
+  polling the player. Approaches to weigh later: subscribe to Kodi's own
+  `Player.OnStop` / `Player.OnAVEnd` push notifications over the WebSocket channel
+  (push, not poll); or build a transient Kodi-side playlist/queue so Kodi advances
+  itself; or a lightweight external timer keyed to remaining runtime. The
+  per-instance `shows` history in state (§8) already records the last episode
+  watched, which seeds "what plays next". Design TBD.
+
+---
+
+## 11. Status / next steps
+
+  [x] 11.1 Spec (this file)
+  [x] 11.2 Autotools scaffold (configure.ac, Makefile.am, autogen.sh, src
   skeleton)
-  [ ] 10.3 Config load + save, multi-instance (`mk-config`)
-  [ ] 10.4 Kodi JSON-RPC client, per-instance (`mk-kodi`)
-  [ ] 10.5 MCP stdio transport + dispatch (`mk-stdio`, `mk-mcp`)
-  [ ] 10.6 Tool table + handlers, incl. `instance` arg, `seek`, `handoff` (`mk-tools`)
-  [ ] 10.7 Playback state file, per-instance (`mk-state`)
-  [ ] 10.8 Build clean, test against live Kodi, write README
+  [ ] 11.3 Config load + save, multi-instance (`mk-config`)
+  [ ] 11.4 Kodi JSON-RPC client, per-instance (`mk-kodi`)
+  [ ] 11.5 MCP stdio transport + dispatch (`mk-stdio`, `mk-mcp`)
+  [ ] 11.6 Tool table + handlers, incl. `instance` arg, `seek`, `handoff` (`mk-tools`)
+  [ ] 11.7 Playback state file, per-instance (`mk-state`)
+  [ ] 11.8 Build clean, test against live Kodi, write README
