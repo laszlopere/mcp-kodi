@@ -32,10 +32,11 @@ carried over:
   reverse proxy in front of Kodi. The proxy uses `tls internal` (a self-signed
   cert), so the client must **accept the untrusted certificate** explicitly
   (equivalent to curl `-k`).
-  [ ] 1.5 **Config location:** `~/.config/kodi/cli.conf`, a shell-style
-  `KEY=value` file with `KODI_HOST`, `KODI_AUTH` (`user:pass` for HTTP Basic),
-  `KODI_SCHEME` (`https`), and `KODI_CURL_OPTS` (where `-k` signals
-  "accept self-signed cert"). Never hardcode host or credentials.
+  [ ] 1.5 **Config from a file + environment, never hardcoded:** read the Kodi
+  host, HTTP Basic credentials, scheme, and a self-signed-cert flag from
+  configuration rather than baking them in. This project uses its own JSON file
+  (not the borrowed CLI's shell config) — see [§7](#7-configuration-file) for the
+  format and location.
 
 Everything below this section is original design for *this* project.
 
@@ -145,7 +146,7 @@ Everything below this section is original design for *this* project.
   └── src/
       ├── Makefile.am       builds the mcp-kodi binary
       ├── main.c            entry: load config, set up GMainLoop + stdio, run
-      ├── mk-config.{c,h}   read ~/.config/kodi/cli.conf + env overrides
+      ├── mk-config.{c,h}   load/save ~/.config/mcp-kodi/config.json + env
       ├── mk-stdio.{c,h}    newline-delimited JSON-RPC read/write over stdin/out
       ├── mk-mcp.{c,h}      MCP method dispatch (initialize/list/call/ping)
       ├── mk-kodi.{c,h}     Kodi JSON-RPC client over libsoup
@@ -155,13 +156,45 @@ Everything below this section is original design for *this* project.
 
 ---
 
-## 7. Playback state file
+## 7. Configuration file
 
-  [ ] 7.1 **Purpose:** remember, across stateless calls, *what we started to
+  [ ] 7.1 **Location:** `${XDG_CONFIG_HOME:-~/.config}/mcp-kodi/config.json` — the
+  server's own file. No `cli`/shell config in this project; JSON so it round-trips
+  through the json-glib we already use and stays symmetric with the state file
+  ([§8](#8-playback-state-file)).
+  [ ] 7.2 **Shape (draft):**
+  ```json
+  {
+    "version": 1,
+    "host": "kodi.example.local:8443",
+    "auth": "kodi:<password>",
+    "scheme": "https",
+    "insecure": true
+  }
+  ```
+  (`auth` is `user:pass` for HTTP Basic; `insecure: true` accepts the self-signed
+  cert — the JSON equivalent of curl `-k`.)
+  [ ] 7.3 **Load:** on startup read the file if present, then overlay environment
+  overrides (`KODI_HOST`, `KODI_AUTH`, `KODI_SCHEME`; `-k` in `KODI_CURL_OPTS`
+  sets `insecure`). No file and no env → a clear error telling the user to
+  configure. Never hardcode host or credentials.
+  [ ] 7.4 **Save:** write the effective config back atomically — temp file in the
+  same dir, `fsync`, then `rename()` over the target (same discipline as the state
+  file, §8.4). Create the directory `0700` and the file `0600`; it holds a
+  password.
+  [ ] 7.5 **Save trigger (TBD):** the save primitive lives in `mk-config`
+  regardless of caller; the entry point (a first-run/setup path, a `--save` flag,
+  or a future `configure` tool) is to be decided.
+
+---
+
+## 8. Playback state file
+
+  [ ] 8.1 **Purpose:** remember, across stateless calls, *what we started to
   play* and *the last episode watched per TV show*, so the AI can resume /
   continue.
-  [ ] 7.2 **Location:** `${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/state.json`.
-  [ ] 7.3 **Shape (draft):**
+  [ ] 8.2 **Location:** `${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/state.json`.
+  [ ] 8.3 **Shape (draft):**
   ```json
   {
     "version": 1,
@@ -169,33 +202,33 @@ Everything below this section is original design for *this* project.
     "shows": { "<tvshowid>": { "last_episode_id": 5678, "season": 3, "episode": 7, "at": "<iso8601>" } }
   }
   ```
-  [ ] 7.4 **Writes:** on `play`/`random` (record `last_played`; if it's an
+  [ ] 8.4 **Writes:** on `play`/`random` (record `last_played`; if it's an
   episode, update that show's `shows` entry). Atomic: write a temp file in the
   same dir, `fsync`, then `rename()` over the target.
-  [ ] 7.5 **Reads:** available to handlers that want "what next" context; may
+  [ ] 8.5 **Reads:** available to handlers that want "what next" context; may
   later back a `resume` / `next_episode` tool. Keep the file optional — absence =
   empty state.
 
 ---
 
-## 8. Build/runtime requirements
+## 9. Build/runtime requirements
 
-  [ ] 8.1 Deps (all present on the dev box): `glib-2.0 >= 2.80`, `gobject-2.0`,
+  [ ] 9.1 Deps (all present on the dev box): `glib-2.0 >= 2.80`, `gobject-2.0`,
   `gio-2.0`, `json-glib-1.0 >= 1.8`, `libsoup-3.0 >= 3.4`.
-  [ ] 8.2 Toolchain: gcc 13, autotools, `pkg-config`.
-  [ ] 8.3 Warnings-as-errors during dev (`-Wall -Wextra`); check LSP diagnostics
+  [ ] 9.2 Toolchain: gcc 13, autotools, `pkg-config`.
+  [ ] 9.3 Warnings-as-errors during dev (`-Wall -Wextra`); check LSP diagnostics
   after each edit.
 
 ---
 
-## 9. Status / next steps
+## 10. Status / next steps
 
-  [x] 9.1 Spec (this file)
-  [x] 9.2 Autotools scaffold (configure.ac, Makefile.am, autogen.sh, src
+  [x] 10.1 Spec (this file)
+  [x] 10.2 Autotools scaffold (configure.ac, Makefile.am, autogen.sh, src
   skeleton)
-  [ ] 9.3 Config loader (`mk-config`)
-  [ ] 9.4 Kodi JSON-RPC client (`mk-kodi`)
-  [ ] 9.5 MCP stdio transport + dispatch (`mk-stdio`, `mk-mcp`)
-  [ ] 9.6 Tool table + handlers (`mk-tools`)
-  [ ] 9.7 Playback state file (`mk-state`)
-  [ ] 9.8 Build clean, test against live Kodi, write README
+  [ ] 10.3 Config load + save (`mk-config`)
+  [ ] 10.4 Kodi JSON-RPC client (`mk-kodi`)
+  [ ] 10.5 MCP stdio transport + dispatch (`mk-stdio`, `mk-mcp`)
+  [ ] 10.6 Tool table + handlers (`mk-tools`)
+  [ ] 10.7 Playback state file (`mk-state`)
+  [ ] 10.8 Build clean, test against live Kodi, write README
