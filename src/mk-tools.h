@@ -51,7 +51,9 @@ JsonNode *mk_tools_list (MkTools *self);
  * (may be NULL). On a known tool — whether it succeeds or fails — returns the
  * result object `{ "content": [ { "type": "text", "text": "<json>" } ],
  * "isError": <bool> }`: a handler failure is shaped as an `isError` result with
- * the detail as JSON text (§3.4), never a NULL/error return. Returns NULL with
+ * the detail as JSON text (§3.4) — `{ "error": "<message>" }`, and for a
+ * server↔player communication failure also `"category"` + a setup `"hint"` —
+ * never a NULL/error return. Returns NULL with
  * @error set to MK_TOOLS_ERROR_UNKNOWN_TOOL only when @name is not in the table,
  * so the caller can map that to a protocol-level error. Free the result with
  * json_node_unref(). */

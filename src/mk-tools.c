@@ -454,21 +454,99 @@ node_to_string (JsonNode *node)
 }
 
 /**
- * error_text:
- * @message: the failure detail.
+ * kodi_comms_hint:
+ * @error: the GError a handler failed with, or NULL.
+ * @category: out; set to a short category token on a communication failure.
+ * @hint: out; set to a remedy hint the AI can relay to the user.
  *
- * Shapes a tool failure as JSON text `{ "error": "<message>" }` so results stay
- * machine-readable rather than prose (§2.2), with @message correctly escaped.
+ * Classifies @error for inline troubleshooting (Option A). A *communication*
+ * failure — the MCP server and the Kodi player could not talk (instance not
+ * configured, unreachable, HTTP-rejected, or a non-JSON-RPC reply) — yields a
+ * category token and a specific setup/connectivity remedy, so the AI on the
+ * other end can help the user fix their system. A Kodi `RPC` error (the player
+ * understood the request and refused it) and any non-Kodi error are *not*
+ * communication failures: they carry no setup hint, since the wiring is fine.
+ *
+ * @return TRUE and sets @category/@hint (both static strings) for a
+ *         communication failure; FALSE otherwise (leaving the outputs unset).
+ */
+static gboolean
+kodi_comms_hint (const GError *error, const char **category, const char **hint)
+{
+  if (error == NULL || error->domain != MK_KODI_ERROR)
+    return FALSE;
+
+  switch (error->code)
+    {
+    case MK_KODI_ERROR_NO_INSTANCE:
+      *category = "no_instance";
+      *hint = "The target Kodi instance is not defined in the MCP server "
+              "configuration, or has no host. Check that the server config "
+              "names this instance and gives it a host (§7).";
+      return TRUE;
+    case MK_KODI_ERROR_TRANSPORT:
+      *category = "transport";
+      *hint = "Could not reach Kodi. Check that Kodi is running and that the "
+              "configured host/port is correct and reachable — DNS, firewall, "
+              "and any reverse proxy in front of Kodi all need to be up.";
+      return TRUE;
+    case MK_KODI_ERROR_HTTP:
+      *category = "http";
+      *hint = "Kodi answered but rejected the request at the HTTP layer. For "
+              "401/403, check the username/password and that Kodi's Settings > "
+              "Services > Control > 'Allow remote control via HTTP' is enabled "
+              "with authentication. Other statuses usually mean a wrong path or "
+              "port, or a misconfigured reverse proxy.";
+      return TRUE;
+    case MK_KODI_ERROR_PROTOCOL:
+      *category = "protocol";
+      *hint = "Got a response, but it was not a valid Kodi JSON-RPC reply — "
+              "something other than Kodi may be answering at that address. "
+              "Check the host/port and that any reverse proxy routes to Kodi's "
+              "/jsonrpc endpoint rather than to a web page.";
+      return TRUE;
+    case MK_KODI_ERROR_RPC:
+    default:
+      return FALSE; /* Kodi refused a well-formed request: not a setup problem. */
+    }
+}
+
+/**
+ * error_text:
+ * @message: the failure detail; always emitted as "error".
+ * @category: a communication-failure category token, or NULL.
+ * @hint: a remedy hint paired with @category, or NULL.
+ *
+ * Shapes a tool failure as machine-readable JSON text (§2.2), the single source
+ * of truth for what a tool error looks like. Two shapes:
+ *
+ *   - Generic (RPC error, bad args, not-implemented; @category NULL):
+ *       `{ "error": "<message>" }`
+ *   - Communication failure (@category non-NULL; see kodi_comms_hint()):
+ *       `{ "error": "<message>", "category": "<token>", "hint": "<remedy>" }`
+ *     so the AI can recognise a server↔player connectivity problem and walk the
+ *     user through Kodi/MCP setup (Option A).
+ *
+ * This text becomes the `isError: true` content block in the `tools/call`
+ * result (make_result()); it is never a protocol-level error (§3.4). @message
+ * (and @hint) are escaped by the JSON builder.
  *
  * @return a newly allocated JSON string; free with g_free().
  */
 static char *
-error_text (const char *message)
+error_text (const char *message, const char *category, const char *hint)
 {
   g_autoptr (JsonBuilder) b = json_builder_new ();
   json_builder_begin_object (b);
   json_builder_set_member_name (b, "error");
   json_builder_add_string_value (b, message);
+  if (category != NULL)
+    {
+      json_builder_set_member_name (b, "category");
+      json_builder_add_string_value (b, category);
+      json_builder_set_member_name (b, "hint");
+      json_builder_add_string_value (b, hint);
+    }
   json_builder_end_object (b);
   g_autoptr (JsonNode) node = json_builder_get_root (b);
   return node_to_string (node);
@@ -601,8 +679,11 @@ mk_tools_list (MkTools *self)
  * Dispatches a `tools/call` (§3.3.5). For a known tool, returns the result
  * envelope: on success the handler's JSON as text with `isError: false`; on a
  * handler failure (or a not-yet-implemented tool) the detail as JSON text with
- * `isError: true` (§3.4). Only an unknown @name returns NULL, with @error set
- * to MK_TOOLS_ERROR_UNKNOWN_TOOL so the caller can raise a protocol error.
+ * `isError: true` (§3.4) — see error_text() for the shape. A server↔player
+ * communication failure additionally carries a `category` and a setup `hint`
+ * (kodi_comms_hint()) so the AI can help the user fix connectivity. Only an
+ * unknown @name returns NULL, with @error set to MK_TOOLS_ERROR_UNKNOWN_TOOL so
+ * the caller can raise a protocol error.
  *
  * @return the result node (free with json_node_unref()), or NULL with @error
  *         set for an unknown tool.
@@ -628,7 +709,7 @@ mk_tools_call (MkTools     *self,
     {
       g_autofree char *msg =
         g_strdup_printf ("tool \"%s\" is not implemented yet", name);
-      g_autofree char *text = error_text (msg);
+      g_autofree char *text = error_text (msg, NULL, NULL);
       return make_result (text, TRUE);
     }
 
@@ -636,8 +717,10 @@ mk_tools_call (MkTools     *self,
   g_autoptr (JsonNode) result = def->handler (self, def, arguments, &local);
   if (result == NULL)
     {
+      const char *category = NULL, *hint = NULL;
+      kodi_comms_hint (local, &category, &hint);
       g_autofree char *text =
-        error_text (local ? local->message : "tool failed");
+        error_text (local ? local->message : "tool failed", category, hint);
       g_clear_error (&local);
       return make_result (text, TRUE);
     }
