@@ -1177,12 +1177,12 @@ Everything below this section is original design for *this* project.
     leave it to a later `*Details` lookup keyed off the stored `id` if ever
     needed. Same wait-for-real-data discipline as point 7 of the brief.
 
-  [ ] 13.5 **When to append — dedup, don't flood.** Appending on every snapshot
+  [x] 13.5 **When to append — dedup, don't flood.** Appending on every snapshot
   would bury the log: every pause, `volume`, `seek`, `noop` re-observes the same
   item. So:
-    [ ] 13.5.1 Record only when the snapshot shows something **loaded** —
+    [x] 13.5.1 Record only when the snapshot shows something **loaded** —
     `state != "stopped"`; a stopped snapshot appends nothing.
-    [ ] 13.5.2 Record only when it is a **new item** — compare against the most
+    [x] 13.5.2 Record only when it is a **new item** — compare against the most
     recent entry *for that instance*; same `file` (or id) ⇒ skip (same thing,
     just re-observed); a different `file` ⇒ append.
     This yields one entry per distinct thing played per instance — the "first
