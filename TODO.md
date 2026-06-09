@@ -52,7 +52,8 @@ Everything below this section is original design for *this* project.
   compact, machine-readable text (JSON) the AI can reason over.
   [ ] 2.3 **Mirror the proven operation set** (ping, info, notify, transport
   controls, play-by-id, library search, random, episode listing, status,
-  volume, mute) plus a generic `rpc` escape hatch for anything not modelled.
+  volume, mute) plus a generic `rpc` escape hatch for anything not modelled
+  (opt-in per instance, off by default — §7.7, §11.6.6).
   [ ] 2.4 **No CLI.** The only interface is MCP over stdio.
 
 ---
@@ -151,7 +152,7 @@ Everything below this section is original design for *this* project.
   | `power`     | `instance?`, `action` (shutdown/reboot/suspend/hibernate/quit/ejectoptical) | `System.*` / `Application.Quit` |
   | `playfile`  | `instance?`, `file`                    | `Player.Open` with a `{file}` item (§12.10.9) — plays the `file` from a `search` result; works for any path, in-library or not |
   | `files`     | `instance?`, `path?` (a source/dir; omitted → sources) | `Files.GetSources` / `Files.GetDirectory` |
-  | `rpc`       | `instance?`, `method`, `params?` (object) | passthrough — any JSON-RPC method |
+  | `rpc`       | `instance?`, `method`, `params?` (object) | passthrough — any JSON-RPC method; returns Kodi's **raw** `result` unshaped. Opt-in per instance (`allow_rpc`, §7.7) — off by default, refuses otherwise |
 
   [ ] 5.3 `random` and `search` resolve library ids internally (e.g. a show name
   → `tvshowid` → episodes) so the AI can act by name, not just numeric id.
@@ -313,7 +314,7 @@ Everything below this section is original design for *this* project.
     "version": 2,
     "default": "hall",
     "instances": {
-      "hall":    { "name": "Living Room TV", "host": "hall.example.local:8443",    "auth": "kodi:<password>", "scheme": "https", "insecure": true },
+      "hall":    { "name": "Living Room TV", "host": "hall.example.local:8443",    "auth": "kodi:<password>", "scheme": "https", "insecure": true, "allow_rpc": true },
       "bedroom": { "name": "Bedroom",        "host": "bedroom.example.local:8443", "auth": "kodi:<password>", "scheme": "https", "insecure": true },
       "kids":    { "name": "Kids' Room",     "host": "kids.example.local:8443",    "auth": "kodi:<password>", "scheme": "https", "insecure": true }
     }
@@ -324,7 +325,9 @@ Everything below this section is original design for *this* project.
   …) is the short identifier tools reference, and `default` is used when a tool
   omits `instance`. The optional `name` is a free-form human-readable display
   label — surfaced in the tool schema so the assistant can refer to a box by its
-  friendly name — and is omitted from the file when unset.)
+  friendly name — and is omitted from the file when unset. The optional
+  `allow_rpc: true` opts that instance into the generic `rpc` escape hatch
+  (§7.7); absent/false → that box rejects `rpc`.)
   [x] 7.3 **Load:** on startup read the file if present. Environment overrides
   apply to the `default` instance only — `KODI_HOST`/`KODI_AUTH`/`KODI_SCHEME`
   (and `-k` in `KODI_CURL_OPTS` → `insecure`) — so a single-box user can run with
@@ -341,6 +344,17 @@ Everything below this section is original design for *this* project.
   [x] 7.6 **Back-compat:** a `version: 1` flat file (single `host`/`auth`/… at the
   top level) is read as one instance named `default`; on next save it is rewritten
   in the `version: 2` instances shape.
+  [x] 7.7 **`rpc` escape hatch is opt-in, per instance.** The generic `rpc`
+  passthrough (§5.2, §11.6.6) can invoke *any* JSON-RPC method on a box —
+  unconstrained and powerful — so it is **disabled by default**. An instance
+  permits it only when its config object carries `"allow_rpc": true`; absent or
+  `false` → the `rpc` tool refuses for that instance with a clean tool error
+  (§3.4). The flag is granted **only by hand-editing `config.json`**, separately
+  for **each** instance — it is intentionally *not* among the fields the
+  `instances` tool can write (§11.6.3.2), so the assistant can never enable its
+  own escape hatch; opting a box in is an explicit, out-of-band human decision.
+  `instances` `get` surfaces it read-only (an `allow_rpc` boolean per instance)
+  so the caller can see where it is permitted without being able to change it.
 
 ---
 
@@ -459,15 +473,18 @@ Everything below this section is original design for *this* project.
     instance list so the caller sees the new state; credentials are **never**
     returned (`auth` is reported only as a boolean `has_auth`).
       [x] 11.6.3.1 get — `{"action":"get"}`. List configured instances, each as
-        `{ key, name?, host, scheme, insecure, has_auth }`, plus which `key` is
-        `default`. No password ever leaves the server.
+        `{ key, name?, host, scheme, insecure, has_auth, allow_rpc }`, plus which
+        `key` is `default`. `allow_rpc` is reported read-only (§7.7). No password
+        ever leaves the server.
         (`mk_config_instance_names` + `mk_config_get_instance` +
         `mk_config_get_default`.)
       [x] 11.6.3.2 set — `{"action":"set","key":…, "name"?,"host"?,"auth"?,`
         `"scheme"?,"insecure"?,"default"?}`. Upsert one instance by `key`:
         provided fields override, omitted fields keep the existing value (or take
         defaults for a new instance), then persist atomically (§7.4). `default:true`
-        makes it the default. (`mk_config_get_instance` to merge →
+        makes it the default. `allow_rpc` is deliberately **not** writable here —
+        the escape-hatch gate is hand-edit-only (§7.7), so this action neither
+        accepts nor clears it. (`mk_config_get_instance` to merge →
         `mk_config_set_instance` → `mk_config_set_default` → `mk_config_save`.)
       [x] 11.6.3.3 remove — `{"action":"remove","key":…}`. Delete the named
         instance and save. Refuse with a clean tool error if `key` is the current
@@ -496,6 +513,17 @@ Everything below this section is original design for *this* project.
     plays any path (in-library or not), auto-selects the audio/video player,
     library-enriches the now-playing item; returns the player_state() snapshot.
     Plays one file (caller picks from a multi-leaf `search` result).
+    [x] 11.6.6 rpc — escape hatch. `{instance?, method, params?}`. Build the
+    JSON-RPC envelope (§4.1) and POST it to the resolved instance (§4.2), then
+    return Kodi's **raw `result` verbatim** — no shaping or summarising, unlike
+    every other tool (the §2.3 generic hatch for methods §5/§11.6 don't model;
+    `params` defaults to `{}` when omitted). A Kodi `error` member surfaces as a
+    tool error (§3.4/§4.5), not a protocol error. **Gated per instance:** refuses
+    unless that instance's config sets `allow_rpc: true` (§7.7) — off by default,
+    enabled only by hand-editing `config.json`, never by the `instances` tool, so
+    the model cannot grant itself the hatch. An instance without the flag returns
+    a clean tool error naming the instance and the flag; the schema lists which
+    configured instances currently permit `rpc`.
   [ ] 11.7 Resources/prompts
   [ ] 11.8 Playback state file, per-instance (`mk-state`)
   [ ] 11.9 Build clean, test against live Kodi, write README
