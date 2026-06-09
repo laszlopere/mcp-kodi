@@ -70,10 +70,11 @@
  * a longer field list. Per media type an entry carries only the fields that
  * apply (a movie has neither show/episode nor album/artist); omit what's empty.
  *
- * This is the §13.1 foundation only: the module, its own storage path
- * (${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/history.json, §13.6), and
+ * The module owns its storage path
+ * (${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/history.json, §13.6) and
  * lifecycle. The write path — record/dedup/lock/trim (§13.5–§13.9) — and the
- * read tool (§13.10) land later.
+ * read path (mk_history_read, §13.10) both land here; the `history` tool that
+ * surfaces the read path to clients lives in mk-tools.c.
  */
 
 #ifndef MK_HISTORY_H
@@ -131,6 +132,31 @@ gboolean mk_history_record (MkHistory  *self,
                             const char *instance,
                             const char *name,
                             JsonNode   *snapshot);
+
+/* Read entries back from the log (§13.10.1) — the mirror of mk_history_record.
+ * @instance NULL returns every box's entries (the log is cross-instance, §13.1);
+ * a key restricts to that box. @since/@until are ISO-8601 bounds (NULL = open on
+ * that end); an `at` we can't parse is kept, not dropped (as the age-trim,
+ * §13.8.2). @limit ≤ 0 means no cap; otherwise at most @limit *newest* matches
+ * are returned (the file is newest-first, §13.6). @total, when non-NULL, is set
+ * to the number of entries matching @instance+window before the limit, so the
+ * caller can tell it truncated.
+ *
+ * Unlike the best-effort write path (§13.9.2) this reports failures: a malformed
+ * @since/@until, an unparseable or ill-shaped file, or an I/O error returns NULL
+ * with @error set. A missing file is not an error — it reads as zero entries.
+ * Runs under a shared flock on the sidecar lock (§13.7), so it never parses a
+ * file mid-rewrite.
+ *
+ * @return a newly allocated JSON array node of entries (newest-first), or NULL
+ *         with @error set; free with json_node_unref(). */
+JsonNode *mk_history_read (MkHistory  *self,
+                           const char *instance,
+                           const char *since,
+                           const char *until,
+                           gint64      limit,
+                           gint64     *total,
+                           GError    **error);
 
 G_END_DECLS
 

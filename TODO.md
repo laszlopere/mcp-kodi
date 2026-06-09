@@ -1243,13 +1243,59 @@ Everything below this section is original design for *this* project.
     didn't. Realized in `mk_history_record`: every failure path `g_warning`s and
     returns FALSE, it reports no GError, and a parse/shape error on the existing
     file aborts **without** clobbering it.
-    [ ] 13.9.3 `mk_history_read(...)` — the read path for the future tool
-    (§13.10); signature TBD.
 
-  [ ] 13.10 **Read tool — deferred (point 7).** A future `history` tool to read
-  the log back, likely with filters: `instance` (or `"*"`), a time window
-  (`since`/`until`, or "last 7 days"), `type`, and a `limit`. Exact args and
-  output shaping are deliberately left open until we have a real `history.json`
-  to inspect and can see what questions it must actually answer — the same
-  wait-for-real-data stance as §11.7 and §13.4.1. For now the server only
-  **writes** the log; nothing reads it programmatically yet.
+  [x] 13.10 **Read path + tool (point 7).** A `history` tool to read the log
+  back, plus the `mk_history_read(...)` primitive in `mk-history.{c,h}` it sits
+  on. Design ratified; kept deliberately small — the AI hands over a time window
+  and gets the matching entries, newest-first. Both landed; covered by
+  tests/history.test (no live Kodi needed — it reads only the local log).
+
+    [x] 13.10.1 **`mk_history_read(self, instance, since, until, limit, total,
+    error)`** — the read primitive, the mirror of `mk_history_record`.
+    `instance` NULL means *all* boxes; `since`/`until` are ISO-8601 bounds, NULL
+    = open on that end; `limit` ≤ 0 means *no cap* (return every match) — the
+    primitive is mechanism, the default-50 *policy* lives in the tool (§13.10.2).
+    `total` is an out-param set to the count matching instance+window **before**
+    the limit, so the tool can set `truncated`. Takes a **shared** `flock`
+    (`LOCK_SH`) on the same `.lock` sidecar (§13.7.1) so it never parses the file
+    mid-rewrite — a writer's `LOCK_EX` and our `LOCK_SH` exclude each other,
+    concurrent reads don't. Then: parse the array, walk it **newest-first** (the
+    file is already stored that way, §13.6) keeping entries whose `instance`
+    matches and whose `at` lies in `[since, until]`, stop once `limit` are kept —
+    so "limit" naturally yields the *most recent* N in the window. Reuses
+    `g_date_time_new_from_iso8601` for the bound comparison and mirrors the
+    trim's rule (§13.8.2): an `at` we can't parse is **kept**, not silently
+    dropped. Unlike the write path this is **not** best-effort — a read tool must
+    surface a parse/IO failure as a real GError (the §13.9.2 swallow-and-warn
+    stance exists so logging never fails a *playback* call; a read has no such
+    call to protect). A missing file is not an error: it reads as zero entries.
+    Returns the matched entries plus the total-in-window count, so the tool can
+    shape the envelope and set `truncated`.
+
+    [x] 13.10.2 **The `history` tool** (schema_history + handler_history + a
+    table row, built on the §11.6.4 `search` pattern). Arguments, all optional:
+      - `since` / `until` — ISO-8601 window bounds (e.g. `2026-06-01T00:00:00Z`).
+        Omit `since` for "from the beginning", `until` for "up to now". The
+        caller (an LLM that knows today's date) computes "last 7 days" itself; we
+        do **not** parse relative phrases (keeps the contract one type).
+      - `instance` — restrict to one box; **omitted returns every box's
+        entries.** This deliberately inverts the §5.1 convention (where an
+        omitted `instance` means the *default* box), because the log is
+        cross-instance by nature (§13.1) and "what did we play" rarely means "on
+        exactly the default box". The schema description must call this out so the
+        difference is explicit, not a surprise. No `"*"` sentinel — absence *is*
+        "all".
+      - `limit` — newest-in-window cap; omitted defaults to 50 (as `search`,
+        §11.6.4). The reply sets `truncated: true` when the window held more.
+    Output envelope, shaped like `search` so the AI gets context not a bare
+    array: `{ "since"?, "until"?, "instance"?, "total", "returned", "truncated",
+    "entries": [ <§13.4 record verbatim> ] }` — `total` is the count matching the
+    window before the limit, `returned` is `entries`'s length. A communication/IO
+    or parse failure becomes a normal `isError` tool result (§2.2); there is no
+    Kodi round-trip here at all — it reads only the local log.
+
+    [x] 13.10.3 **Deliberately out of scope** (post-filterable by the caller on
+    the small returned set, so not worth schema surface): a `media`/`kind` type
+    filter, text search over title/album/show, and grouping/aggregation. Add them
+    only if real use shows the AI can't do them client-side — the same
+    wait-for-real-data stance as §11.7 and §13.4.1.

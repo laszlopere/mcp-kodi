@@ -1,0 +1,191 @@
+#!/bin/sh
+# Functional test for the `history` read tool — TODO.md §13.10.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport. Unlike the other
+# functional tests this one needs NO live Kodi: `history` reads only the local
+# playback log (history.json), makes no Kodi call, and answers even when no box
+# is reachable. The test materialises a known log under a private XDG_STATE_HOME
+# and a minimal two-instance config under a private XDG_CONFIG_HOME, then asserts
+# the windowing, instance filter, limit/truncated, ordering and error paths.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq on PATH
+#   - the mcp-kodi binary built
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+SKIP=77
+skip () { echo "SKIP: $*"; exit $SKIP; }
+
+command -v jq >/dev/null 2>&1 || skip "jq not found"
+
+# Locate the mcp-kodi binary: the automake build tree first ($top_builddir is
+# exported by `make check`), then fallbacks for running the script by hand.
+find_binary () {
+  for c in \
+    "${top_builddir:-}/src/mcp-kodi" \
+    "$(dirname "$0")/../src/mcp-kodi" \
+    "./src/mcp-kodi" \
+    "src/mcp-kodi"
+  do
+    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# ---- a private config + a known history log -------------------------------
+WORK=$(mktemp -d) || skip "cannot mktemp"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/cfg/mcp-kodi" "$WORK/state/mcp-kodi"
+
+cat > "$WORK/cfg/mcp-kodi/config.json" <<'EOF'
+{"version":2,"default":"living","instances":{
+  "living":{"host":"127.0.0.1:8080","auth":"k:k","scheme":"http"},
+  "bedroom":{"host":"127.0.0.1:8081","auth":"k:k","scheme":"http"}}}
+EOF
+
+# Four entries, newest-first as the writer stores them (§13.6): two boxes, a
+# spread of dates, and one with an unparseable timestamp that must be KEPT
+# (§13.8.2/§13.10.1 "keep what we can't parse").
+HIST="$WORK/state/mcp-kodi/history.json"
+cat > "$HIST" <<'EOF'
+[
+  {"at":"2026-06-09T10:00:00Z","instance":"living","name":"Living Room","kind":"audio","media":"song","id":11,"title":"Newest","album":"A","artist":["Abba"]},
+  {"at":"2026-06-05T20:00:00Z","instance":"bedroom","name":"Bedroom","kind":"video","media":"episode","id":42,"title":"Mid","showtitle":"Show","season":1,"episode":3},
+  {"at":"2026-05-01T08:00:00Z","instance":"living","name":"Living Room","kind":"video","media":"movie","id":7,"title":"Oldest"},
+  {"at":"not-a-date","instance":"living","name":"Living Room","kind":"audio","media":"song","id":99,"title":"Undated"}
+]
+EOF
+
+# ---- talking to the server under test (MCP over stdio) --------------------
+#
+# One invocation per call (the server exits on stdin EOF) keeps assertions
+# isolated. env -i scrubs the environment so only our private XDG dirs are seen.
+hist () { # arguments-json -> tool result object
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"history\",\"arguments\":$1}}" \
+    | env -i PATH="$PATH" XDG_CONFIG_HOME="$WORK/cfg" XDG_STATE_HOME="$WORK/state" \
+        "$MCP" 2>/dev/null \
+    | jq -c 'select(.id==2) | .result'
+}
+schema () { # -> the history tool's inputSchema
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+    | env -i PATH="$PATH" XDG_CONFIG_HOME="$WORK/cfg" XDG_STATE_HOME="$WORK/state" \
+        "$MCP" 2>/dev/null \
+    | jq -c 'select(.id==2) | .result.tools[] | select(.name=="history") | .inputSchema'
+}
+res_err  () { printf '%s' "$1" | jq -r '.isError'; }
+res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }
+g        () { printf '%s' "$1" | jq -r "$2"; }
+j        () { printf '%s' "$1" | jq    "$2"; }
+
+# ---- assertions -----------------------------------------------------------
+PASS=0
+FAIL=0
+ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
+eq () { if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi; }
+is_true () { if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi; }
+contains () { case "$2" in *"$3"*) ok "$1";; *) no "$1" "[$2] has no [$3]";; esac; }
+
+echo "history functional test — binary $MCP"
+
+# ===========================================================================
+# 1. Bare call: every box, newest-first, default cap not hit (4 < 50).
+# ===========================================================================
+echo "-- bare call: all instances"
+b=$(hist '{}')
+eq "bare call is not an error" false "$(res_err "$b")"
+pb=$(res_body "$b")
+eq "total counts every entry"      4     "$(g "$pb" '.total')"
+eq "returned all of them"          4     "$(g "$pb" '.returned')"
+eq "not truncated"                 false "$(g "$pb" '.truncated')"
+eq "newest entry first"            "Newest" "$(g "$pb" '.entries[0].title')"
+eq "oldest parseable entry last-ish" "Undated" "$(g "$pb" '.entries[3].title')"
+is_true "spans both instances" \
+  "$(j "$pb" '[.entries[].instance] | (index("living") != null) and (index("bedroom") != null)')"
+
+# ===========================================================================
+# 2. Instance filter: only that box (and omitted ≠ default box — it's ALL).
+# ===========================================================================
+echo "-- instance filter"
+pb=$(res_body "$(hist '{"instance":"bedroom"}')")
+eq "bedroom: one entry"        1         "$(g "$pb" '.total')"
+eq "bedroom: echoes instance"  "bedroom" "$(g "$pb" '.instance')"
+eq "bedroom: the right entry"  "Mid"     "$(g "$pb" '.entries[0].title')"
+
+pb=$(res_body "$(hist '{"instance":"living"}')")
+eq "living: three entries" 3 "$(g "$pb" '.total')"
+is_true "living: only living rows" \
+  "$(j "$pb" '[.entries[].instance] | all(. == "living")')"
+
+# ===========================================================================
+# 3. Time window (inclusive bounds), newest-first within it.
+# ===========================================================================
+echo "-- time window"
+# since only: drop the May entry (the undated one is kept — unparseable).
+pb=$(res_body "$(hist '{"since":"2026-06-01T00:00:00Z"}')")
+eq "since: echoes the bound" "2026-06-01T00:00:00Z" "$(g "$pb" '.since')"
+is_true "since: keeps the undated entry (unparseable at)" \
+  "$(j "$pb" '[.entries[].title] | index("Undated") != null')"
+is_true "since: drops the May 1 movie" \
+  "$(j "$pb" '[.entries[].title] | index("Oldest") == null')"
+
+# until only: keep only the May entry (+ the undated, always kept).
+pb=$(res_body "$(hist '{"until":"2026-05-15T00:00:00Z"}')")
+is_true "until: keeps the May 1 movie" \
+  "$(j "$pb" '[.entries[].title] | index("Oldest") != null')"
+is_true "until: drops the June song" \
+  "$(j "$pb" '[.entries[].title] | index("Newest") == null')"
+
+# both bounds: a tight window around the bedroom episode.
+pb=$(res_body "$(hist '{"since":"2026-06-04T00:00:00Z","until":"2026-06-06T00:00:00Z"}')")
+is_true "window: only the bedroom episode falls in range (plus undated)" \
+  "$(j "$pb" '[.entries[] | select(.at != "not-a-date") | .title] == ["Mid"]')"
+
+# ===========================================================================
+# 4. limit + truncated.
+# ===========================================================================
+echo "-- limit / truncated"
+pb=$(res_body "$(hist '{"limit":1}')")
+eq "limit 1: returned one" 1     "$(g "$pb" '.returned')"
+eq "limit 1: total still full" 4 "$(g "$pb" '.total')"
+eq "limit 1: truncated"    true  "$(g "$pb" '.truncated')"
+eq "limit 1: kept the newest" "Newest" "$(g "$pb" '.entries[0].title')"
+
+# ===========================================================================
+# 5. Error paths and an empty log.
+# ===========================================================================
+echo "-- errors and empty log"
+b=$(hist '{"since":"yesterday"}')
+eq       "malformed since -> tool error" true "$(res_err "$b")"
+contains "error names the bad arg"       "$(g "$(res_body "$b")" '.error')" "since"
+
+# A missing log is not an error: zero entries.
+rm -f "$HIST"
+b=$(hist '{}')
+eq "missing log is not an error" false "$(res_err "$b")"
+eq "missing log: zero total"     0     "$(g "$(res_body "$b")" '.total')"
+
+# ===========================================================================
+# 6. Schema: advertises the args and the all-instances semantics.
+# ===========================================================================
+echo "-- schema"
+s=$(schema)
+contains "schema has since"  "$s" '"since"'
+contains "schema has until"  "$s" '"until"'
+contains "schema has limit"  "$s" '"limit"'
+contains "instance desc says ALL instances" \
+  "$(printf '%s' "$s" | jq -r '.properties.instance.description')" "ALL instances"
+
+# ---- tally ----------------------------------------------------------------
+echo "------------------------------------------------------------"
+printf 'history functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+exit 0

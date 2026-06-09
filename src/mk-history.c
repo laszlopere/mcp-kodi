@@ -490,3 +490,211 @@ mk_history_record (MkHistory *self, const char *instance, const char *name,
   close (lockfd);
   return appended;
 }
+
+/* ---- read path (§13.10.1) ------------------------------------------------ */
+
+/**
+ * in_window:
+ * @e: a history entry object.
+ * @since: lower bound (inclusive), or NULL for open.
+ * @until: upper bound (inclusive), or NULL for open.
+ *
+ * Tests whether @e's `at` timestamp falls within [@since, @until]. An entry
+ * whose `at` is missing or not parseable as ISO-8601 is treated as in-range —
+ * kept, not silently dropped, mirroring the age-trim's rule (§13.8.2): we never
+ * hide data we merely failed to understand.
+ *
+ * @return TRUE if @e is within the window (or its stamp is unparseable).
+ */
+static gboolean
+in_window (JsonObject *e, GDateTime *since, GDateTime *until)
+{
+  const char *at = json_object_get_string_member_with_default (e, "at", NULL);
+  if (at == NULL)
+    return TRUE;
+  g_autoptr (GDateTime) dt = g_date_time_new_from_iso8601 (at, NULL);
+  if (dt == NULL)
+    return TRUE; /* keep what we can't parse */
+  if (since != NULL && g_date_time_compare (dt, since) < 0)
+    return FALSE;
+  if (until != NULL && g_date_time_compare (dt, until) > 0)
+    return FALSE;
+  return TRUE;
+}
+
+/**
+ * parse_bound:
+ * @value: an ISO-8601 timestamp string, or NULL/empty for "no bound".
+ * @label: the argument name, for the error message ("since"/"until").
+ * @out: return location for the parsed GDateTime (set to NULL when no bound).
+ * @error: return location for a GError.
+ *
+ * Parses an optional window bound. NULL or "" yields *@out = NULL (open); a
+ * non-empty string that is not valid ISO-8601 is a hard error — better to tell
+ * the caller their filter was malformed than to silently widen the window.
+ *
+ * @return TRUE on success (bound parsed or absent); FALSE with @error set.
+ */
+static gboolean
+parse_bound (const char *value, const char *label, GDateTime **out,
+             GError **error)
+{
+  *out = NULL;
+  if (value == NULL || *value == '\0')
+    return TRUE;
+  *out = g_date_time_new_from_iso8601 (value, NULL);
+  if (*out == NULL)
+    {
+      g_set_error (error, MK_HISTORY_ERROR, MK_HISTORY_ERROR_INVALID,
+                   "%s: not an ISO-8601 timestamp: %s", label, value);
+      return FALSE;
+    }
+  return TRUE;
+}
+
+/**
+ * load_locked:
+ * @self: the history log.
+ * @parser: out; receives a new JsonParser owning the loaded tree on success.
+ * @entries: out; the top-level array, borrowed from @parser, or NULL when the
+ *           file is missing/empty.
+ * @error: return location for a GError.
+ *
+ * Reads and parses the log under a **shared** flock on the sidecar lock
+ * (§13.7.1) — it excludes a writer's exclusive lock so we never parse a
+ * half-rewritten file, but lets concurrent reads proceed. The lock is held only
+ * across the load: json_parser_load_from_file() pulls the whole file into
+ * memory, so once it returns the tree is ours and the lock can drop. A missing
+ * file is success with *@entries = NULL (zero entries); a present but
+ * unparseable or non-array file is an error.
+ *
+ * @return TRUE on success; FALSE with @error set on lock/parse/shape failure.
+ */
+static gboolean
+load_locked (MkHistory *self, JsonParser **parser, JsonArray **entries,
+             GError **error)
+{
+  *parser = NULL;
+  *entries = NULL;
+  if (!g_file_test (self->path, G_FILE_TEST_EXISTS))
+    return TRUE; /* no file yet → no entries */
+
+  g_autofree char *lockpath = g_strconcat (self->path, ".lock", NULL);
+  int lockfd = g_open (lockpath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+  if (lockfd == -1)
+    {
+      g_set_error (error, MK_HISTORY_ERROR, MK_HISTORY_ERROR_IO,
+                   "open lock %s: %s", lockpath, g_strerror (errno));
+      return FALSE;
+    }
+  if (flock (lockfd, LOCK_SH) != 0)
+    {
+      g_set_error (error, MK_HISTORY_ERROR, MK_HISTORY_ERROR_IO, "lock %s: %s",
+                   lockpath, g_strerror (errno));
+      close (lockfd);
+      return FALSE;
+    }
+
+  JsonParser *p = json_parser_new ();
+  GError *perr = NULL;
+  gboolean ok = json_parser_load_from_file (p, self->path, &perr);
+  flock (lockfd, LOCK_UN);
+  close (lockfd);
+
+  if (!ok)
+    {
+      g_set_error (error, MK_HISTORY_ERROR, MK_HISTORY_ERROR_PARSE,
+                   "parse %s: %s", self->path, perr->message);
+      g_clear_error (&perr);
+      g_object_unref (p);
+      return FALSE;
+    }
+
+  JsonNode *root = json_parser_get_root (p);
+  if (root != NULL && JSON_NODE_HOLDS_ARRAY (root))
+    *entries = json_node_get_array (root);
+  else if (root != NULL)
+    {
+      g_set_error (error, MK_HISTORY_ERROR, MK_HISTORY_ERROR_INVALID,
+                   "%s: top-level value is not a JSON array", self->path);
+      g_object_unref (p);
+      return FALSE;
+    }
+  /* root == NULL: an empty file, treated as no entries. */
+  *parser = p;
+  return TRUE;
+}
+
+/**
+ * mk_history_read:
+ * @self: the history log.
+ * @instance: restrict to this instance key, or NULL for all instances.
+ * @since: ISO-8601 lower bound (inclusive), or NULL/"" for open.
+ * @until: ISO-8601 upper bound (inclusive), or NULL/"" for open.
+ * @limit: maximum entries to return; ≤ 0 means no cap.
+ * @total: out; set to the number of matches before the limit, or NULL.
+ * @error: return location for a GError.
+ *
+ * The read path (§13.10.1). See the header for the contract. Parses the bounds,
+ * loads the log under a shared lock, then walks it newest-first (§13.6) keeping
+ * entries whose `instance` matches and whose `at` lies in [@since, @until],
+ * collecting at most @limit of them — so the result is the newest matches. The
+ * walk keeps counting matches past the cap to report @total, from which the
+ * caller derives `truncated`.
+ *
+ * @return a newly allocated JSON array node (newest-first), or NULL with @error
+ *         set; free with json_node_unref().
+ */
+JsonNode *
+mk_history_read (MkHistory *self, const char *instance, const char *since,
+                 const char *until, gint64 limit, gint64 *total, GError **error)
+{
+  g_return_val_if_fail (self != NULL, NULL);
+  if (total != NULL)
+    *total = 0;
+
+  g_autoptr (GDateTime) since_dt = NULL;
+  g_autoptr (GDateTime) until_dt = NULL;
+  if (!parse_bound (since, "since", &since_dt, error)
+      || !parse_bound (until, "until", &until_dt, error))
+    return NULL;
+
+  g_autoptr (JsonParser) parser = NULL;
+  JsonArray *entries = NULL;
+  if (!load_locked (self, &parser, &entries, error))
+    return NULL;
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_array (b);
+  gint64 matched = 0, kept = 0;
+  if (entries != NULL)
+    {
+      guint n = json_array_get_length (entries);
+      for (guint i = 0; i < n; i++)
+        {
+          JsonObject *e = json_array_get_object_element (entries, i);
+          if (e == NULL)
+            continue;
+          if (instance != NULL
+              && g_strcmp0 (json_object_get_string_member_with_default (
+                              e, "instance", NULL),
+                            instance)
+                   != 0)
+            continue;
+          if (!in_window (e, since_dt, until_dt))
+            continue;
+          matched++;
+          /* Past the cap we keep counting (for @total) but stop collecting. The
+           * file is newest-first, so the kept ones are the most recent. */
+          if (limit > 0 && kept >= limit)
+            continue;
+          json_builder_add_value (
+            b, json_node_copy (json_array_get_element (entries, i)));
+          kept++;
+        }
+    }
+  json_builder_end_array (b);
+  if (total != NULL)
+    *total = matched;
+  return json_builder_get_root (b);
+}

@@ -2093,6 +2093,137 @@ handler_rpc (MkTools *self, const MkToolDef *def, JsonObject *args,
   return g_steal_pointer (&result);
 }
 
+/* ---- History tool (§13.10) ------------------------------------------------ */
+
+#define MK_HISTORY_DEFAULT_LIMIT 50   /* newest-in-window cap when omitted */
+#define MK_HISTORY_MAX_LIMIT     1000 /* hard ceiling on a single read     */
+
+/**
+ * schema_history:
+ * @self: the table (used to name the configured instances).
+ *
+ * Schema for the `history` tool (§13.10.2): an optional ISO-8601 window
+ * (`since`/`until`), an optional `instance`, and a `limit`. Nothing is required
+ * — a bare call returns the most recent entries across all boxes. The `instance`
+ * description deliberately spells out that *omitting* it spans all instances,
+ * which inverts the §5.1 convention every other tool follows (omitted = the
+ * default box), so the difference is explicit rather than a surprise.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_history (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  /* Custom instance prop — prop_instance() documents "omitted = default box",
+   * the opposite of what history means, so build the description here. */
+  g_autoptr (GString) idesc =
+    g_string_new ("Restrict to one Kodi instance by key");
+  GList *names = mk_config_instance_names (self->config);
+  if (names != NULL)
+    {
+      g_string_append (idesc, " (one of: ");
+      for (GList *l = names; l != NULL; l = l->next)
+        {
+          g_string_append (idesc, (const char *) l->data);
+          if (l->next != NULL)
+            g_string_append (idesc, ", ");
+        }
+      g_string_append_c (idesc, ')');
+    }
+  g_list_free (names);
+  g_string_append (idesc, ". Omitted returns entries from ALL instances — note "
+                          "this differs from other tools, where an omitted "
+                          "instance means the default box.");
+  prop_typed (b, "instance", "string", idesc->str);
+
+  prop_typed (b, "since", "string",
+              "Only entries at or after this ISO-8601 time (e.g. "
+              "\"2026-06-01T00:00:00Z\"). Omitted = from the beginning of the "
+              "log. Compute relative windows (\"last 7 days\") yourself.");
+  prop_typed (b, "until", "string",
+              "Only entries at or before this ISO-8601 time. Omitted = up to "
+              "now.");
+  prop_typed (b, "limit", "integer",
+              "Max entries to return, newest first (default 50, max 1000). When "
+              "more match the window, the reply sets \"truncated\": true.");
+
+  schema_end (b, NULL);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_history:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments: optional instance/since/until/limit.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `history` tool (§13.10.2): reads the local playback log via
+ * mk_history_read() and wraps the matches in a `search`-style envelope. Makes no
+ * Kodi call. An omitted `instance` spans all boxes (the §5.1 inversion, see
+ * schema_history()); `limit` defaults to 50 and is clamped. A malformed window
+ * bound or a corrupt log surfaces as a normal tool error (mk_history_read sets
+ * @error).
+ *
+ * @return `{ "instance"?, "since"?, "until"?, "total", "returned", "truncated",
+ *         "entries": [ … ] }`, or NULL with @error set.
+ */
+static JsonNode *
+handler_history (MkTools *self, const MkToolDef *def, JsonObject *args,
+                 GError **error)
+{
+  (void) def;
+  /* Unlike every other tool, an omitted instance is NOT defaulted to a box: NULL
+   * tells mk_history_read() to span all instances (§13.10.2). */
+  const char *instance = arg_instance (args);
+  const char *since = arg_str (args, "since", NULL);
+  const char *until = arg_str (args, "until", NULL);
+
+  gint64 limit = MK_HISTORY_DEFAULT_LIMIT, v = 0;
+  if (arg_int (args, "limit", &v))
+    limit = v;
+  limit = CLAMP (limit, 1, MK_HISTORY_MAX_LIMIT);
+
+  gint64 total = 0;
+  g_autoptr (JsonNode) entries =
+    mk_history_read (self->history, instance, since, until, limit, &total,
+                     error);
+  if (entries == NULL)
+    return NULL;
+  gint64 returned = json_array_get_length (json_node_get_array (entries));
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  if (instance != NULL)
+    {
+      json_builder_set_member_name (b, "instance");
+      json_builder_add_string_value (b, instance);
+    }
+  if (since != NULL && *since != '\0')
+    {
+      json_builder_set_member_name (b, "since");
+      json_builder_add_string_value (b, since);
+    }
+  if (until != NULL && *until != '\0')
+    {
+      json_builder_set_member_name (b, "until");
+      json_builder_add_string_value (b, until);
+    }
+  json_builder_set_member_name (b, "total");
+  json_builder_add_int_value (b, total);
+  json_builder_set_member_name (b, "returned");
+  json_builder_add_int_value (b, returned);
+  json_builder_set_member_name (b, "truncated");
+  json_builder_add_boolean_value (b, total > returned);
+  json_builder_set_member_name (b, "entries");
+  json_builder_add_value (b, json_node_ref (entries));
+  json_builder_end_object (b);
+  return json_builder_get_root (b);
+}
+
 /* ---- The tool table -------------------------------------------------------
  *
  * Being rebuilt from the comprehensive Kodi JSON-RPC inventory (../TODO.md §12)
@@ -2310,6 +2441,36 @@ static const MkToolDef mk_tool_defs[] = {
                 "reachable path, in-library or not.",
     schema_playfile, handler_playfile, NULL },
 
+  /* ---- History tool — read back the local playback log; no Kodi call
+   *      (§13.10). ---- */
+
+  /**
+   * history (History tool):
+   *
+   * List recently played items from the local playback log (§13) — the
+   * backward-looking record of what the assistant caused or observed (§13.2),
+   * written as a side effect of every playback-affecting call. Reads only the
+   * local `history.json`; makes no Kodi request, so it answers even when no box
+   * is reachable. Mirror of the write path: mk_history_read() under a shared
+   * lock (§13.10.1), wrapped in a `search`-style envelope.
+   *
+   * @param since (optional): ISO-8601 lower bound; omitted = start of the log.
+   * @param until (optional): ISO-8601 upper bound; omitted = now.
+   * @param instance (optional): restrict to one box. **Omitted spans ALL
+   *        instances** — unlike other tools, where omitted means the default box
+   *        (§13.10.2).
+   * @param limit (optional): newest-in-window cap (default 50, max 1000).
+   * @return `{ "instance"?, "since"?, "until"?, "total", "returned",
+   *         "truncated", "entries": [ { "at", "instance", "name"?, "kind",
+   *         "media"?, "id"?, "title"?, … } ] }` — each entry a §13.4 record,
+   *         newest first; `total` counts matches before the limit.
+   */
+  { "history", "List recently played items from the local playback log. Pass an "
+               "optional ISO-8601 window (since/until) and a limit; an omitted "
+               "instance returns all boxes. Reads only the local log — no Kodi "
+               "call, so it works even when no box is reachable.",
+    schema_history, handler_history, NULL },
+
   /* ---- Escape hatch — raw JSON-RPC passthrough, opt-in per instance
    *      (§11.6.6, gate §7.7). ---- */
 
@@ -2518,8 +2679,9 @@ make_result (const char *text, gboolean is_error)
  * @kodi: the Kodi client handlers drive; borrowed, not owned.
  *
  * Creates the tool table. Both @config and @kodi must outlive it. The table
- * also owns a playback-history log (§13) bound to the default path; no handler
- * writes to it yet (§13.1 is foundation only).
+ * also owns the playback-history log (§13) bound to the default path:
+ * player_state() feeds the write path (§13.9.1) and the `history` tool reads it
+ * back (§13.10).
  *
  * @return a newly allocated MkTools; free with mk_tools_free().
  */
