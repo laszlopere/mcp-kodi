@@ -554,16 +554,19 @@ Everything below this section is original design for *this* project.
         | `continue-watching` | `show?`, `instance?`      | use `continue`/`episodes` + per-instance state (§8) to resume or play the next episode of `show` |
         | `put-on-music`      | `artist?`, `album?`, `instance?` | `search {type:music}` → `playfile`, then `screen` to the visualiser |
         | `movie-night`       | `title`, `instance?`      | `search {type:movie}` → `playfile` (`title` required) |
-        | `troubleshoot`      | `instance?`               | `ping` then `info` as a reachability/health probe, report what answered |
+        | `troubleshoot`      | `instance?`               | call `noop` (the built reachability + state probe, §11.6.1.6) and report whether the instance answered and what is loaded |
 
       [ ] 11.7.5 **Gating on unbuilt tools.** Several prompts reference tools not
         yet implemented (`status`, `continue`, `episodes`, `screen`) and the §8
         state file (11.8). The prompt *text* may name them ahead of the tools —
         a prompt is just guidance — but a prompt is only worth **listing** once
-        the tools it drives exist. Ship `troubleshoot` and `put-on-music`/
-        `movie-night` first (their tools — `ping`/`info`/`search`/`playfile` —
-        are built), and add `now-playing`/`continue-watching` when `status`/
-        `continue`/§8 land. List only the ready ones.
+        the tools it drives exist. The built tool set today is `play`, `pause`,
+        `stop`, `mute`, `unmute`, `noop`, `instances`, `search`, `playfile`,
+        `rpc` (§11.6, mk_tool_defs[]). Against that: `movie-night`
+        (`search`/`playfile`) and `troubleshoot` (`noop`) are fully backed and
+        ship first; `put-on-music` waits on `screen`, `now-playing` on `status`,
+        and `continue-watching` on `continue`/`episodes` + §8. List only the
+        ready pair until those land.
       [ ] 11.7.6 **Resources deferred (rationale).** MCP Resources are not
         implemented now. The server's stance is stateless, JSON-via-tools (§2.1/
         §2.2): the obvious resource candidates (`status`, `instances`, `players`,
