@@ -308,6 +308,46 @@ copy_member (JsonBuilder *b, JsonObject *src, const char *name)
 }
 
 /**
+ * copy_member_nonempty:
+ * @b: the builder, positioned inside an object.
+ * @src: the source object to copy from, or NULL.
+ * @name: the member to copy.
+ *
+ * Like copy_member(), but skips values that carry no information: an empty
+ * string, an empty array, or a negative integer. Kodi returns every requested
+ * `Player.GetItem` property regardless of media type, filling the inapplicable
+ * ones with sentinels — `""`, `[]`, and `-1` (confirmed live: an off-library
+ * file reports `season`/`episode`/`track` as -1 and `showtitle`/`album` as ""
+ * with `type:"unknown"`, §13.4.1). This omits exactly those, so the snapshot
+ * carries a per-media field only where it applies (§13.4 "omit what's empty").
+ * A zero is kept on purpose — `season` 0 is the legitimate "specials" season.
+ */
+static void
+copy_member_nonempty (JsonBuilder *b, JsonObject *src, const char *name)
+{
+  if (src == NULL || !json_object_has_member (src, name))
+    return;
+  JsonNode *node = json_object_get_member (src, name);
+  if (JSON_NODE_HOLDS_VALUE (node))
+    {
+      GType vt = json_node_get_value_type (node);
+      if (vt == G_TYPE_STRING)
+        {
+          const char *s = json_node_get_string (node);
+          if (s == NULL || *s == '\0')
+            return;
+        }
+      else if (vt == G_TYPE_INT64 && json_node_get_int (node) < 0)
+        return;
+    }
+  else if (JSON_NODE_HOLDS_ARRAY (node)
+           && json_array_get_length (json_node_get_array (node)) == 0)
+    return;
+  json_builder_set_member_name (b, name);
+  json_builder_add_value (b, json_node_copy (node));
+}
+
+/**
  * player_props:
  * @playerid: the active player's id.
  * @fields: NULL-terminated array of property/field names to request.
@@ -353,6 +393,17 @@ player_props (gint64 playerid, const char *const *fields)
  * `rpc` escape hatch, which takes no snapshot of its own and so will issue one
  * post-call purely to feed history (§13.3.1).
  *
+ * To be that single source of truth, the `Player.GetItem` call is widened
+ * (§13.4.3.1) to also fetch the per-media identifiers history records (§13.4.2):
+ * `showtitle`/`season`/`episode` for an episode, `album`/`artist`/`track` for a
+ * song — in the **same call**, no extra round-trip. Each is surfaced only where
+ * it applies (copy_member_nonempty drops the `""`/`[]`/`-1` sentinels Kodi
+ * returns for the other media types), so a movie carries none of them and every
+ * status/transport reply reads richer ("playing S01E02 of …") for free. The
+ * media type and library id themselves (`media`/`id`, §13.4.1) are not surfaced
+ * here yet — that touches the `type` key the snapshot already spends on the
+ * player kind, and is left to its own step.
+ *
  * There is no single Kodi method for it, so it combines three calls:
  * `Player.GetActivePlayers` to find the active player, then
  * `Player.GetProperties` (speed/time/totaltime) and `Player.GetItem`
@@ -362,8 +413,10 @@ player_props (gint64 playerid, const char *const *fields)
  *
  * @return a newly allocated object node — `{ "state": "stopped" }` when nothing
  *         is active, else `{ "state": "playing"|"paused", "type"?, "file"?,
- *         "label"?, "title"?, "time"?, "totaltime"? }` — or NULL with @error set
- *         if a call fails. Example, a video paused 15:38 into 46:40 (≈33%):
+ *         "label"?, "title"?, "showtitle"?, "season"?, "episode"?, "album"?,
+ *         "artist"?, "track"?, "time"?, "totaltime"? }` (the per-media fields
+ *         present only where they apply, §13.4.2) — or NULL with @error set if a
+ *         call fails. Example, a video paused 15:38 into 46:40 (≈33%):
  * @code{.json}
  * {
  *   "state": "paused",
@@ -411,7 +464,12 @@ player_state (MkTools *self, const char *instance, GError **error)
     return NULL;
   JsonObject *props = json_node_get_object (pres);
 
-  static const char *const item_fields[] = { "title", "file", NULL };
+  static const char *const item_fields[] = { "title", "file",
+                                             /* §13.4.2 enrichment (§13.4.3.1):
+                                              * episode and song identifiers,
+                                              * fetched in this same call. */
+                                             "showtitle", "season", "episode",
+                                             "album", "artist", "track", NULL };
   g_autoptr (JsonNode) iparams = player_props (playerid, item_fields);
   g_autoptr (JsonNode) ires =
     mk_kodi_call (self->kodi, instance, "Player.GetItem", iparams, error);
@@ -434,6 +492,14 @@ player_state (MkTools *self, const char *instance, GError **error)
   copy_member (b, item, "file");
   copy_member (b, item, "label");
   copy_member (b, item, "title");
+  /* §13.4.2 per-media enrichment: present only where it applies — empties and
+   * -1 sentinels are dropped (copy_member_nonempty). */
+  copy_member_nonempty (b, item, "showtitle");
+  copy_member_nonempty (b, item, "season");
+  copy_member_nonempty (b, item, "episode");
+  copy_member_nonempty (b, item, "album");
+  copy_member_nonempty (b, item, "artist");
+  copy_member_nonempty (b, item, "track");
   copy_member (b, props, "time");
   copy_member (b, props, "totaltime");
   json_builder_end_object (b);

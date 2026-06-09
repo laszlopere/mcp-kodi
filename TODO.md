@@ -1156,9 +1156,9 @@ Everything below this section is original design for *this* project.
     `src/mk-tools.c`), so widening that list costs **no extra Kodi round-trip**,
     only a longer field list. `artist` is an array of strings (e.g. `["Abba"]`);
     `season`/`episode`/`track` are integers; `showtitle`/`album` are strings.
-    [ ] 13.4.3 **Open implementation choice — where the wider `GetItem` lives.**
+    [x] 13.4.3 **Open implementation choice — where the wider `GetItem` lives.**
     Two ways to source the §13.4.2 fields; pick one when building `mk-history`:
-      [ ] 13.4.3.1 *Widen the shared `player_state()` `GetItem`* so the now-playing
+      [x] 13.4.3.1 *Widen the shared `player_state()` `GetItem`* so the now-playing
       snapshot itself carries show/episode/album/artist. One call, one source of
       truth, history just copies it — and every `status`/transport reply gets
       richer too (arguably a feature: "playing S01E02 of Earth 2"). Cost: a larger
