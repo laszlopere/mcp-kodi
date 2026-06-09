@@ -51,11 +51,14 @@ mkdir -p "$build"
 declare -A SOURCES=(
   [test-stdio]="test-stdio.c $src/mk-stdio.c"
   [test-config]="test-config.c $src/mk-config.c"
+  [test-config-io]="test-config-io.c $src/mk-config.c"
+  [test-history]="test-history.c $src/mk-history.c"
   [test-tools]="test-tools.c $src/mk-tools.c $src/mk-config.c stub-kodi.c stub-history.c"
+  [test-tools-handlers]="test-tools-handlers.c $src/mk-tools.c $src/mk-config.c stub-kodi-prog.c stub-history.c"
 )
 
 # Deterministic order.
-TESTS="test-stdio test-config test-tools"
+TESTS="test-stdio test-config test-config-io test-history test-tools test-tools-handlers"
 
 failed=0
 failed_list=()
