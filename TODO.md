@@ -227,16 +227,18 @@ Everything below this section is original design for *this* project.
     "version": 2,
     "default": "hall",
     "instances": {
-      "hall":    { "host": "hall.example.local:8443",    "auth": "kodi:<password>", "scheme": "https", "insecure": true },
-      "bedroom": { "host": "bedroom.example.local:8443", "auth": "kodi:<password>", "scheme": "https", "insecure": true },
-      "kids":    { "host": "kids.example.local:8443",    "auth": "kodi:<password>", "scheme": "https", "insecure": true }
+      "hall":    { "name": "Living Room TV", "host": "hall.example.local:8443",    "auth": "kodi:<password>", "scheme": "https", "insecure": true },
+      "bedroom": { "name": "Bedroom",        "host": "bedroom.example.local:8443", "auth": "kodi:<password>", "scheme": "https", "insecure": true },
+      "kids":    { "name": "Kids' Room",     "host": "kids.example.local:8443",    "auth": "kodi:<password>", "scheme": "https", "insecure": true }
     }
   }
   ```
   (`auth` is `user:pass` for HTTP Basic; `insecure: true` accepts the self-signed
-  cert — the JSON equivalent of curl `-k`. Instance names are free-form user
-  labels; tools reference them, and `default` is used when a tool omits
-  `instance`.)
+  cert — the JSON equivalent of curl `-k`. The instance *key* (`hall`, `bedroom`,
+  …) is the short identifier tools reference, and `default` is used when a tool
+  omits `instance`. The optional `name` is a free-form human-readable display
+  label — surfaced in the tool schema so the assistant can refer to a box by its
+  friendly name — and is omitted from the file when unset.)
   [x] 7.3 **Load:** on startup read the file if present. Environment overrides
   apply to the `default` instance only — `KODI_HOST`/`KODI_AUTH`/`KODI_SCHEME`
   (and `-k` in `KODI_CURL_OPTS` → `insecure`) — so a single-box user can run with

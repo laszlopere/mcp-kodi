@@ -15,19 +15,23 @@
 
 G_BEGIN_DECLS
 
-/* One configured Kodi box. host is "host[:port]"; auth is "user:pass" for
+/* One configured Kodi box. name is a human-readable display label (e.g.
+ * "Living Room TV"), distinct from the instance's config key that tools
+ * reference; NULL when unset. host is "host[:port]"; auth is "user:pass" for
  * HTTP Basic (or NULL); scheme is "http"/"https"; insecure accepts a
  * self-signed cert (curl -k). */
 typedef struct _MkInstance MkInstance;
 struct _MkInstance
 {
+  char     *name;
   char     *host;
   char     *auth;
   char     *scheme;
   gboolean  insecure;
 };
 
-MkInstance *mk_instance_new  (const char *host,
+MkInstance *mk_instance_new  (const char *name,
+                              const char *host,
                               const char *auth,
                               const char *scheme,
                               gboolean    insecure);

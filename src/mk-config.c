@@ -30,6 +30,7 @@ G_DEFINE_QUARK (mk-config-error-quark, mk_config_error)
 
 /**
  * mk_instance_new:
+ * @name: human-readable display label, or NULL for none.
  * @host: host (or "host:port") of the Kodi box, or NULL.
  * @auth: HTTP Basic credentials as "user:pass", or NULL for none.
  * @scheme: URL scheme ("http"/"https"); NULL defaults to "https".
@@ -40,12 +41,14 @@ G_DEFINE_QUARK (mk-config-error-quark, mk_config_error)
  * @return a newly allocated MkInstance; free with mk_instance_free().
  */
 MkInstance *
-mk_instance_new (const char *host,
+mk_instance_new (const char *name,
+                 const char *host,
                  const char *auth,
                  const char *scheme,
                  gboolean    insecure)
 {
   MkInstance *inst = g_new0 (MkInstance, 1);
+  inst->name = g_strdup (name);
   inst->host = g_strdup (host);
   inst->auth = g_strdup (auth);
   inst->scheme = g_strdup (scheme ? scheme : "https");
@@ -67,7 +70,8 @@ mk_instance_copy (const MkInstance *inst)
 {
   if (inst == NULL)
     return NULL;
-  return mk_instance_new (inst->host, inst->auth, inst->scheme, inst->insecure);
+  return mk_instance_new (inst->name, inst->host, inst->auth, inst->scheme,
+                          inst->insecure);
 }
 
 /**
@@ -81,6 +85,7 @@ mk_instance_free (MkInstance *inst)
 {
   if (inst == NULL)
     return;
+  g_free (inst->name);
   g_free (inst->host);
   g_free (inst->auth);
   g_free (inst->scheme);
@@ -251,21 +256,22 @@ mk_config_instance_names (MkConfig *self)
 
 /**
  * instance_from_object:
- * @o: a JSON object holding host/auth/scheme/insecure members.
+ * @o: a JSON object holding name/host/auth/scheme/insecure members.
  *
  * Builds an instance from a JSON object. Missing members fall back to sane
- * defaults (scheme "https", insecure FALSE, host/auth NULL).
+ * defaults (scheme "https", insecure FALSE, name/host/auth NULL).
  *
  * @return a newly allocated MkInstance; free with mk_instance_free().
  */
 static MkInstance *
 instance_from_object (JsonObject *o)
 {
+  const char *name   = json_object_get_string_member_with_default (o, "name", NULL);
   const char *host   = json_object_get_string_member_with_default (o, "host", NULL);
   const char *auth   = json_object_get_string_member_with_default (o, "auth", NULL);
   const char *scheme = json_object_get_string_member_with_default (o, "scheme", "https");
   gboolean insecure  = json_object_get_boolean_member_with_default (o, "insecure", FALSE);
-  return mk_instance_new (host, auth, scheme, insecure);
+  return mk_instance_new (name, host, auth, scheme, insecure);
 }
 
 /**
@@ -393,7 +399,7 @@ apply_env_overrides (MkConfig *self)
   MkInstance *inst = g_hash_table_lookup (self->instances, name);
   if (inst == NULL)
     {
-      inst = mk_instance_new (NULL, NULL, NULL, FALSE);
+      inst = mk_instance_new (NULL, NULL, NULL, NULL, FALSE);
       mk_config_set_instance (self, name, inst);
     }
   if (self->default_name == NULL)
@@ -488,8 +494,8 @@ mk_config_load (const char *path, GError **error)
  * @self: the config to serialise.
  *
  * Renders the config as pretty-printed JSON in the version-2 shape, with
- * instances emitted in sorted name order and the "auth" member omitted when an
- * instance has no credentials.
+ * instances emitted in sorted key order, the "name" (display label) and "auth"
+ * members each omitted when the instance has none.
  *
  * @return a newly allocated JSON string; free with g_free().
  */
@@ -519,6 +525,12 @@ serialise (MkConfig *self)
 
       json_builder_set_member_name (b, name);
       json_builder_begin_object (b);
+
+      if (inst->name != NULL)
+        {
+          json_builder_set_member_name (b, "name");
+          json_builder_add_string_value (b, inst->name);
+        }
 
       json_builder_set_member_name (b, "host");
       json_builder_add_string_value (b, inst->host);
