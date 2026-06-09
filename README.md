@@ -16,7 +16,7 @@ evening's lineup, pick up where you left off last night, adapt on the fly, and
 surface things you'd never have found yourself. We're aiming for something
 genuinely new — a mind-blowingly different way to live with your media player.
 
-> **Status — early, but already remarkable (v0.1.0).** The set of dedicated,
+> **Status — early, but already remarkable (v0.2.0dev).** The set of dedicated,
 > purpose-built tools is deliberately small. What makes the current build
 > capable well beyond that list is the **`rpc` escape hatch** (see below): an
 > opt-in passthrough to *any* Kodi JSON-RPC method. Between the handful of
