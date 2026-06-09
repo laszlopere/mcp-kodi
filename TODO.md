@@ -1037,18 +1037,18 @@ Everything below this section is original design for *this* project.
   history and state do **not** share storage (a history append must never race a
   state write, same separation rationale as §8.2 vs §7.1).
 
-  [ ] 13.2 **No monitoring — capture is call-driven only.** We do not poll and we
+  [x] 13.2 **No monitoring — capture is call-driven only.** We do not poll and we
   do not subscribe to Kodi's WebSocket push (§2.1, §10.1). The only moments we
   learn what is playing are the moments a tool call runs and produces a
   now-playing snapshot. Consequences, stated plainly so the blind spots are on
   record rather than discovered later:
-    [ ] 13.2.1 Playback the user starts from the **physical remote / Kodi UI** is
+    [x] 13.2.1 Playback the user starts from the **physical remote / Kodi UI** is
     invisible — we never see it unless some later tool call happens to snapshot it.
-    [ ] 13.2.2 **No playlist/queue tracking.** We record the item playing at the
+    [x] 13.2.2 **No playlist/queue tracking.** We record the item playing at the
     moment of the call (the *first* item when a play starts); subsequent tracks
     Kodi advances to on its own are not seen. (No `Playlist`/queue support yet,
     §12.11 — deliberately out of scope for v1.)
-    [ ] 13.2.3 The log is therefore a record of *what the assistant caused or
+    [x] 13.2.3 The log is therefore a record of *what the assistant caused or
     observed*, not a complete audit of the box. Honest about its gaps; good
     enough for "what did we play".
 

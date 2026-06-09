@@ -9,6 +9,17 @@
  * its own file with its own lifecycle. History and state deliberately do **not**
  * share storage, so a history append can never race a state write (§13.1).
  *
+ * Capture is **call-driven only** (§13.2): the module never polls Kodi and never
+ * subscribes to its WebSocket push (§2.1, §10.1). The only moments we learn what
+ * is playing are the moments a tool call runs and produces a now-playing
+ * snapshot — so the log records *what the assistant caused or observed*, not a
+ * complete audit of the box. Known, accepted blind spots: playback started from
+ * the physical remote / Kodi UI is invisible unless a later call happens to
+ * snapshot it (§13.2.1), and we capture only the item playing at the moment of
+ * the call — the first item when a play starts — not the tracks Kodi advances to
+ * on its own (no playlist/queue tracking yet, §13.2.2). Honest about its gaps;
+ * good enough for "what did we play" (§13.2.3).
+ *
  * This is the §13.1 foundation only: the module, its own storage path
  * (${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/history.json, §13.6), and
  * lifecycle. The write path — record/dedup/lock/trim (§13.5–§13.9) — and the
