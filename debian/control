@@ -1,0 +1,26 @@
+Source: mcp-kodi
+Section: utils
+Priority: optional
+Maintainer: Laszlo Pere <laszlopere@gmail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ pkgconf,
+ libglib2.0-dev (>= 2.80),
+ libjson-glib-dev (>= 1.6),
+ libsoup-3.0-dev (>= 3.0)
+Standards-Version: 4.6.2
+Homepage: https://github.com/laszlopere/mcp-kodi
+Rules-Requires-Root: no
+
+Package: mcp-kodi
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends}
+Description: MCP server for controlling Kodi over JSON-RPC
+ An MCP (Model Context Protocol) server that lets an AI assistant control a
+ Kodi media player through Kodi's JSON-RPC API. Written in C on the GLib
+ stack.
+ .
+ There is no user-facing CLI: the assistant calls the server's tools, and the
+ server speaks JSON-RPC to Kodi. The only interface is MCP over stdio.

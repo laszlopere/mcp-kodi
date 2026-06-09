@@ -29,6 +29,14 @@ Makefile.in
 /tests/*.trs
 /tests/test-suite.log
 
+# Debian packaging build artifacts (the debian/ source files are tracked)
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/mcp-kodi/
+/debian/*.substvars
+/debian/*.log
+
 # Editor / tooling
 *.swp
 /compile_commands.json

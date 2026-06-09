@@ -1,0 +1,5 @@
+mcp-kodi (0.2.0dev) unstable; urgency=medium
+
+  * Initial Debian packaging.
+
+ -- Laszlo Pere <laszlopere@gmail.com>  Tue, 09 Jun 2026 17:04:18 +0200

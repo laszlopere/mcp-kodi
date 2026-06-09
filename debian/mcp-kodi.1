@@ -1,0 +1,92 @@
+.TH MCP-KODI 1 "June 2026" "mcp-kodi 0.2.0dev" "User Commands"
+.SH NAME
+mcp-kodi \- MCP server for controlling Kodi over JSON-RPC
+.SH SYNOPSIS
+.B mcp-kodi
+.SH DESCRIPTION
+.B mcp-kodi
+is a Model Context Protocol (MCP) server that lets an AI assistant control a
+Kodi media player through Kodi's JSON-RPC API. It is written in C on the GLib
+stack.
+.PP
+There is no user-facing command line: the assistant calls the server's tools,
+and the server speaks JSON-RPC to Kodi. The only interface is MCP over standard
+input and output \(em the program reads JSON-RPC messages from stdin and writes
+responses to stdout until stdin reaches end-of-file. Diagnostic messages are
+written to standard error.
+.PP
+.B mcp-kodi
+takes no command-line options or arguments. It is normally launched by an MCP
+client rather than run interactively.
+.SH CONFIGURATION
+At startup the server reads its configuration once from
+.IR ${XDG_CONFIG_HOME:-~/.config}/mcp-kodi/config.json .
+The file holds a map of named Kodi instances and names one as the
+.IR default ,
+used whenever a tool call omits an explicit instance.
+.PP
+Each instance entry may set
+.IR host ,
+.I auth
+(HTTP Basic credentials as
+.IR user:pass ,
+never returned by the tools),
+.I scheme
+.RI ( http
+or
+.IR https ),
+.IR insecure ,
+and
+.I allow_rpc
+(opt-in gate for the raw JSON-RPC escape hatch, set only by hand-editing the
+file).
+.PP
+With no configuration file present, a single instance can be defined from the
+environment (see
+.B ENVIRONMENT
+below). With neither a file nor environment variables, the server exits with an
+error describing how to configure it.
+.PP
+Configuration is read only at startup; after editing
+.IR config.json ,
+restart the server so it re-reads the file.
+.SH ENVIRONMENT
+.TP
+.B KODI_HOST
+Host (and optional port) of an implicit
+.I default
+instance.
+.TP
+.B KODI_AUTH
+HTTP Basic credentials as
+.IR user:pass .
+.TP
+.B KODI_SCHEME
+.I http
+or
+.IR https .
+.TP
+.B KODI_CURL_OPTS
+A
+.B \-k
+here maps to the instance's
+.I insecure
+flag.
+.TP
+.B XDG_CONFIG_HOME
+Base directory for the configuration file; defaults to
+.IR ~/.config .
+.SH FILES
+.TP
+.I ${XDG_CONFIG_HOME:-~/.config}/mcp-kodi/config.json
+Per-user configuration. Stores Kodi passwords in plaintext with mode 0600;
+protect it accordingly.
+.SH EXIT STATUS
+Returns 0 on a clean shutdown (stdin EOF). Returns non-zero if configuration
+cannot be loaded.
+.SH SEE ALSO
+Project documentation and the MCP specification at
+.UR https://modelcontextprotocol.io
+.UE .
+.SH AUTHOR
+Laszlo Pere <laszlopere@gmail.com>
