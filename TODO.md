@@ -346,7 +346,7 @@ Everything below this section is original design for *this* project.
   [ ] 11.6 Design tool tables
     [ ] 11.6.1 Buttons — argument-free actions; modeled as remote keypresses via
     Input.ExecuteAction (no playerid, no active-player resolution):
-      [ ] 11.6.1.1 play
+      [x] 11.6.1.1 play
         `{"method":"Input.ExecuteAction","params":{"action":"play"}}`
       [ ] 11.6.1.2 pause
         `{"method":"Input.ExecuteAction","params":{"action":"pause"}}`

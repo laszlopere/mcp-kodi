@@ -12,35 +12,409 @@ struct _MkTools
 
 G_DEFINE_QUARK (mk-tools-error-quark, mk_tools_error)
 
-/* A handler runs a tool: it reads @args (may be NULL), drives @self->kodi, and
- * returns the result payload as a newly allocated JsonNode, or NULL with @error
- * set on failure. A NULL handler in the table marks a tool not yet implemented. */
-typedef JsonNode *(*MkToolHandler) (MkTools     *self,
-                                    JsonObject  *args,
-                                    GError     **error);
+typedef struct _MkToolDef MkToolDef;
+
+/* A handler runs a tool: it reads @args (may be NULL) and its own table row
+ * @def, drives @self->kodi, and returns the result payload as a newly allocated
+ * JsonNode, or NULL with @error set on failure. Receiving @def lets one handler
+ * serve a whole family of data-driven rows — e.g. every Button shares
+ * handler_button() and reads its action from @def (§11.6.1). A NULL handler in
+ * the table marks a tool not yet implemented. */
+typedef JsonNode *(*MkToolHandler) (MkTools         *self,
+                                    const MkToolDef *def,
+                                    JsonObject      *args,
+                                    GError         **error);
 
 /* Builds a tool's `inputSchema` (a JSON Schema object) against @self, so the
  * schema can name the configured instances (§5.1). */
 typedef JsonNode *(*MkToolSchema) (MkTools *self);
 
-typedef struct
+struct _MkToolDef
 {
   const char   *name;
   const char   *description;
   MkToolSchema  schema;
   MkToolHandler handler; /* NULL until the tool is implemented */
-} MkToolDef;
+  /* Buttons (§11.6.1) are argument-free actions fired by handler_button(): this
+   * is the Input.ExecuteAction action to send (e.g. "play"). NULL otherwise. */
+  const char   *action;
+};
+
+/* ---- JSON Schema builders -------------------------------------------------
+ *
+ * Small helpers so each tool's schema reads as a few declarative lines. Every
+ * schema is `{ "type": "object", "properties": { ... }, "required": [ ... ] }`.
+ */
+
+/**
+ * schema_begin:
+ * @b: the builder to start a schema object in.
+ *
+ * Opens `{ "type": "object", "properties": {` ready for property members.
+ */
+static void
+schema_begin (JsonBuilder *b)
+{
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "type");
+  json_builder_add_string_value (b, "object");
+  json_builder_set_member_name (b, "properties");
+  json_builder_begin_object (b);
+}
+
+/**
+ * schema_end:
+ * @b: the builder whose schema object to close.
+ * @required: NULL-terminated array of required property names, or NULL.
+ *
+ * Closes the `properties` object, emits a `required` array when @required is
+ * non-empty, and closes the schema object.
+ */
+static void
+schema_end (JsonBuilder *b, const char *const *required)
+{
+  json_builder_end_object (b); /* properties */
+  if (required != NULL && required[0] != NULL)
+    {
+      json_builder_set_member_name (b, "required");
+      json_builder_begin_array (b);
+      for (gsize i = 0; required[i] != NULL; i++)
+        json_builder_add_string_value (b, required[i]);
+      json_builder_end_array (b);
+    }
+  json_builder_end_object (b); /* schema */
+}
+
+/**
+ * prop_typed:
+ * @b: the builder, positioned inside a `properties` object.
+ * @name: the property name.
+ * @type: the JSON Schema `type` (e.g. "string", "integer").
+ * @desc: a human description, or NULL to omit it.
+ *
+ * Adds `"<name>": { "type": <type>[, "description": <desc>] }`.
+ */
+static void
+prop_typed (JsonBuilder *b, const char *name, const char *type,
+            const char *desc)
+{
+  json_builder_set_member_name (b, name);
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "type");
+  json_builder_add_string_value (b, type);
+  if (desc != NULL)
+    {
+      json_builder_set_member_name (b, "description");
+      json_builder_add_string_value (b, desc);
+    }
+  json_builder_end_object (b);
+}
+
+/**
+ * prop_instance:
+ * @b: the builder, positioned inside a `properties` object.
+ * @self: the table, used to list configured instance names.
+ * @allow_star: whether to document the `"*"` (all instances) wildcard.
+ *
+ * Adds the optional `instance` property whose description enumerates the
+ * configured instances and names the default (§5.1), so the client can target
+ * a box by name. With @allow_star, also documents `"*"` for "every instance"
+ * (used by `status`, §5.4).
+ */
+static void
+prop_instance (JsonBuilder *b, MkTools *self, gboolean allow_star)
+{
+  g_autoptr (GString) desc = g_string_new ("Target Kodi instance");
+
+  GList *names = mk_config_instance_names (self->config);
+  if (names != NULL)
+    {
+      g_string_append (desc, " (one of: ");
+      for (GList *l = names; l != NULL; l = l->next)
+        g_string_append_printf (desc, "%s%s", (const char *) l->data,
+                                l->next ? ", " : "");
+      g_string_append_c (desc, ')');
+    }
+  g_list_free (names);
+
+  g_string_append_printf (desc, ". Omitted uses the default (\"%s\").",
+                          mk_config_get_default (self->config));
+  if (allow_star)
+    g_string_append (desc, " Use \"*\" for all instances.");
+
+  prop_typed (b, "instance", "string", desc->str);
+}
+
+/* ---- Per-tool schemas -----------------------------------------------------
+ *
+ * Each returns a freshly built schema node (json_builder_get_root); the table
+ * consumer takes ownership.
+ */
+
+/**
+ * schema_instance_only:
+ * @self: the table.
+ *
+ * Schema for tools whose only argument is the optional `instance` — every
+ * Button (§11.6.1) plus other device-targeted, argument-free tools.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_instance_only (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+  prop_instance (b, self, FALSE);
+  schema_end (b, NULL);
+  return json_builder_get_root (b);
+}
+
+/* ---- Shared argument resolution -------------------------------------------- */
+
+/**
+ * arg_instance:
+ * @args: the tool-call arguments object, or NULL.
+ *
+ * Reads the optional `instance` argument (§5.1). The returned string is
+ * borrowed from @args.
+ *
+ * @return the instance name, or NULL to mean "the configured default".
+ */
+static const char *
+arg_instance (JsonObject *args)
+{
+  if (args == NULL || !json_object_has_member (args, "instance"))
+    return NULL;
+  return json_object_get_string_member_with_default (args, "instance", NULL);
+}
+
+/* ---- Per-tool handlers ----------------------------------------------------
+ *
+ * Each handler reads @args and its row @def, drives @self->kodi, and returns
+ * the result payload as a newly allocated JsonNode (or NULL with @error set).
+ */
+
+/**
+ * copy_member:
+ * @b: the builder, positioned inside an object.
+ * @src: the source object to copy from, or NULL.
+ * @name: the member to copy.
+ *
+ * If @src has member @name, deep-copies it (value and key) into @b; otherwise
+ * does nothing. Used to forward selected fields out of Kodi replies.
+ */
+static void
+copy_member (JsonBuilder *b, JsonObject *src, const char *name)
+{
+  if (src == NULL || !json_object_has_member (src, name))
+    return;
+  json_builder_set_member_name (b, name);
+  json_builder_add_value (b, json_node_copy (json_object_get_member (src, name)));
+}
+
+/**
+ * player_props:
+ * @playerid: the active player's id.
+ * @fields: NULL-terminated array of property/field names to request.
+ *
+ * Builds a `{ "playerid": <id>, "properties": [ ... ] }` params node shared by
+ * `Player.GetProperties` and `Player.GetItem`.
+ *
+ * @return a newly allocated JsonNode; free with json_node_unref().
+ */
+static JsonNode *
+player_props (gint64 playerid, const char *const *fields)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "playerid");
+  json_builder_add_int_value (b, playerid);
+  json_builder_set_member_name (b, "properties");
+  json_builder_begin_array (b);
+  for (gsize i = 0; fields[i] != NULL; i++)
+    json_builder_add_string_value (b, fields[i]);
+  json_builder_end_array (b);
+  json_builder_end_object (b);
+  return json_builder_get_root (b);
+}
+
+/**
+ * player_state:
+ * @self: the tool table.
+ * @instance: target instance name, or NULL for the configured default.
+ * @error: return location for a GError, or NULL.
+ *
+ * Builds the server's canonical now-playing snapshot for @instance — the
+ * **shared response shape** returned by the many tools whose effect is a
+ * change in player state (every transport Button — play/pause/stop (§11.6.1) —
+ * plus seek, skip, speed, handoff, status, …). Reusing one builder keeps that
+ * response identical across all of them, so a client learns the shape once and
+ * any of those calls answers "what is loaded, is it playing, and how far in".
+ *
+ * There is no single Kodi method for it, so it combines three calls:
+ * `Player.GetActivePlayers` to find the active player, then
+ * `Player.GetProperties` (speed/time/totaltime) and `Player.GetItem`
+ * (file/label/title) on it (§5.4). Progress is reported as `time`/`totaltime`
+ * only; a percentage is just `time / totaltime` and is left for the caller to
+ * compute rather than returned redundantly.
+ *
+ * @return a newly allocated object node — `{ "state": "stopped" }` when nothing
+ *         is active, else `{ "state": "playing"|"paused", "type"?, "file"?,
+ *         "label"?, "title"?, "time"?, "totaltime"? }` — or NULL with @error set
+ *         if a call fails. Example, a video paused 15:38 into 46:40 (≈33%):
+ * @code{.json}
+ * {
+ *   "state": "paused",
+ *   "type": "video",
+ *   "file": "/storage/Serials/Law & Order/Season 4/Law & Order 4x01 Sweeps.avi",
+ *   "label": "Law & Order 4x01 Sweeps.avi",
+ *   "title": "",
+ *   "time":      { "hours": 0, "minutes": 15, "seconds": 38, "milliseconds": 507 },
+ *   "totaltime": { "hours": 0, "minutes": 46, "seconds": 40, "milliseconds": 633 }
+ * }
+ * @endcode
+ */
+static JsonNode *
+player_state (MkTools *self, const char *instance, GError **error)
+{
+  g_autoptr (JsonNode) active =
+    mk_kodi_call (self->kodi, instance, "Player.GetActivePlayers", NULL, error);
+  if (active == NULL)
+    return NULL;
+
+  JsonArray *players =
+    JSON_NODE_HOLDS_ARRAY (active) ? json_node_get_array (active) : NULL;
+  if (players == NULL || json_array_get_length (players) == 0)
+    {
+      g_autoptr (JsonBuilder) b = json_builder_new ();
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "state");
+      json_builder_add_string_value (b, "stopped");
+      json_builder_end_object (b);
+      return json_builder_get_root (b);
+    }
+
+  JsonObject *p0 = json_array_get_object_element (players, 0);
+  gint64 playerid = json_object_get_int_member_with_default (p0, "playerid", 0);
+  const char *ptype =
+    json_object_get_string_member_with_default (p0, "type", NULL);
+
+  static const char *const prop_fields[] = { "speed", "time", "totaltime",
+                                             NULL };
+  g_autoptr (JsonNode) pparams = player_props (playerid, prop_fields);
+  g_autoptr (JsonNode) pres = mk_kodi_call (self->kodi, instance,
+                                            "Player.GetProperties", pparams,
+                                            error);
+  if (pres == NULL)
+    return NULL;
+  JsonObject *props = json_node_get_object (pres);
+
+  static const char *const item_fields[] = { "title", "file", NULL };
+  g_autoptr (JsonNode) iparams = player_props (playerid, item_fields);
+  g_autoptr (JsonNode) ires =
+    mk_kodi_call (self->kodi, instance, "Player.GetItem", iparams, error);
+  if (ires == NULL)
+    return NULL;
+  JsonObject *item =
+    json_object_get_object_member (json_node_get_object (ires), "item");
+
+  gint64 speed = json_object_get_int_member_with_default (props, "speed", 0);
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "state");
+  json_builder_add_string_value (b, speed != 0 ? "playing" : "paused");
+  if (ptype != NULL)
+    {
+      json_builder_set_member_name (b, "type");
+      json_builder_add_string_value (b, ptype);
+    }
+  copy_member (b, item, "file");
+  copy_member (b, item, "label");
+  copy_member (b, item, "title");
+  copy_member (b, props, "time");
+  copy_member (b, props, "totaltime");
+  json_builder_end_object (b);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_button:
+ * @self: the tool table.
+ * @def: this Button's table row; @def->action names the action to fire.
+ * @args: the call arguments (optional `instance`), or NULL.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements a Button (§11.6.1): an argument-free remote keypress. Fires
+ * `Input.ExecuteAction` with `{ "action": <def->action> }` on the target
+ * instance — no playerid, no active-player resolution — then returns the
+ * resulting player_state() snapshot (what is loaded, playing vs paused, and how
+ * far in) rather than Kodi's bare "OK", so the caller sees the action's effect.
+ *
+ * `Input.ExecuteAction` replies "OK" the moment the action is queued, before
+ * the player's `speed` settles, so a snapshot taken immediately can still read
+ * the pre-action state (e.g. "paused" right after play). A brief settle delay
+ * before snapshotting makes the reported state reflect the action.
+ *
+ * @return the post-action player-state object, or NULL with @error set.
+ */
+#define MK_BUTTON_SETTLE_US (200 * 1000) /* let the action take effect first */
+
+static JsonNode *
+handler_button (MkTools *self, const MkToolDef *def, JsonObject *args,
+                GError **error)
+{
+  const char *instance = arg_instance (args);
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "action");
+  json_builder_add_string_value (b, def->action);
+  json_builder_end_object (b);
+  g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+  g_autoptr (JsonNode) acted = mk_kodi_call (self->kodi, instance,
+                                             "Input.ExecuteAction", params,
+                                             error);
+  if (acted == NULL)
+    return NULL;
+
+  g_usleep (MK_BUTTON_SETTLE_US);
+  return player_state (self, instance, error);
+}
 
 /* ---- The tool table -------------------------------------------------------
  *
- * Intentionally empty: the tool surface is being rebuilt from the comprehensive
- * Kodi JSON-RPC inventory (../TODO.md §12) once the taxonomy that groups those
- * methods into tools is settled. Each tool lands here as a
- * `{ name, description, schema, handler }` row, with its schema builder and
- * handler defined above. Until then `tools/list` reports no tools and every
- * `tools/call` is an unknown tool.
+ * Being rebuilt from the comprehensive Kodi JSON-RPC inventory (../TODO.md §12)
+ * grouped by the §11.6 taxonomy. Each tool is a
+ * `{ name, description, schema, handler, action }` row; a NULL handler yields a
+ * clean "not implemented" result.
  */
 static const MkToolDef mk_tool_defs[] = {
+  /* ---- Buttons — argument-free remote keypresses via Input.ExecuteAction
+   *      (§11.6.1). Each fires handler_button() with the `action` field. ---- */
+
+  /**
+   * play (Button):
+   *
+   * Press Play on the Kodi remote — resume a paused player or begin playback of
+   * the focused/active item on the target instance. A remote keypress, not a
+   * player command: no playerid and no active-player resolution (§11.6.1).
+   *
+   * Call:  Input.ExecuteAction { "action": "play" }, then player_state() to
+   *        report the effect.
+   * @param instance (optional): name of the Kodi instance to target; omitted
+   *        uses the configured default (§5.1).
+   * @return the resulting player-state snapshot: `{ "state":
+   *         "playing"|"paused"|"stopped", "file", "label", "title", "time",
+   *         "totaltime" }` (fields present when a player is active). With
+   *         nothing loaded the action is a no-op and the reply is
+   *         `{ "state": "stopped" }`.
+   */
+  { "play", "Press Play on the Kodi remote: resume/begin playback on the "
+            "target instance.",
+    schema_instance_only, handler_button, "play" },
 };
 
 /**
@@ -259,7 +633,7 @@ mk_tools_call (MkTools     *self,
     }
 
   GError *local = NULL;
-  g_autoptr (JsonNode) result = def->handler (self, arguments, &local);
+  g_autoptr (JsonNode) result = def->handler (self, def, arguments, &local);
   if (result == NULL)
     {
       g_autofree char *text =
