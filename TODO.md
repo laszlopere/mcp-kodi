@@ -1163,10 +1163,13 @@ Everything below this section is original design for *this* project.
       truth, history just copies it — and every `status`/transport reply gets
       richer too (arguably a feature: "playing S01E02 of Earth 2"). Cost: a larger
       status JSON on every call. **Recommended.**
-      [ ] 13.4.3.2 *Keep `player_state()` lean and have the history path issue its
+      [x] 13.4.3.2 *Keep `player_state()` lean and have the history path issue its
       own richer `Player.GetItem`* when it records. Keeps the shared snapshot
       small, but adds one extra `GetItem` per recorded play (rare, dedup'd — §13.5)
-      and a second code path that can drift from the snapshot.
+      and a second code path that can drift from the snapshot. **Considered and
+      rejected** in favour of §13.4.3.1: the single-source-of-truth snapshot and
+      the richer status replies outweigh a marginally larger status JSON, and one
+      code path can't drift from itself.
     Decide against a real `history.json` (§13.10) — but the fields themselves are
     committed for v1; this is only *how* to fetch them.
     [ ] 13.4.4 **Deeper metadata stays parked.** Anything past §13.4.2 — genre,
