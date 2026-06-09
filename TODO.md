@@ -650,9 +650,9 @@ Everything below this section is original design for *this* project.
           "result": {
             "limits": { "start": 0, "end": 3, "total": 31 },
             "songs": [
-              { "songid": 86, "track": 1, "title": "Ring Ring",                   "duration": 184, "artist": ["Abba"], "album": "Ring Ring", "file": "/home/pipas/net/storage03/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/01 Ring Ring.mp3" },
-              { "songid": 87, "track": 2, "title": "Another Town, Another Train", "duration": 192, "artist": ["Abba"], "album": "Ring Ring", "file": "/home/pipas/net/storage03/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/02 Another Town, Another Train.mp3" },
-              { "songid": 88, "track": 3, "title": "Disillusion",                 "duration": 185, "artist": ["Abba"], "album": "Ring Ring", "file": "/home/pipas/net/storage03/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/03 Disillusion.mp3" }
+              { "songid": 86, "track": 1, "title": "Ring Ring",                   "duration": 184, "artist": ["Abba"], "album": "Ring Ring", "file": "/media/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/01 Ring Ring.mp3" },
+              { "songid": 87, "track": 2, "title": "Another Town, Another Train", "duration": 192, "artist": ["Abba"], "album": "Ring Ring", "file": "/media/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/02 Another Town, Another Train.mp3" },
+              { "songid": 88, "track": 3, "title": "Disillusion",                 "duration": 185, "artist": ["Abba"], "album": "Ring Ring", "file": "/media/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/03 Disillusion.mp3" }
             ]
           }
         }
@@ -765,7 +765,7 @@ Everything below this section is original design for *this* project.
           "method": "Player.Open",
           "params": {
             "item": {
-              "file": "/home/pipas/net/storage03/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/01 Ring Ring.mp3"
+              "file": "/media/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/01 Ring Ring.mp3"
             }
           }
         }
@@ -895,7 +895,7 @@ Everything below this section is original design for *this* project.
                 "rating": 8.170000076293945,
                 "runtime": 7020,
                 "playcount": 0,
-                "file": "/home/pipas/net/storage03/Movies/Alien/Alien.1979.Directors.Cut.720p.BluRay.x264.AAC-ETRG.mp4"
+                "file": "/media/Movies/Alien/Alien.1979.Directors.Cut.720p.BluRay.x264.AAC-ETRG.mp4"
               }
             ]
           }
@@ -987,7 +987,7 @@ Everything below this section is original design for *this* project.
                 "episode": 2,
                 "firstaired": "1994-11-06",
                 "runtime": 0,
-                "file": "/home/pipas/net/storage03/Serials/Earth 2/Earth.2.s01.e02.The.man.who.fell.to.earth.(Two).avi"
+                "file": "/media/Serials/Earth 2/Earth.2.s01.e02.The.man.who.fell.to.earth.(Two).avi"
               }
             ]
           }

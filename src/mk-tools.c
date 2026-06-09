@@ -172,7 +172,7 @@ prop_instance (JsonBuilder *b, MkTools *self, gboolean allow_star)
           const char *key = l->data;
           MkInstance *inst = mk_config_get_instance (self->config, key);
           /* Show the human-readable name alongside the key the tool expects,
-           * e.g. `mini02 ("Living Room TV")`, when the instance has one. */
+           * e.g. `living-room ("Living Room TV")`, when the instance has one. */
           if (inst != NULL && inst->name != NULL)
             g_string_append_printf (desc, "%s (\"%s\")", key, inst->name);
           else

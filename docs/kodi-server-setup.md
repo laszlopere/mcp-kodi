@@ -125,7 +125,7 @@ Replace its contents with the following. **Change `kodi.example.local` to your
 machine's hostname or IP address** (you can list several, comma-separated):
 
 ```caddyfile
-kodi.example.local:8443, 192.168.0.54:8443 {
+kodi.example.local:8443, 192.168.1.50:8443 {
     # Kodi serves JSON-RPC over WebSocket on a separate port (9090).
     # Match WebSocket upgrade requests and send them there...
     @websockets {
@@ -217,8 +217,8 @@ That's the whole setup. mcp-kodi will now reach Kodi over encrypted HTTPS.
 
 ## Appendix — Reference configuration (the author's working setup)
 
-These are the exact values from the project author's machine (`mini02`), for
-comparison. Yours will differ in hostname/IP and password.
+A complete, working example for comparison. Substitute your own hostname/IP and
+password.
 
 **Versions:** Kodi 19.4 (Matrix) on Ubuntu 22.04 · Caddy v2.11.3
 
@@ -238,7 +238,7 @@ Kodi listens on `0.0.0.0:8080` (HTTP web server) and `127.0.0.1:9090`
 **Caddy** — `/etc/caddy/Caddyfile`:
 
 ```caddyfile
-mini02.homelab.local:8443, mini02:8443, 192.168.0.54:8443 {
+kodi.example.local:8443, 192.168.1.50:8443 {
     @websockets {
         header Connection *Upgrade*
         header Upgrade    websocket
@@ -249,4 +249,5 @@ mini02.homelab.local:8443, mini02:8443, 192.168.0.54:8443 {
 }
 ```
 
-Caddy listens on `*:8443`. No host firewall is enabled (the LAN is trusted).
+Caddy listens on `*:8443`. Restrict access to your trusted LAN (host firewall
+and/or router rules) so only the proxy port is reachable.
