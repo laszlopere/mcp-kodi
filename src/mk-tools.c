@@ -346,6 +346,13 @@ player_props (gint64 playerid, const char *const *fields)
  * response identical across all of them, so a client learns the shape once and
  * any of those calls answers "what is loaded, is it playing, and how far in".
  *
+ * This snapshot is also the **raw material the playback-history log reuses**
+ * (§13.3): when the write path lands (§13.9) the history record is composed
+ * straight from this object plus the instance key and a capture timestamp, with
+ * **no extra Kodi round-trip** beyond the calls below. The one exception is the
+ * `rpc` escape hatch, which takes no snapshot of its own and so will issue one
+ * post-call purely to feed history (§13.3.1).
+ *
  * There is no single Kodi method for it, so it combines three calls:
  * `Player.GetActivePlayers` to find the active player, then
  * `Player.GetProperties` (speed/time/totaltime) and `Player.GetItem`

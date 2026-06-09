@@ -1052,14 +1052,14 @@ Everything below this section is original design for *this* project.
     observed*, not a complete audit of the box. Honest about its gaps; good
     enough for "what did we play".
 
-  [ ] 13.3 **The snapshot is the raw material — no extra Kodi call.** Every
+  [x] 13.3 **The snapshot is the raw material — no extra Kodi call.** Every
   playback-affecting tool already ends by building the canonical `player_state()`
   snapshot (§5.4: `state`, `type`, `file`, `label`, `title`, `time`,
   `totaltime`) — `play`/`playfile`/`random`/`handoff` and the transport Buttons.
   History **reuses that exact snapshot**; from it plus the instance key and a
   capture timestamp we compose one entry (point 4 of the brief). No round-trip
   beyond the one the tool already makes.
-    [ ] 13.3.1 **The escape hatch too.** The `rpc` tool (§11.6.6) returns Kodi's
+    [x] 13.3.1 **The escape hatch too.** The `rpc` tool (§11.6.6) returns Kodi's
     raw `result` verbatim and takes **no** snapshot — so an `rpc` that started
     playback (a hand-rolled `Player.Open`) would slip past history. After a
     *successful* `rpc` call, take a `player_state()` snapshot **purely to feed

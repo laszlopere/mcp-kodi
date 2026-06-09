@@ -20,6 +20,16 @@
  * on its own (no playlist/queue tracking yet, §13.2.2). Honest about its gaps;
  * good enough for "what did we play" (§13.2.3).
  *
+ * The raw material is free: every playback-affecting tool already ends by
+ * building the canonical now-playing snapshot (player_state(), §5.4 — state,
+ * type, file, label, title, time, totaltime). History **reuses that exact
+ * snapshot** (§13.3); a record is composed from it plus the instance key and a
+ * capture timestamp, with no extra Kodi round-trip. The lone exception is the
+ * `rpc` escape hatch (§11.6.6), which returns Kodi's raw result and takes no
+ * snapshot — so after a successful `rpc` it issues one extra snapshot purely to
+ * feed history, as a side effect that must not change `rpc`'s verbatim return
+ * (§13.3.1). That wiring lands with the write path (§13.5–§13.9).
+ *
  * This is the §13.1 foundation only: the module, its own storage path
  * (${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/history.json, §13.6), and
  * lifecycle. The write path — record/dedup/lock/trim (§13.5–§13.9) — and the
