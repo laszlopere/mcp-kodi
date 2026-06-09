@@ -48,10 +48,10 @@
  *   - `media` — the real media type (§13.4.1): `song`/`episode`/`movie`/
  *               `musicvideo`/`picture`/`channel`/`unknown`. Kodi injects it into
  *               the Player.GetItem reply as an **identity field** (not a
- *               requestable property), so it is free; player_state() just
- *               discards it today. Surfacing it needs a key other than `type`
- *               (the snapshot already spends `type` on the player kind), hence
- *               the `kind` + `media` split.
+ *               requestable property), so it is free; player_state() surfaces it
+ *               under `media` — a key other than `type` (the snapshot already
+ *               spends `type` on the player kind), hence the `kind` + `media`
+ *               split.
  *   - `id`    — the library id (§13.4.1): the auto-injected songid/episodeid/
  *               movieid, also free. A best-effort replay handle for
  *               Player.Open {<media>id: N}, NOT a durable key — it is

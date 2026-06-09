@@ -400,9 +400,12 @@ player_props (gint64 playerid, const char *const *fields)
  * it applies (copy_member_nonempty drops the `""`/`[]`/`-1` sentinels Kodi
  * returns for the other media types), so a movie carries none of them and every
  * status/transport reply reads richer ("playing S01E02 of …") for free. The
- * media type and library id themselves (`media`/`id`, §13.4.1) are not surfaced
- * here yet — that touches the `type` key the snapshot already spends on the
- * player kind, and is left to its own step.
+ * real media type and library id (`media`/`id`, §13.4.1) are surfaced too,
+ * under keys distinct from `type` (which is spent on the player kind): both are
+ * identity fields Kodi auto-injects into the same GetItem reply, so they cost
+ * nothing extra. An off-library file reports `media` "unknown" and `id` -1
+ * (§13.4.1.1); both are kept as-is rather than dropped, so the history log can
+ * record an item as unenriched.
  *
  * There is no single Kodi method for it, so it combines three calls:
  * `Player.GetActivePlayers` to find the active player, then
@@ -412,11 +415,12 @@ player_props (gint64 playerid, const char *const *fields)
  * compute rather than returned redundantly.
  *
  * @return a newly allocated object node — `{ "state": "stopped" }` when nothing
- *         is active, else `{ "state": "playing"|"paused", "type"?, "file"?,
- *         "label"?, "title"?, "showtitle"?, "season"?, "episode"?, "album"?,
- *         "artist"?, "track"?, "time"?, "totaltime"? }` (the per-media fields
- *         present only where they apply, §13.4.2) — or NULL with @error set if a
- *         call fails. Example, a video paused 15:38 into 46:40 (≈33%):
+ *         is active, else `{ "state": "playing"|"paused", "type"?, "media"?,
+ *         "id"?, "file"?, "label"?, "title"?, "showtitle"?, "season"?,
+ *         "episode"?, "album"?, "artist"?, "track"?, "time"?, "totaltime"? }`
+ *         (`media`/`id` whenever an item is loaded, §13.4.1; the per-media
+ *         fields present only where they apply, §13.4.2) — or NULL with @error
+ *         set if a call fails. Example, a video paused 15:38 into 46:40 (≈33%):
  * @code{.json}
  * {
  *   "state": "paused",
@@ -488,6 +492,27 @@ player_state (MkTools *self, const char *instance, GError **error)
     {
       json_builder_set_member_name (b, "type");
       json_builder_add_string_value (b, ptype);
+    }
+  /* §13.4.1: the real media type and library id, surfaced under keys distinct
+   * from `type` (which the snapshot spends on the player kind above). Both are
+   * identity fields Kodi auto-injects into every Player.GetItem reply — free,
+   * not requestable properties — so player_state() now carries them too: status
+   * and transport replies read richer ("episode 4838"), and the history log
+   * (§13.9) copies them straight from this snapshot. An off-library file (a
+   * `playfile` of a path absent from the library) reports media "unknown" and
+   * id -1 (§13.4.1.1); both are recorded as-is so the log can mark it
+   * unenriched, so unlike the §13.4.2 fields these are not dropped when empty. */
+  if (json_object_has_member (item, "type"))
+    {
+      json_builder_set_member_name (b, "media");
+      json_builder_add_string_value (
+        b, json_object_get_string_member_with_default (item, "type", "unknown"));
+    }
+  if (json_object_has_member (item, "id"))
+    {
+      json_builder_set_member_name (b, "id");
+      json_builder_add_int_value (
+        b, json_object_get_int_member_with_default (item, "id", -1));
     }
   copy_member (b, item, "file");
   copy_member (b, item, "label");
