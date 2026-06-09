@@ -764,6 +764,957 @@ handler_instances (MkTools *self, const MkToolDef *def, JsonObject *args,
   return NULL;
 }
 
+/* ---- search (§11.6.4.1) ---------------------------------------------------
+ *
+ * One generic find-by-name tool that drills each media type's hierarchy down to
+ * playable **leaf files** (§5.10). The key design choice is to descend to the
+ * album/season level only when the user names one, so every *wide* query (bare
+ * artist, bare show) is a single Kodi call whose `limits {start, end, total}`
+ * maps straight onto the tool's `total`/`limit`/`offset`. The one multi-call
+ * case — a substring album `title` matching several albums — is collected
+ * app-side and flagged `approximate`.
+ */
+
+#define MK_SEARCH_DEFAULT_LIMIT 50  /* default leaf cap when `limit` omitted */
+#define MK_SEARCH_MAX_LIMIT     500 /* hard ceiling on `limit` */
+#define MK_SEARCH_RESOLVE_SCAN  25  /* candidates fetched when resolving a name */
+
+/* Leaf-row members forwarded from a Kodi item into a result row, when present.
+ * A superset across the three types — copy_member() skips the ones a given item
+ * lacks, so one list serves songs, episodes, and movies. `file` is the playfile
+ * input; the per-type id (`songid`/`episodeid`/`movieid`) is the library handle. */
+static const char *const mk_search_row_fields[] = {
+  "songid", "episodeid", "movieid", "label", "title", "file",
+  "track", "season", "episode", "year", "artist", "album",
+  "duration", "runtime", "firstaired", NULL
+};
+
+/* Song leaf properties requested from AudioLibrary.GetSongs. The `artist`
+ * display field is deliberately omitted: it is redundant with the resolved
+ * artist echoed in `resolved`, and — fatally — Kodi 19.4 turns a `GetSongs`
+ * `{artistid}` query that both sorts and requests `artist` into a ~20s join over
+ * a large discography (either alone stays milliseconds), which would time the
+ * call out. */
+static const char *const mk_search_song_props[] = {
+  "title", "track", "duration", "album", "file", NULL
+};
+
+/**
+ * arg_int:
+ * @args: the call arguments object, or NULL.
+ * @name: the member to read.
+ * @out: return location for the value when present.
+ *
+ * Reads an optional integer argument. The returned @out is set only when @name
+ * is present, so the caller can tell "omitted" from an explicit value.
+ *
+ * @return TRUE and sets @out when @name is present; FALSE otherwise.
+ */
+static gboolean
+arg_int (JsonObject *args, const char *name, gint64 *out)
+{
+  if (args == NULL || !json_object_has_member (args, name))
+    return FALSE;
+  *out = json_object_get_int_member_with_default (args, name, 0);
+  return TRUE;
+}
+
+/**
+ * arg_bool:
+ * @args: the call arguments object, or NULL.
+ * @name: the member to read.
+ *
+ * Reads an optional boolean argument, defaulting to FALSE when absent.
+ *
+ * @return the boolean value, or FALSE when @name is absent.
+ */
+static gboolean
+arg_bool (JsonObject *args, const char *name)
+{
+  if (args == NULL || !json_object_has_member (args, name))
+    return FALSE;
+  return json_object_get_boolean_member_with_default (args, name, FALSE);
+}
+
+/**
+ * ci_equal:
+ * @a: first string, or NULL.
+ * @b: second string, or NULL.
+ *
+ * Case-insensitive (Unicode case-folded) full-string equality.
+ *
+ * @return TRUE when both are non-NULL and equal ignoring case.
+ */
+static gboolean
+ci_equal (const char *a, const char *b)
+{
+  if (a == NULL || b == NULL)
+    return FALSE;
+  g_autofree char *x = g_utf8_casefold (a, -1);
+  g_autofree char *y = g_utf8_casefold (b, -1);
+  return g_strcmp0 (x, y) == 0;
+}
+
+/**
+ * ci_contains:
+ * @haystack: string to search in, or NULL.
+ * @needle: substring to look for, or NULL.
+ *
+ * Case-insensitive (Unicode case-folded) substring test, mirroring Kodi's
+ * `contains` operator so app-side album matching agrees with server-side
+ * filtering.
+ *
+ * @return TRUE when @needle occurs in @haystack ignoring case.
+ */
+static gboolean
+ci_contains (const char *haystack, const char *needle)
+{
+  if (haystack == NULL || needle == NULL)
+    return FALSE;
+  g_autofree char *x = g_utf8_casefold (haystack, -1);
+  g_autofree char *y = g_utf8_casefold (needle, -1);
+  return g_strstr_len (x, -1, y) != NULL;
+}
+
+/**
+ * add_field_filter:
+ * @b: the builder, positioned inside a params object.
+ * @field: the field name to match (e.g. "title", "artist", "episode").
+ * @op: the operator ("contains" for substring, "is" for exact).
+ * @value: the value to match (always a string, even for numeric fields).
+ *
+ * Adds a `"filter": { "field", "operator", "value" }` rule (§12.16.12/§12.3.6).
+ */
+static void
+add_field_filter (JsonBuilder *b, const char *field, const char *op,
+                  const char *value)
+{
+  json_builder_set_member_name (b, "filter");
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "field");
+  json_builder_add_string_value (b, field);
+  json_builder_set_member_name (b, "operator");
+  json_builder_add_string_value (b, op);
+  json_builder_set_member_name (b, "value");
+  json_builder_add_string_value (b, value);
+  json_builder_end_object (b);
+}
+
+/**
+ * add_id_filter:
+ * @b: the builder, positioned inside a params object.
+ * @key: the special filter key ("artistid" or "albumid").
+ * @id: the library id to filter by.
+ *
+ * Adds Kodi's special id `"filter": { "<key>": <id> }` form (§12.3.6 steps 2-3)
+ * — distinct from a field/operator rule.
+ */
+static void
+add_id_filter (JsonBuilder *b, const char *key, gint64 id)
+{
+  json_builder_set_member_name (b, "filter");
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, key);
+  json_builder_add_int_value (b, id);
+  json_builder_end_object (b);
+}
+
+/**
+ * add_properties:
+ * @b: the builder, positioned inside a params object.
+ * @props: NULL-terminated array of property names, or NULL to omit.
+ *
+ * Adds the `"properties": [ ... ]` request when @props is non-NULL.
+ */
+static void
+add_properties (JsonBuilder *b, const char *const *props)
+{
+  if (props == NULL)
+    return;
+  json_builder_set_member_name (b, "properties");
+  json_builder_begin_array (b);
+  for (gsize i = 0; props[i] != NULL; i++)
+    json_builder_add_string_value (b, props[i]);
+  json_builder_end_array (b);
+}
+
+/**
+ * add_sort:
+ * @b: the builder, positioned inside a params object.
+ * @method: the Kodi sort method ("label", "track", "title", "episode", …).
+ *
+ * Adds an ascending `"sort": { "method", "order": "ascending" }`.
+ */
+static void
+add_sort (JsonBuilder *b, const char *method)
+{
+  json_builder_set_member_name (b, "sort");
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "method");
+  json_builder_add_string_value (b, method);
+  json_builder_set_member_name (b, "order");
+  json_builder_add_string_value (b, "ascending");
+  json_builder_end_object (b);
+}
+
+/**
+ * add_limits:
+ * @b: the builder, positioned inside a params object.
+ * @start: first row (inclusive).
+ * @end: one past the last row (exclusive).
+ *
+ * Adds Kodi's `"limits": { "start", "end" }` window. The reply still reports the
+ * full `limits.total` regardless of the window.
+ */
+static void
+add_limits (JsonBuilder *b, gint64 start, gint64 end)
+{
+  json_builder_set_member_name (b, "limits");
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "start");
+  json_builder_add_int_value (b, start);
+  json_builder_set_member_name (b, "end");
+  json_builder_add_int_value (b, end);
+  json_builder_end_object (b);
+}
+
+/**
+ * add_page_limits:
+ * @b: the builder, positioned inside a params object.
+ * @offset: rows to skip.
+ * @limit: max rows to return.
+ * @count: when TRUE, request a one-row window (just to read `total`).
+ *
+ * Translates the tool's paging into a Kodi `limits` window: `{offset,
+ * offset+limit}` normally, or `{0, 1}` for a `count` request (the rows are
+ * discarded; only `total` is reported).
+ */
+static void
+add_page_limits (JsonBuilder *b, gint64 offset, gint64 limit, gboolean count)
+{
+  if (count)
+    add_limits (b, 0, 1);
+  else
+    add_limits (b, offset, offset + limit);
+}
+
+/**
+ * list_total:
+ * @result: a Kodi list `result` object.
+ *
+ * Reads `result.limits.total` — the full match count, independent of the window
+ * that was fetched.
+ *
+ * @return the total, or 0 when absent.
+ */
+static gint64
+list_total (JsonNode *result)
+{
+  JsonObject *o = json_node_get_object (result);
+  if (!json_object_has_member (o, "limits"))
+    return 0;
+  JsonObject *lim = json_object_get_object_member (o, "limits");
+  return json_object_get_int_member_with_default (lim, "total", 0);
+}
+
+/**
+ * collect_items:
+ * @result: a Kodi list `result` object.
+ * @arrname: the array member to read ("songs"/"episodes"/"movies"/…).
+ *
+ * Gathers the items of @result[@arrname] into a pointer array. The JsonObject
+ * elements are **borrowed** from @result, which must outlive the returned array.
+ *
+ * @return a newly allocated GPtrArray of JsonObject* (no element free func);
+ *         free with g_ptr_array_unref().
+ */
+static GPtrArray *
+collect_items (JsonNode *result, const char *arrname)
+{
+  GPtrArray *out = g_ptr_array_new ();
+  JsonObject *o = json_node_get_object (result);
+  if (!json_object_has_member (o, arrname))
+    return out;
+  JsonArray *arr = json_object_get_array_member (o, arrname);
+  guint n = json_array_get_length (arr);
+  for (guint i = 0; i < n; i++)
+    g_ptr_array_add (out, json_array_get_object_element (arr, i));
+  return out;
+}
+
+/**
+ * slice_items:
+ * @items: the full pointer array.
+ * @offset: rows to skip.
+ * @limit: max rows to take.
+ *
+ * Returns the `[offset, offset+limit)` window of @items, used for app-side
+ * paging of the multi-call music path. Elements are borrowed from @items.
+ *
+ * @return a newly allocated GPtrArray; free with g_ptr_array_unref().
+ */
+static GPtrArray *
+slice_items (GPtrArray *items, gint64 offset, gint64 limit)
+{
+  GPtrArray *page = g_ptr_array_new ();
+  for (gint64 i = offset; i >= 0 && i < (gint64) items->len
+                          && i < offset + limit;
+       i++)
+    g_ptr_array_add (page, g_ptr_array_index (items, (guint) i));
+  return page;
+}
+
+/**
+ * filter_track:
+ * @items: song items to filter.
+ * @number: the track number to keep.
+ *
+ * Keeps only the songs whose `track` equals @number — the app-side track filter
+ * used when a music `number` is given (Kodi's special id filters can't carry it).
+ *
+ * @return a newly allocated GPtrArray of the matching (borrowed) items; free
+ *         with g_ptr_array_unref().
+ */
+static GPtrArray *
+filter_track (GPtrArray *items, gint64 number)
+{
+  GPtrArray *out = g_ptr_array_new ();
+  for (guint i = 0; i < items->len; i++)
+    {
+      JsonObject *it = g_ptr_array_index (items, i);
+      if (json_object_get_int_member_with_default (it, "track", -1) == number)
+        g_ptr_array_add (out, it);
+    }
+  return out;
+}
+
+/**
+ * build_row:
+ * @b: the builder, positioned inside the `rows` array.
+ * @item: a Kodi leaf item.
+ *
+ * Emits one result row, copying every mk_search_row_fields member @item has.
+ */
+static void
+build_row (JsonBuilder *b, JsonObject *item)
+{
+  json_builder_begin_object (b);
+  for (gsize i = 0; mk_search_row_fields[i] != NULL; i++)
+    copy_member (b, item, mk_search_row_fields[i]);
+  json_builder_end_object (b);
+}
+
+/**
+ * build_search_result:
+ * @type: the searched media type ("music"/"tv-show"/"movie").
+ * @res_key: resolved-container label key ("artist"/"show"), or NULL.
+ * @res_label: the resolved container's display name, or NULL.
+ * @res_idkey: resolved-container id key ("artistid"/"tvshowid"), or NULL.
+ * @res_id: the resolved container's library id.
+ * @have_resolved: whether to emit the `resolved` object.
+ * @total: full match count (Kodi `limits.total`, or app-side length).
+ * @offset: the paging offset echoed back.
+ * @approximate: whether @total/paging are app-side estimates (multi-album).
+ * @rows: leaf items to emit, or NULL; ignored when @count.
+ * @count: when TRUE, emit zero rows (a count-only response).
+ *
+ * Builds the shared `search` response shape (§5.10): `{ type, total, returned,
+ * offset, truncated, approximate?, resolved?, rows[] }`. `truncated` is true
+ * when rows remain beyond this page (`offset + returned < total`).
+ *
+ * @return a newly allocated result object node; free with json_node_unref().
+ */
+static JsonNode *
+build_search_result (const char *type, const char *res_key,
+                     const char *res_label, const char *res_idkey,
+                     gint64 res_id, gboolean have_resolved, gint64 total,
+                     gint64 offset, gboolean approximate, GPtrArray *rows,
+                     gboolean count)
+{
+  guint returned = (count || rows == NULL) ? 0 : rows->len;
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+
+  json_builder_set_member_name (b, "type");
+  json_builder_add_string_value (b, type);
+  json_builder_set_member_name (b, "total");
+  json_builder_add_int_value (b, total);
+  json_builder_set_member_name (b, "returned");
+  json_builder_add_int_value (b, returned);
+  json_builder_set_member_name (b, "offset");
+  json_builder_add_int_value (b, offset);
+  json_builder_set_member_name (b, "truncated");
+  json_builder_add_boolean_value (b, offset + (gint64) returned < total);
+  if (approximate)
+    {
+      json_builder_set_member_name (b, "approximate");
+      json_builder_add_boolean_value (b, TRUE);
+    }
+  if (have_resolved)
+    {
+      json_builder_set_member_name (b, "resolved");
+      json_builder_begin_object (b);
+      if (res_label != NULL)
+        {
+          json_builder_set_member_name (b, res_key);
+          json_builder_add_string_value (b, res_label);
+        }
+      json_builder_set_member_name (b, res_idkey);
+      json_builder_add_int_value (b, res_id);
+      json_builder_end_object (b);
+    }
+
+  json_builder_set_member_name (b, "rows");
+  json_builder_begin_array (b);
+  if (!count && rows != NULL)
+    for (guint i = 0; i < rows->len; i++)
+      build_row (b, g_ptr_array_index (rows, i));
+  json_builder_end_array (b);
+
+  json_builder_end_object (b);
+  return json_builder_get_root (b);
+}
+
+/**
+ * resolve_container:
+ * @self: the tool table.
+ * @instance: target instance, or NULL for the default.
+ * @method: the resolving list method (GetArtists/GetTVShows).
+ * @field: the name field to match ("artist"/"title").
+ * @value: the user's query (substring, case-insensitive).
+ * @arrname: the result array member ("artists"/"tvshows").
+ * @idkey: the id member to extract ("artistid"/"tvshowid").
+ * @out_id: out; the resolved library id (0 when none).
+ * @out_label: out; newly-allocated display name (NULL when none), or NULL to
+ *             skip; free with g_free().
+ * @error: return location for a GError, or NULL.
+ *
+ * Resolves a container name down to a single library id by a `contains` list
+ * query, scanning up to MK_SEARCH_RESOLVE_SCAN candidates and preferring an
+ * exact case-insensitive match over the first hit (so "Earth 2" wins over
+ * "Earth: Final Conflict").
+ *
+ * @return 1 on a match (sets @out_id/@out_label), 0 when nothing matched, or -1
+ *         with @error set on a call failure.
+ */
+static int
+resolve_container (MkTools *self, const char *instance, const char *method,
+                   const char *field, const char *value, const char *arrname,
+                   const char *idkey, gint64 *out_id, char **out_label,
+                   GError **error)
+{
+  *out_id = 0;
+  if (out_label != NULL)
+    *out_label = NULL;
+
+  g_autoptr (JsonBuilder) pb = json_builder_new ();
+  json_builder_begin_object (pb);
+  add_field_filter (pb, field, "contains", value);
+  add_sort (pb, "label");
+  add_limits (pb, 0, MK_SEARCH_RESOLVE_SCAN);
+  json_builder_end_object (pb);
+  g_autoptr (JsonNode) params = json_builder_get_root (pb);
+
+  g_autoptr (JsonNode) result =
+    mk_kodi_call (self->kodi, instance, method, params, error);
+  if (result == NULL)
+    return -1;
+
+  JsonObject *o = json_node_get_object (result);
+  if (!json_object_has_member (o, arrname))
+    return 0;
+  JsonArray *arr = json_object_get_array_member (o, arrname);
+  guint n = json_array_get_length (arr);
+  if (n == 0)
+    return 0;
+
+  gint best = -1;
+  for (guint i = 0; i < n; i++)
+    {
+      JsonObject *it = json_array_get_object_element (arr, i);
+      const char *lab = json_object_get_string_member_with_default (
+        it, "label",
+        json_object_get_string_member_with_default (it, "title", NULL));
+      if (ci_equal (lab, value))
+        {
+          best = (gint) i;
+          break;
+        }
+    }
+  if (best < 0)
+    best = 0;
+
+  JsonObject *chosen = json_array_get_object_element (arr, (guint) best);
+  *out_id = json_object_get_int_member_with_default (chosen, idkey, 0);
+  if (out_label != NULL)
+    {
+      const char *lab = json_object_get_string_member_with_default (
+        chosen, "label",
+        json_object_get_string_member_with_default (chosen, "title", NULL));
+      *out_label = g_strdup (lab);
+    }
+  return (*out_id != 0) ? 1 : 0;
+}
+
+/**
+ * match_albums:
+ * @self: the tool table.
+ * @instance: target instance, or NULL for the default.
+ * @artistid: the resolved artist.
+ * @title: the album-title substring to match (case-insensitive).
+ * @out_ids: out; appended with each matching `albumid` (gint64).
+ * @error: return location for a GError, or NULL.
+ *
+ * Lists the artist's albums (`GetAlbums {artistid}`) and appends the ids of
+ * those whose title contains @title. Matching is app-side because Kodi's special
+ * `{artistid}` filter can't be combined with a title rule; an artist's album
+ * count is small (tens), so this is one cheap call.
+ *
+ * @return TRUE on success (even with zero matches), FALSE with @error set on a
+ *         call failure.
+ */
+static gboolean
+match_albums (MkTools *self, const char *instance, gint64 artistid,
+              const char *title, GArray *out_ids, GError **error)
+{
+  static const char *const props[] = { "title", NULL };
+
+  g_autoptr (JsonBuilder) pb = json_builder_new ();
+  json_builder_begin_object (pb);
+  add_id_filter (pb, "artistid", artistid);
+  add_properties (pb, props);
+  add_sort (pb, "label");
+  json_builder_end_object (pb);
+  g_autoptr (JsonNode) params = json_builder_get_root (pb);
+
+  g_autoptr (JsonNode) result =
+    mk_kodi_call (self->kodi, instance, "AudioLibrary.GetAlbums", params, error);
+  if (result == NULL)
+    return FALSE;
+
+  JsonObject *o = json_node_get_object (result);
+  if (!json_object_has_member (o, "albums"))
+    return TRUE;
+  JsonArray *arr = json_object_get_array_member (o, "albums");
+  guint n = json_array_get_length (arr);
+  for (guint i = 0; i < n; i++)
+    {
+      JsonObject *it = json_array_get_object_element (arr, i);
+      const char *t = json_object_get_string_member_with_default (
+        it, "title",
+        json_object_get_string_member_with_default (it, "label", NULL));
+      if (ci_contains (t, title))
+        {
+          gint64 id = json_object_get_int_member_with_default (it, "albumid", 0);
+          if (id != 0)
+            g_array_append_val (out_ids, id);
+        }
+    }
+  return TRUE;
+}
+
+/**
+ * query_songs:
+ * @self: the tool table.
+ * @instance: target instance, or NULL for the default.
+ * @idkey: the special filter key ("artistid" or "albumid").
+ * @id: the library id to filter by.
+ * @paged: when TRUE, apply the @offset/@limit/@count window; when FALSE, fetch
+ *         all songs (for the app-side collected paths).
+ * @offset: paging offset (used when @paged).
+ * @limit: paging limit (used when @paged).
+ * @count: count-only request (used when @paged).
+ * @error: return location for a GError, or NULL.
+ *
+ * Runs `AudioLibrary.GetSongs` filtered by @idkey/@id, sorted by track, with the
+ * shared song properties.
+ *
+ * @return the Kodi `result` node (free with json_node_unref()), or NULL with
+ *         @error set.
+ */
+static JsonNode *
+query_songs (MkTools *self, const char *instance, const char *idkey, gint64 id,
+             gboolean paged, gint64 offset, gint64 limit, gboolean count,
+             GError **error)
+{
+  g_autoptr (JsonBuilder) pb = json_builder_new ();
+  json_builder_begin_object (pb);
+  add_id_filter (pb, idkey, id);
+  add_properties (pb, mk_search_song_props);
+  add_sort (pb, "track");
+  if (paged)
+    add_page_limits (pb, offset, limit, count);
+  json_builder_end_object (pb);
+  g_autoptr (JsonNode) params = json_builder_get_root (pb);
+
+  return mk_kodi_call (self->kodi, instance, "AudioLibrary.GetSongs", params,
+                       error);
+}
+
+/**
+ * search_movie:
+ * @self: the tool table.
+ * @instance: target instance, or NULL for the default.
+ * @title: movie-title substring, or NULL/"" for all movies.
+ * @limit: max rows.
+ * @offset: rows to skip.
+ * @count: count-only request.
+ * @error: return location for a GError, or NULL.
+ *
+ * Resolves the movie type directly: `VideoLibrary.GetMovies` returns the
+ * playable `file` with no sublevels, so this is one paged call (§12.16.12).
+ *
+ * @return the search-result node, or NULL with @error set.
+ */
+static JsonNode *
+search_movie (MkTools *self, const char *instance, const char *title,
+              gint64 limit, gint64 offset, gboolean count, GError **error)
+{
+  static const char *const props[] = { "title",   "year",      "genre",
+                                       "rating",  "runtime",   "playcount",
+                                       "file",    NULL };
+
+  g_autoptr (JsonBuilder) pb = json_builder_new ();
+  json_builder_begin_object (pb);
+  if (title != NULL && title[0] != '\0')
+    add_field_filter (pb, "title", "contains", title);
+  add_properties (pb, props);
+  add_sort (pb, "title");
+  add_page_limits (pb, offset, limit, count);
+  json_builder_end_object (pb);
+  g_autoptr (JsonNode) params = json_builder_get_root (pb);
+
+  g_autoptr (JsonNode) result =
+    mk_kodi_call (self->kodi, instance, "VideoLibrary.GetMovies", params, error);
+  if (result == NULL)
+    return NULL;
+
+  gint64 total = list_total (result);
+  g_autoptr (GPtrArray) rows = count ? NULL : collect_items (result, "movies");
+  return build_search_result ("movie", NULL, NULL, NULL, 0, FALSE, total, offset,
+                              FALSE, rows, count);
+}
+
+/**
+ * search_tv:
+ * @self: the tool table.
+ * @instance: target instance, or NULL for the default.
+ * @title: show-name substring (required).
+ * @have_season: whether @season was given.
+ * @season: season number to narrow to.
+ * @have_number: whether @number was given.
+ * @number: episode number to pin.
+ * @limit: max rows.
+ * @offset: rows to skip.
+ * @count: count-only request.
+ * @error: return location for a GError, or NULL.
+ *
+ * Resolves the show (`GetTVShows`) then drills to episode leaves
+ * (`GetEpisodes {tvshowid, season?}` plus an exact `episode` filter when a
+ * number is given — its value is a string, §12.16.21/§12.16.6). One paged call
+ * past the resolve.
+ *
+ * @return the search-result node, or NULL with @error set (missing title or a
+ *         call failure); an unresolved show yields a clean zero-total result.
+ */
+static JsonNode *
+search_tv (MkTools *self, const char *instance, const char *title,
+           gboolean have_season, gint64 season, gboolean have_number,
+           gint64 number, gint64 limit, gint64 offset, gboolean count,
+           GError **error)
+{
+  static const char *const props[] = { "title",      "season",  "episode",
+                                       "file",       "firstaired",
+                                       "runtime",    NULL };
+
+  if (title == NULL || title[0] == '\0')
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "search tv-show: \"title\" (show name) is required");
+      return NULL;
+    }
+
+  gint64 showid = 0;
+  g_autofree char *show = NULL;
+  int r = resolve_container (self, instance, "VideoLibrary.GetTVShows", "title",
+                             title, "tvshows", "tvshowid", &showid, &show, error);
+  if (r < 0)
+    return NULL;
+  if (r == 0)
+    return build_search_result ("tv-show", NULL, NULL, NULL, 0, FALSE, 0, offset,
+                                FALSE, NULL, count);
+
+  g_autoptr (JsonBuilder) pb = json_builder_new ();
+  json_builder_begin_object (pb);
+  json_builder_set_member_name (pb, "tvshowid");
+  json_builder_add_int_value (pb, showid);
+  if (have_season)
+    {
+      json_builder_set_member_name (pb, "season");
+      json_builder_add_int_value (pb, season);
+    }
+  if (have_number)
+    {
+      g_autofree char *ns = g_strdup_printf ("%" G_GINT64_FORMAT, number);
+      add_field_filter (pb, "episode", "is", ns);
+    }
+  add_properties (pb, props);
+  add_sort (pb, "episode");
+  add_page_limits (pb, offset, limit, count);
+  json_builder_end_object (pb);
+  g_autoptr (JsonNode) params = json_builder_get_root (pb);
+
+  g_autoptr (JsonNode) result = mk_kodi_call (self->kodi, instance,
+                                              "VideoLibrary.GetEpisodes", params,
+                                              error);
+  if (result == NULL)
+    return NULL;
+
+  gint64 total = list_total (result);
+  g_autoptr (GPtrArray) rows = count ? NULL : collect_items (result, "episodes");
+  return build_search_result ("tv-show", "show", show, "tvshowid", showid, TRUE,
+                              total, offset, FALSE, rows, count);
+}
+
+/**
+ * search_music:
+ * @self: the tool table.
+ * @instance: target instance, or NULL for the default.
+ * @artist: performer substring (required).
+ * @title: album-name substring, or NULL/"" to span every album.
+ * @have_number: whether @number (track) was given.
+ * @number: track number to keep.
+ * @limit: max rows.
+ * @offset: rows to skip.
+ * @count: count-only request.
+ * @error: return location for a GError, or NULL.
+ *
+ * Resolves the artist, then drills to song leaves. The wide paths — artist-only,
+ * or a single matched album, with no track filter — are one paged
+ * `GetSongs {artistid|albumid}` call, so `total`/`limit`/`offset` come straight
+ * from Kodi. A track filter, or an album substring matching several albums,
+ * falls back to fetching the songs and paging app-side; the multi-album case is
+ * flagged `approximate` (§5.10).
+ *
+ * @return the search-result node, or NULL with @error set (missing artist or a
+ *         call failure); an unresolved artist yields a clean zero-total result.
+ */
+static JsonNode *
+search_music (MkTools *self, const char *instance, const char *artist,
+              const char *title, gboolean have_number, gint64 number,
+              gint64 limit, gint64 offset, gboolean count, GError **error)
+{
+  if (artist == NULL || artist[0] == '\0')
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "search music: \"artist\" is required");
+      return NULL;
+    }
+
+  gint64 artistid = 0;
+  g_autofree char *aname = NULL;
+  int r = resolve_container (self, instance, "AudioLibrary.GetArtists", "artist",
+                             artist, "artists", "artistid", &artistid, &aname,
+                             error);
+  if (r < 0)
+    return NULL;
+  if (r == 0)
+    return build_search_result ("music", NULL, NULL, NULL, 0, FALSE, 0, offset,
+                                FALSE, NULL, count);
+
+  gboolean have_album = (title != NULL && title[0] != '\0');
+
+  /* Wide single-call path: artist-only or one album, no track filter. */
+  if (!have_number && !have_album)
+    {
+      g_autoptr (JsonNode) result = query_songs (self, instance, "artistid",
+                                                 artistid, TRUE, offset, limit,
+                                                 count, error);
+      if (result == NULL)
+        return NULL;
+      gint64 total = list_total (result);
+      g_autoptr (GPtrArray) rows = count ? NULL : collect_items (result, "songs");
+      return build_search_result ("music", "artist", aname, "artistid", artistid,
+                                  TRUE, total, offset, FALSE, rows, count);
+    }
+
+  /* Resolve the named album(s). */
+  g_autoptr (GArray) albumids = g_array_new (FALSE, FALSE, sizeof (gint64));
+  if (have_album)
+    {
+      if (!match_albums (self, instance, artistid, title, albumids, error))
+        return NULL;
+      if (albumids->len == 0)
+        return build_search_result ("music", "artist", aname, "artistid",
+                                    artistid, TRUE, 0, offset, FALSE, NULL,
+                                    count);
+    }
+
+  if (have_album && albumids->len == 1 && !have_number)
+    {
+      gint64 albumid = g_array_index (albumids, gint64, 0);
+      g_autoptr (JsonNode) result = query_songs (self, instance, "albumid",
+                                                 albumid, TRUE, offset, limit,
+                                                 count, error);
+      if (result == NULL)
+        return NULL;
+      gint64 total = list_total (result);
+      g_autoptr (GPtrArray) rows = count ? NULL : collect_items (result, "songs");
+      return build_search_result ("music", "artist", aname, "artistid", artistid,
+                                  TRUE, total, offset, FALSE, rows, count);
+    }
+
+  /* App-side collected path: a track filter, or several matched albums. Fetch
+   * the candidate songs, optionally keep one track, then page over the set. */
+  gboolean approximate = (have_album && albumids->len > 1);
+  g_autoptr (GPtrArray) results =
+    g_ptr_array_new_with_free_func ((GDestroyNotify) json_node_unref);
+  g_autoptr (GPtrArray) all = g_ptr_array_new ();
+
+  if (have_album)
+    {
+      for (guint i = 0; i < albumids->len; i++)
+        {
+          gint64 albumid = g_array_index (albumids, gint64, i);
+          JsonNode *res = query_songs (self, instance, "albumid", albumid, FALSE,
+                                       0, 0, FALSE, error);
+          if (res == NULL)
+            return NULL;
+          g_ptr_array_add (results, res);
+          g_autoptr (GPtrArray) items = collect_items (res, "songs");
+          for (guint j = 0; j < items->len; j++)
+            g_ptr_array_add (all, g_ptr_array_index (items, j));
+        }
+    }
+  else
+    {
+      JsonNode *res = query_songs (self, instance, "artistid", artistid, FALSE, 0,
+                                   0, FALSE, error);
+      if (res == NULL)
+        return NULL;
+      g_ptr_array_add (results, res);
+      g_autoptr (GPtrArray) items = collect_items (res, "songs");
+      for (guint j = 0; j < items->len; j++)
+        g_ptr_array_add (all, g_ptr_array_index (items, j));
+    }
+
+  GPtrArray *eff = all;
+  g_autoptr (GPtrArray) filtered = NULL;
+  if (have_number)
+    {
+      filtered = filter_track (all, number);
+      eff = filtered;
+    }
+
+  gint64 total = eff->len;
+  g_autoptr (GPtrArray) page = count ? NULL : slice_items (eff, offset, limit);
+  return build_search_result ("music", "artist", aname, "artistid", artistid,
+                              TRUE, total, offset, approximate, page, count);
+}
+
+/**
+ * schema_search:
+ * @self: the table (used to name the configured instances).
+ *
+ * Schema for the `search` tool (§11.6.4.1): the `type` selector plus the
+ * optional drill fields and paging controls.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_search (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_instance (b, self, FALSE);
+  static const char *const types[] = { "music", "tv-show", "movie", NULL };
+  prop_enum (b, "type", types,
+             "Media kind to search: music | tv-show | movie.");
+  prop_typed (b, "artist", "string",
+              "Music only: performer name (substring, case-insensitive). "
+              "Resolves the artist; required for music.");
+  prop_typed (b, "title", "string",
+              "Container/title to match (substring, case-insensitive): album "
+              "for music, show for tv-show, the movie title for movie. Required "
+              "for tv-show.");
+  prop_typed (b, "season", "integer",
+              "tv-show only: season number to narrow the episodes.");
+  prop_typed (b, "number", "integer",
+              "Position within the container: track number (music) or episode "
+              "number (tv-show).");
+  prop_typed (b, "limit", "integer",
+              "Max leaf rows to return (default 50, max 500). Page with offset.");
+  prop_typed (b, "offset", "integer",
+              "Number of leaf rows to skip — paginate together with limit.");
+  prop_typed (b, "count", "boolean",
+              "When true, return only the total match count (zero rows) — a "
+              "cheap count.");
+
+  static const char *const required[] = { "type", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_search:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments; `type` selects the per-type chain.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `search` tool (§11.6.4.1): reads the drill fields and paging
+ * controls, clamps `limit`/`offset`, and dispatches to the per-type resolver.
+ * Makes no Kodi state change.
+ *
+ * @return the search-result node, or NULL with @error set (bad arguments or a
+ *         call failure).
+ */
+static JsonNode *
+handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
+                GError **error)
+{
+  (void) def;
+  const char *instance = arg_instance (args);
+  const char *type = arg_str (args, "type", NULL);
+  if (type == NULL || type[0] == '\0')
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "search: \"type\" is required (music/tv-show/movie)");
+      return NULL;
+    }
+
+  const char *title = arg_str (args, "title", NULL);
+  const char *artist = arg_str (args, "artist", NULL);
+  gint64 season = 0, number = 0, v = 0;
+  gboolean have_season = arg_int (args, "season", &season);
+  gboolean have_number = arg_int (args, "number", &number);
+
+  gint64 limit = MK_SEARCH_DEFAULT_LIMIT, offset = 0;
+  if (arg_int (args, "limit", &v))
+    limit = v;
+  if (arg_int (args, "offset", &v))
+    offset = v;
+  limit = CLAMP (limit, 0, MK_SEARCH_MAX_LIMIT);
+  if (offset < 0)
+    offset = 0;
+  gboolean count = arg_bool (args, "count");
+
+  if (g_str_equal (type, "movie"))
+    return search_movie (self, instance, title, limit, offset, count, error);
+  if (g_str_equal (type, "tv-show"))
+    return search_tv (self, instance, title, have_season, season, have_number,
+                      number, limit, offset, count, error);
+  if (g_str_equal (type, "music"))
+    return search_music (self, instance, artist, title, have_number, number,
+                         limit, offset, count, error);
+
+  g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+               "search: unknown type \"%s\" (use music/tv-show/movie)", type);
+  return NULL;
+}
+
 /* ---- The tool table -------------------------------------------------------
  *
  * Being rebuilt from the comprehensive Kodi JSON-RPC inventory (../TODO.md §12)
@@ -914,6 +1865,44 @@ static const MkToolDef mk_tool_defs[] = {
                  "(action: get/set/remove). Manages the MCP server's own "
                  "config, not a Kodi device.",
     schema_instances, handler_instances, NULL },
+
+  /* ---- Search tools — resolve the library by name down to playable leaf
+   *      files; no Kodi state change (§11.6.4). ---- */
+
+  /**
+   * search (Search tool):
+   *
+   * Find playable leaf files by name across the three media types (§11.6.4.1,
+   * full design §5.10). Drills each type's hierarchy to leaf rows, descending to
+   * the album/season level only when the user names one — so a wide query (bare
+   * artist, bare show) is a single Kodi call:
+   *
+   *   - music:   GetArtists(artist) → GetSongs {artistid} directly, or
+   *              → GetAlbums(+title) → GetSongs {albumid} when an album is named.
+   *   - tv-show: GetTVShows(title) → GetEpisodes {tvshowid, season?} (+ episode
+   *              number filter).
+   *   - movie:   GetMovies(title) → file directly (no sublevels).
+   *
+   * Always reports `total` (Kodi's full match count); `count: true` returns it
+   * with zero rows. `limit`/`offset` page the leaves; the default cap (50)
+   * applies when `limit` is omitted, flagging `truncated`. A substring album
+   * `title` matching several albums is collected app-side and flagged
+   * `approximate`.
+   *
+   * @param type (required): "music" | "tv-show" | "movie".
+   * @param artist: music performer (substring); required for music.
+   * @param title: album/show/movie name (substring); required for tv-show.
+   * @param season|number: narrow tv episodes / pin a track or episode.
+   * @param limit|offset|count: paging and count-only controls.
+   * @param instance (optional): the Kodi instance whose library to search; omitted
+   *        uses the configured default (§5.1).
+   * @return `{ "type", "total", "returned", "offset", "truncated",
+   *         "approximate"?, "resolved"?, "rows": [ { "file", "<id>", "label",
+   *         "title", … } ] }`. Each row's `file` is the `playfile` input (§11.6.5).
+   */
+  { "search", "Find playable files by name: music/tv-show/movie, drilled to "
+              "leaf files with paging (limit/offset) and a total count.",
+    schema_search, handler_search, NULL },
 };
 
 /**

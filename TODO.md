@@ -477,7 +477,7 @@ Everything below this section is original design for *this* project.
     [ ] 11.6.4 Search tools — resolve the library by name down to playable leaf
     files; no Kodi state change. Generic find-by-name tools (more to come).
     Full design in §5.10.
-      [ ] 11.6.4.1 search — `{type:music|tv-show|movie, artist?, title?, season?,`
+      [x] 11.6.4.1 search — `{type:music|tv-show|movie, artist?, title?, season?,`
         `number?, limit?, offset?, count?}`. Drills the per-type chain to
         leaf-file rows (`{file, <id>, label}`): music GetArtists→GetSongs
         `{artistid}` direct when no `title`, else GetArtists→GetAlbums→GetSongs
