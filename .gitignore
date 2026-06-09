@@ -24,6 +24,11 @@ Makefile.in
 # Build output
 /src/mcp-kodi
 
+# Test harness artifacts (automake `make check`)
+/tests/*.log
+/tests/*.trs
+/tests/test-suite.log
+
 # Editor / tooling
 *.swp
 /compile_commands.json
