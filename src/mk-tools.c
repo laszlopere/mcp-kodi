@@ -520,6 +520,32 @@ handler_button (MkTools *self, const MkToolDef *def, JsonObject *args,
 }
 
 /**
+ * handler_noop:
+ * @self: the tool table.
+ * @def: this Button's table row (unused; it fires no action).
+ * @args: the call arguments (optional `instance`), or NULL.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the noop Button (§11.6.1.6): unlike handler_button() it sends no
+ * `Input.ExecuteAction` and changes nothing — it simply returns the
+ * player_state() snapshot for the target instance. Because building that
+ * snapshot already calls Kodi (`Player.GetActivePlayers` and friends), a clean
+ * result doubles as a reachability check and a settle delay; a comms failure
+ * surfaces as the usual categorised tool error. The caller uses it to learn
+ * whether Kodi answers and what is currently loaded/playing, without poking the
+ * player.
+ *
+ * @return the current player-state object, or NULL with @error set.
+ */
+static JsonNode *
+handler_noop (MkTools *self, const MkToolDef *def, JsonObject *args,
+              GError **error)
+{
+  (void) def;
+  return player_state (self, arg_instance (args), error);
+}
+
+/**
  * handler_mute:
  * @self: the tool table.
  * @def: this row; @def->action is "true" to mute or "false" to unmute.
@@ -839,6 +865,27 @@ static const MkToolDef mk_tool_defs[] = {
    */
   { "unmute", "Unmute the target instance's audio output.",
     schema_instance_only, handler_mute, "false" },
+
+  /**
+   * noop (Button):
+   *
+   * Do nothing to the player, just report its state. Fires no action and
+   * changes nothing (§11.6.1.6); it only builds and returns the player_state()
+   * snapshot. Because that snapshot is read from Kodi, a successful call also
+   * confirms the instance is reachable — a reachability + state probe.
+   *
+   * Call:  no Kodi action; player_state() to report what is loaded/playing.
+   * @param instance (optional): name of the Kodi instance to target; omitted
+   *        uses the configured default (§5.1).
+   * @return the current player-state snapshot (player_state()), identical in
+   *         shape to what the transport Buttons return. With nothing loaded the
+   *         reply is `{ "state": "stopped" }`. A communication failure instead
+   *         yields the categorised tool error, telling the caller Kodi is
+   *         unreachable and why.
+   */
+  { "noop", "Report the target instance's player state without changing "
+            "anything — a reachability and state probe.",
+    schema_instance_only, handler_noop, NULL },
 
   /* ---- Config tools — read/write the server's own instance config (§11.6.3).
    *      These make no Kodi call. ---- */

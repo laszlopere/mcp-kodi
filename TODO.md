@@ -358,6 +358,11 @@ Everything below this section is original design for *this* project.
         `{"method":"Application.SetMute","params":{"mute":true}}`
       [x] 11.6.1.5 unmute
         `{"method":"Application.SetMute","params":{"mute":false}}`
+      [x] 11.6.1.6 noop — fires no action; just returns the player_state()
+        snapshot. A reachability + state probe: the caller uses it to learn
+        whether Kodi answers and what is currently loaded/playing, without
+        changing anything (no Input.ExecuteAction). Like the transport Buttons
+        it shares the player_state() response shape.
     [ ] 11.6.2 Knobs — set to a scalar value; $value = the knob argument:
       [ ] 11.6.2.1 volume
         `{"method":"Application.SetVolume","params":{"volume":"$value"}}`
