@@ -348,13 +348,13 @@ Everything below this section is original design for *this* project.
     Input.ExecuteAction (no playerid, no active-player resolution):
       [x] 11.6.1.1 play
         `{"method":"Input.ExecuteAction","params":{"action":"play"}}`
-      [ ] 11.6.1.2 pause
+      [x] 11.6.1.2 pause
         `{"method":"Input.ExecuteAction","params":{"action":"pause"}}`
-      [ ] 11.6.1.3 stop
+      [x] 11.6.1.3 stop
         `{"method":"Input.ExecuteAction","params":{"action":"stop"}}`
-      [ ] 11.6.1.4 mute
+      [x] 11.6.1.4 mute
         `{"method":"Application.SetMute","params":{"mute":true}}`
-      [ ] 11.6.1.5 unmute
+      [x] 11.6.1.5 unmute
         `{"method":"Application.SetMute","params":{"mute":false}}`
     [ ] 11.6.2 Knobs — set to a scalar value; $value = the knob argument:
       [ ] 11.6.2.1 volume

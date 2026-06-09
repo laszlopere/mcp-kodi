@@ -35,8 +35,10 @@ struct _MkToolDef
   const char   *description;
   MkToolSchema  schema;
   MkToolHandler handler; /* NULL until the tool is implemented */
-  /* Buttons (§11.6.1) are argument-free actions fired by handler_button(): this
-   * is the Input.ExecuteAction action to send (e.g. "play"). NULL otherwise. */
+  /* Per-handler payload string carried by data-driven rows (§11.6.1), or NULL.
+   * handler_button() reads it as the Input.ExecuteAction action ("play",
+   * "pause", "stop"); handler_mute() reads it as the SetMute value ("true" to
+   * mute, "false" to unmute). */
   const char   *action;
 };
 
@@ -340,6 +342,54 @@ player_state (MkTools *self, const char *instance, GError **error)
 }
 
 /**
+ * app_audio_state:
+ * @self: the tool table.
+ * @instance: target instance name, or NULL for the configured default.
+ * @error: return location for a GError, or NULL.
+ *
+ * Builds the server's canonical audio snapshot for @instance — the **shared
+ * response shape** returned by the tools whose effect is a change in the
+ * application's audio output: mute/unmute (§11.6.1) and, later, the volume Knob
+ * (§11.6.2.1). As with player_state(), reusing one builder keeps that response
+ * identical across all of them, so a client learns the shape once and any of
+ * those calls answers "is it muted, and how loud".
+ *
+ * Reads it back with a single `Application.GetProperties` for `muted` and
+ * `volume`, rather than trusting the bare reply of the setter, so the snapshot
+ * reflects Kodi's settled state.
+ *
+ * @return a newly allocated object node — `{ "muted": <bool>, "volume": <int> }`
+ *         — or NULL with @error set if the call fails.
+ */
+static JsonNode *
+app_audio_state (MkTools *self, const char *instance, GError **error)
+{
+  g_autoptr (JsonBuilder) pb = json_builder_new ();
+  json_builder_begin_object (pb);
+  json_builder_set_member_name (pb, "properties");
+  json_builder_begin_array (pb);
+  json_builder_add_string_value (pb, "muted");
+  json_builder_add_string_value (pb, "volume");
+  json_builder_end_array (pb);
+  json_builder_end_object (pb);
+  g_autoptr (JsonNode) params = json_builder_get_root (pb);
+
+  g_autoptr (JsonNode) res = mk_kodi_call (self->kodi, instance,
+                                           "Application.GetProperties", params,
+                                           error);
+  if (res == NULL)
+    return NULL;
+  JsonObject *props = json_node_get_object (res);
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  copy_member (b, props, "muted");
+  copy_member (b, props, "volume");
+  json_builder_end_object (b);
+  return json_builder_get_root (b);
+}
+
+/**
  * handler_button:
  * @self: the tool table.
  * @def: this Button's table row; @def->action names the action to fire.
@@ -384,6 +434,45 @@ handler_button (MkTools *self, const MkToolDef *def, JsonObject *args,
   return player_state (self, instance, error);
 }
 
+/**
+ * handler_mute:
+ * @self: the tool table.
+ * @def: this row; @def->action is "true" to mute or "false" to unmute.
+ * @args: the call arguments (optional `instance`), or NULL.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the mute and unmute Buttons (§11.6.1). Unlike the transport
+ * Buttons these are not remote keypresses: they set the audio output directly
+ * with `Application.SetMute` `{ "mute": true|false }` (an absolute set, not a
+ * toggle, so "mute" is always on and "unmute" always off regardless of the
+ * current state). Returns the app_audio_state() snapshot so the caller sees the
+ * resulting mute/volume, mirroring how the transport Buttons return
+ * player_state().
+ *
+ * @return the post-action audio-state object, or NULL with @error set.
+ */
+static JsonNode *
+handler_mute (MkTools *self, const MkToolDef *def, JsonObject *args,
+              GError **error)
+{
+  const char *instance = arg_instance (args);
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "mute");
+  json_builder_add_boolean_value (b, g_str_equal (def->action, "true"));
+  json_builder_end_object (b);
+  g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+  g_autoptr (JsonNode) acted = mk_kodi_call (self->kodi, instance,
+                                             "Application.SetMute", params,
+                                             error);
+  if (acted == NULL)
+    return NULL;
+
+  return app_audio_state (self, instance, error);
+}
+
 /* ---- The tool table -------------------------------------------------------
  *
  * Being rebuilt from the comprehensive Kodi JSON-RPC inventory (../TODO.md §12)
@@ -415,6 +504,76 @@ static const MkToolDef mk_tool_defs[] = {
   { "play", "Press Play on the Kodi remote: resume/begin playback on the "
             "target instance.",
     schema_instance_only, handler_button, "play" },
+
+  /**
+   * pause (Button):
+   *
+   * Press Pause on the Kodi remote — pause the active player on the target
+   * instance. A remote keypress, not a player command: no playerid and no
+   * active-player resolution (§11.6.1).
+   *
+   * Call:  Input.ExecuteAction { "action": "pause" }, then player_state() to
+   *        report the effect.
+   * @param instance (optional): name of the Kodi instance to target; omitted
+   *        uses the configured default (§5.1).
+   * @return the resulting player-state snapshot (player_state()). With nothing
+   *         loaded the action is a no-op and the reply is `{ "state": "stopped" }`.
+   */
+  { "pause", "Press Pause on the Kodi remote: pause the active player on the "
+             "target instance.",
+    schema_instance_only, handler_button, "pause" },
+
+  /**
+   * stop (Button):
+   *
+   * Press Stop on the Kodi remote — stop the active player on the target
+   * instance. A remote keypress, not a player command: no playerid and no
+   * active-player resolution (§11.6.1).
+   *
+   * Call:  Input.ExecuteAction { "action": "stop" }, then player_state() to
+   *        report the effect.
+   * @param instance (optional): name of the Kodi instance to target; omitted
+   *        uses the configured default (§5.1).
+   * @return the resulting player-state snapshot (player_state()); after a
+   *         successful stop nothing is loaded, so `{ "state": "stopped" }`.
+   */
+  { "stop", "Press Stop on the Kodi remote: stop the active player on the "
+            "target instance.",
+    schema_instance_only, handler_button, "stop" },
+
+  /**
+   * mute (Button):
+   *
+   * Mute the target instance's audio output. Not a remote keypress: sets the
+   * mute state directly with Application.SetMute (§11.6.1), so it is always on
+   * regardless of the current state.
+   *
+   * Call:  Application.SetMute { "mute": true }, then app_audio_state() to
+   *        report the effect.
+   * @param instance (optional): name of the Kodi instance to target; omitted
+   *        uses the configured default (§5.1).
+   * @return the resulting audio-state snapshot: `{ "muted": true, "volume": <int> }`
+   *         (app_audio_state()).
+   */
+  { "mute", "Mute the target instance's audio output.",
+    schema_instance_only, handler_mute, "true" },
+
+  /**
+   * unmute (Button):
+   *
+   * Unmute the target instance's audio output. Not a remote keypress: sets the
+   * mute state directly with Application.SetMute (§11.6.1), so it is always off
+   * regardless of the current state.
+   *
+   * Call:  Application.SetMute { "mute": false }, then app_audio_state() to
+   *        report the effect.
+   * @param instance (optional): name of the Kodi instance to target; omitted
+   *        uses the configured default (§5.1).
+   * @return the resulting audio-state snapshot: `{ "muted": false, "volume": <int> }`
+   *         (app_audio_state()).
+   */
+  { "unmute", "Unmute the target instance's audio output.",
+    schema_instance_only, handler_mute, "false" },
 };
 
 /**
