@@ -1189,7 +1189,7 @@ Everything below this section is original design for *this* project.
     item when play starts" (point 3) — and naturally ignores pause/resume/volume
     churn on the same item.
 
-  [ ] 13.6 **The file.** One **global** file (all instances in one list, point
+  [x] 13.6 **The file.** One **global** file (all instances in one list, point
   4), separate from config (§7) and per-instance state (§8):
   `${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/history.json`. A JSON array of
   entries via the json-glib we already use — symmetric with §7/§8. Newest-first
