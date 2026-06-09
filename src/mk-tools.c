@@ -113,6 +113,37 @@ prop_typed (JsonBuilder *b, const char *name, const char *type,
 }
 
 /**
+ * prop_enum:
+ * @b: the builder, positioned inside a `properties` object.
+ * @name: the property name.
+ * @values: NULL-terminated array of allowed string values.
+ * @desc: a human description, or NULL to omit it.
+ *
+ * Adds `"<name>": { "type": "string", "enum": [ ... ][, "description": …] }` —
+ * a closed set of string choices (e.g. an `action` selector).
+ */
+static void
+prop_enum (JsonBuilder *b, const char *name, const char *const *values,
+           const char *desc)
+{
+  json_builder_set_member_name (b, name);
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "type");
+  json_builder_add_string_value (b, "string");
+  json_builder_set_member_name (b, "enum");
+  json_builder_begin_array (b);
+  for (gsize i = 0; values[i] != NULL; i++)
+    json_builder_add_string_value (b, values[i]);
+  json_builder_end_array (b);
+  if (desc != NULL)
+    {
+      json_builder_set_member_name (b, "description");
+      json_builder_add_string_value (b, desc);
+    }
+  json_builder_end_object (b);
+}
+
+/**
  * prop_instance:
  * @b: the builder, positioned inside a `properties` object.
  * @self: the table, used to list configured instance names.
@@ -179,6 +210,50 @@ schema_instance_only (MkTools *self)
   schema_begin (b);
   prop_instance (b, self, FALSE);
   schema_end (b, NULL);
+  return json_builder_get_root (b);
+}
+
+/**
+ * schema_instances:
+ * @self: the table (unused; the schema is static).
+ *
+ * Schema for the `instances` config tool (§11.6.3): an `action` selector plus
+ * the per-instance fields used by `set`. Only `action` is required; `key` is
+ * required by `set`/`remove` but that is enforced in the handler so the schema
+ * stays a flat property list.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_instances (MkTools *self)
+{
+  (void) self;
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  static const char *const actions[] = { "get", "set", "remove", NULL };
+  prop_enum (b, "action", actions,
+             "Operation: \"get\" lists configured instances, \"set\" "
+             "creates/updates one, \"remove\" deletes one.");
+  prop_typed (b, "key", "string",
+              "Instance key — the short id tools target. Required for \"set\" "
+              "and \"remove\".");
+  prop_typed (b, "name", "string",
+              "Human-readable display label (\"set\").");
+  prop_typed (b, "host", "string",
+              "Kodi host as \"host[:port]\" (\"set\").");
+  prop_typed (b, "auth", "string",
+              "HTTP Basic credentials as \"user:pass\" (\"set\"). Write-only: "
+              "never returned by \"get\".");
+  prop_typed (b, "scheme", "string",
+              "URL scheme, \"http\" or \"https\" (\"set\"; default \"https\").");
+  prop_typed (b, "insecure", "boolean",
+              "Accept a self-signed TLS certificate, like curl -k (\"set\").");
+  prop_typed (b, "default", "boolean",
+              "When true on \"set\", make this instance the default.");
+
+  static const char *const required[] = { "action", NULL };
+  schema_end (b, required);
   return json_builder_get_root (b);
 }
 
@@ -483,6 +558,186 @@ handler_mute (MkTools *self, const MkToolDef *def, JsonObject *args,
   return app_audio_state (self, instance, error);
 }
 
+/**
+ * instances_list:
+ * @self: the tool table.
+ *
+ * Builds the **shared response shape** of the `instances` config tool (§11.6.3),
+ * returned by all three actions so the caller always sees the resulting config
+ * state. Lists each configured instance — `{ key, name?, host, scheme, insecure,
+ * has_auth }` in sorted key order — alongside the `default` key. Credentials are
+ * deliberately reduced to the boolean `has_auth`: the password is write-only and
+ * never leaves the server.
+ *
+ * @return a newly allocated object node
+ *         `{ "default": <key>|null, "instances": [ … ] }`.
+ */
+static JsonNode *
+instances_list (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+
+  json_builder_set_member_name (b, "default");
+  const char *def = mk_config_get_default (self->config);
+  if (def != NULL)
+    json_builder_add_string_value (b, def);
+  else
+    json_builder_add_null_value (b);
+
+  json_builder_set_member_name (b, "instances");
+  json_builder_begin_array (b);
+  GList *keys = mk_config_instance_names (self->config);
+  for (GList *l = keys; l != NULL; l = l->next)
+    {
+      const char *key = l->data;
+      MkInstance *inst = mk_config_get_instance (self->config, key);
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "key");
+      json_builder_add_string_value (b, key);
+      if (inst->name != NULL)
+        {
+          json_builder_set_member_name (b, "name");
+          json_builder_add_string_value (b, inst->name);
+        }
+      json_builder_set_member_name (b, "host");
+      json_builder_add_string_value (b, inst->host);
+      json_builder_set_member_name (b, "scheme");
+      json_builder_add_string_value (b, inst->scheme ? inst->scheme : "https");
+      json_builder_set_member_name (b, "insecure");
+      json_builder_add_boolean_value (b, inst->insecure);
+      json_builder_set_member_name (b, "has_auth");
+      json_builder_add_boolean_value (b,
+                                      inst->auth != NULL && inst->auth[0] != '\0');
+      json_builder_end_object (b);
+    }
+  g_list_free (keys);
+  json_builder_end_array (b);
+
+  json_builder_end_object (b);
+  return json_builder_get_root (b);
+}
+
+/**
+ * arg_str:
+ * @args: the call arguments object (may be NULL).
+ * @name: the member to read.
+ * @fallback: value to return when @name is absent.
+ *
+ * Reads an optional string argument: when @args has member @name its string
+ * value is returned (NULL if the member is JSON null), otherwise @fallback. The
+ * returned string is borrowed from @args (or is @fallback). Used by
+ * handler_instances() to merge a `set` request over the existing instance —
+ * "absent" means keep the current value, an explicit null clears it.
+ */
+static const char *
+arg_str (JsonObject *args, const char *name, const char *fallback)
+{
+  if (args == NULL || !json_object_has_member (args, name))
+    return fallback;
+  return json_object_get_string_member_with_default (args, name, NULL);
+}
+
+/**
+ * handler_instances:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments; `action` selects the operation.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `instances` config tool (§11.6.3): read/write the server's own
+ * instance config (§7), making no Kodi call. `get` lists instances; `set`
+ * upserts one by `key` (provided fields override, omitted fields keep the
+ * current value or take defaults) and may make it the default; `remove` deletes
+ * one, refusing the current default so the config is never left defaultless.
+ * `set`/`remove` persist atomically (mk_config_save(), §7.4) — the save trigger
+ * of §7.5. Every action returns instances_list().
+ *
+ * @return the resulting instance list, or NULL with @error set (bad arguments,
+ *         or a save failure).
+ */
+static JsonNode *
+handler_instances (MkTools *self, const MkToolDef *def, JsonObject *args,
+                   GError **error)
+{
+  (void) def;
+  const char *action = arg_str (args, "action", NULL);
+  if (action == NULL)
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "instances: \"action\" is required (get/set/remove)");
+      return NULL;
+    }
+
+  if (g_str_equal (action, "get"))
+    return instances_list (self);
+
+  if (g_str_equal (action, "set"))
+    {
+      const char *key = arg_str (args, "key", NULL);
+      if (key == NULL || key[0] == '\0')
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "instances set: \"key\" is required");
+          return NULL;
+        }
+
+      /* Merge the request over any existing instance: absent fields are kept. */
+      MkInstance *cur = mk_config_get_instance (self->config, key);
+      const char *name   = arg_str (args, "name",   cur ? cur->name   : NULL);
+      const char *host   = arg_str (args, "host",   cur ? cur->host   : NULL);
+      const char *auth   = arg_str (args, "auth",   cur ? cur->auth   : NULL);
+      const char *scheme = arg_str (args, "scheme", cur ? cur->scheme : NULL);
+      gboolean insecure  = (args != NULL && json_object_has_member (args, "insecure"))
+                             ? json_object_get_boolean_member_with_default (args, "insecure", FALSE)
+                             : (cur ? cur->insecure : FALSE);
+
+      /* mk_instance_new() copies every string, so reading from @cur here is safe
+       * even though mk_config_set_instance() then frees @cur. */
+      MkInstance *inst = mk_instance_new (name, host, auth, scheme, insecure);
+      mk_config_set_instance (self->config, key, inst); /* takes ownership */
+
+      if (args != NULL && json_object_has_member (args, "default")
+          && json_object_get_boolean_member_with_default (args, "default", FALSE))
+        mk_config_set_default (self->config, key);
+
+      if (!mk_config_save (self->config, NULL, error))
+        return NULL;
+      return instances_list (self);
+    }
+
+  if (g_str_equal (action, "remove"))
+    {
+      const char *key = arg_str (args, "key", NULL);
+      if (key == NULL || key[0] == '\0')
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "instances remove: \"key\" is required");
+          return NULL;
+        }
+      if (g_strcmp0 (mk_config_get_default (self->config), key) == 0)
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "instances remove: cannot remove the default instance "
+                       "\"%s\"; set a different default first", key);
+          return NULL;
+        }
+      if (!mk_config_remove_instance (self->config, key))
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "instances remove: no instance named \"%s\"", key);
+          return NULL;
+        }
+      if (!mk_config_save (self->config, NULL, error))
+        return NULL;
+      return instances_list (self);
+    }
+
+  g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+               "instances: unknown action \"%s\" (use get/set/remove)", action);
+  return NULL;
+}
+
 /* ---- The tool table -------------------------------------------------------
  *
  * Being rebuilt from the comprehensive Kodi JSON-RPC inventory (../TODO.md §12)
@@ -584,6 +839,34 @@ static const MkToolDef mk_tool_defs[] = {
    */
   { "unmute", "Unmute the target instance's audio output.",
     schema_instance_only, handler_mute, "false" },
+
+  /* ---- Config tools — read/write the server's own instance config (§11.6.3).
+   *      These make no Kodi call. ---- */
+
+  /**
+   * instances (Config tool):
+   *
+   * Read or modify the set of configured Kodi instances (§7) — the boxes every
+   * other tool targets by key. Makes no Kodi call; `set`/`remove` persist the
+   * config file atomically (§7.4). The `action` argument selects the operation:
+   *
+   *   - "get":    list instances and the default (no password is ever returned).
+   *   - "set":    create/update the instance named by `key` (`name`/`host`/
+   *               `auth`/`scheme`/`insecure`); omitted fields keep their current
+   *               value. `default: true` makes it the default.
+   *   - "remove": delete the instance named by `key` (not the default).
+   *
+   * @param action (required): "get" | "set" | "remove".
+   * @param key: instance key; required for "set" and "remove".
+   * @param name|host|auth|scheme|insecure|default: instance fields for "set".
+   * @return the resulting instance list (instances_list()): `{ "default": <key>,
+   *         "instances": [ { "key", "name"?, "host", "scheme", "insecure",
+   *         "has_auth" } ] }`.
+   */
+  { "instances", "Read or modify the configured Kodi instances "
+                 "(action: get/set/remove). Manages the MCP server's own "
+                 "config, not a Kodi device.",
+    schema_instances, handler_instances, NULL },
 };
 
 /**

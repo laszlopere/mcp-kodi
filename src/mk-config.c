@@ -223,6 +223,25 @@ mk_config_set_instance (MkConfig *self, const char *name, MkInstance *inst)
 }
 
 /**
+ * mk_config_remove_instance:
+ * @self: the config.
+ * @name: instance name to remove.
+ *
+ * Removes the instance stored under @name, freeing it. The default name (§7) is
+ * left untouched; the caller is responsible for not leaving @self->default_name
+ * pointing at a removed instance.
+ *
+ * @return TRUE if an instance was removed, FALSE if none was stored under @name.
+ */
+gboolean
+mk_config_remove_instance (MkConfig *self, const char *name)
+{
+  g_return_val_if_fail (self != NULL, FALSE);
+  g_return_val_if_fail (name != NULL, FALSE);
+  return g_hash_table_remove (self->instances, name);
+}
+
+/**
  * mk_config_instance_count:
  * @self: the config.
  *

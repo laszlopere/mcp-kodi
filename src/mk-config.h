@@ -78,6 +78,9 @@ void         mk_config_set_default    (MkConfig *self, const char *name);
 MkInstance  *mk_config_get_instance   (MkConfig *self, const char *name);
 /* Takes ownership of INST, replacing any existing instance of that name. */
 void         mk_config_set_instance   (MkConfig *self, const char *name, MkInstance *inst);
+/* Remove the instance stored under NAME (the default name, if any, is left
+ * untouched). Returns TRUE if an instance was removed, FALSE if none existed. */
+gboolean     mk_config_remove_instance (MkConfig *self, const char *name);
 guint        mk_config_instance_count (MkConfig *self);
 /* Sorted list of instance names; free the list (not the strings) with
  * g_list_free(). */

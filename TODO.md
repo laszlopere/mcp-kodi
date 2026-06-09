@@ -120,7 +120,7 @@ Everything below this section is original design for *this* project.
 
   | Tool        | Args                                   | Kodi method(s) |
   |-------------|----------------------------------------|----------------|
-  | `instances` | —                                      | none — list configured instance names + which is `default` |
+  | `instances` | `action` (get/set/remove), `key?`, `name?`, `host?`, `auth?`, `scheme?`, `insecure?`, `default?` | none — read/write the server's own instance config (§7, §11.6.3); `get` masks credentials |
   | `ping`      | `instance?`                            | `JSONRPC.Ping` |
   | `info`      | `instance?`                            | `Application.GetProperties` (name, version, volume, muted) |
   | `notify`    | `instance?`, `title`, `message`, `displaytime?` | `GUI.ShowNotification` |
@@ -249,9 +249,9 @@ Everything below this section is original design for *this* project.
   same dir, `fsync`, then `rename()` over the target (same discipline as the state
   file, §8.4). Create the directory `0700` and the file `0600`; it holds
   passwords.
-  [ ] 7.5 **Save trigger (TBD):** the save primitive lives in `mk-config`
-  regardless of caller; the entry point (a first-run/setup path, a `--save` flag,
-  or a future `configure` tool) is to be decided.
+  [ ] 7.5 **Save trigger:** the save primitive lives in `mk-config` regardless of
+  caller; the entry point is the `instances` config tool (§11.6.3) — its `set`
+  and `remove` actions write the file back atomically (§7.4).
   [x] 7.6 **Back-compat:** a `version: 1` flat file (single `host`/`auth`/… at the
   top level) is read as one instance named `default`; on next save it is rewritten
   in the `version: 2` instances shape.
@@ -361,6 +361,28 @@ Everything below this section is original design for *this* project.
     [ ] 11.6.2 Knobs — set to a scalar value; $value = the knob argument:
       [ ] 11.6.2.1 volume
         `{"method":"Application.SetVolume","params":{"volume":"$value"}}`
+    [x] 11.6.3 Config tools — manage the server's *own* instance config
+    (`config.json`, §7); these make no Kodi call. One `instances` tool with an
+    `action` enum (the §5.2 convention used by `queue`/`power`/`navigate`). `set`
+    is the save trigger left TBD in §7.5. Every action returns the resulting
+    instance list so the caller sees the new state; credentials are **never**
+    returned (`auth` is reported only as a boolean `has_auth`).
+      [x] 11.6.3.1 get — `{"action":"get"}`. List configured instances, each as
+        `{ key, name?, host, scheme, insecure, has_auth }`, plus which `key` is
+        `default`. No password ever leaves the server.
+        (`mk_config_instance_names` + `mk_config_get_instance` +
+        `mk_config_get_default`.)
+      [x] 11.6.3.2 set — `{"action":"set","key":…, "name"?,"host"?,"auth"?,`
+        `"scheme"?,"insecure"?,"default"?}`. Upsert one instance by `key`:
+        provided fields override, omitted fields keep the existing value (or take
+        defaults for a new instance), then persist atomically (§7.4). `default:true`
+        makes it the default. (`mk_config_get_instance` to merge →
+        `mk_config_set_instance` → `mk_config_set_default` → `mk_config_save`.)
+      [x] 11.6.3.3 remove — `{"action":"remove","key":…}`. Delete the named
+        instance and save. Refuse with a clean tool error if `key` is the current
+        `default` (caller must `set` a different `default` first), so the config
+        is never left defaultless/empty. (Needs a new `mk_config_remove_instance`
+        in the config API.)
   [ ] 11.7 Resources/prompts
   [ ] 11.8 Playback state file, per-instance (`mk-state`)
   [ ] 11.9 Build clean, test against live Kodi, write README
