@@ -1,5 +1,6 @@
 /* mcp-kodi — an MCP server for controlling Kodi over JSON-RPC.
  *
+ * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
  * Entry point. Loads configuration, builds the Kodi client, tool table, and MCP

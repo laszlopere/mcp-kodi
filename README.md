@@ -210,3 +210,14 @@ and Kodi method references: [docs/](docs/).
 
 Copyright © 2026 Laszlo Pere &lt;laszlopere@gmail.com&gt;. An independent,
 clean-room implementation.
+
+Free software, licensed under the **GNU General Public License v3.0**. You may
+redistribute and/or modify it under those terms; it comes with no warranty. See
+[LICENSE](LICENSE) for the full text.
+
+---
+
+## Sponsor
+
+If this project is useful to you, you can support its development through
+[GitHub Sponsors](https://github.com/sponsors/laszlopere). Thank you!

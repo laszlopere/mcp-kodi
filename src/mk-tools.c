@@ -1,4 +1,8 @@
-/* mcp-kodi — tool table: schemas + handlers. See mk-tools.h and ../TODO.md §5. */
+/* mcp-kodi — tool table: schemas + handlers. See mk-tools.h and ../TODO.md §5.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
+ * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
+ */
 
 #include "config.h"
 

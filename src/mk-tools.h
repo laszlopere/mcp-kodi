@@ -1,5 +1,6 @@
 /* mcp-kodi — tool table: schemas + handlers.
  *
+ * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
  * The MCP tool surface (§5): a static table of tools, each with a JSON Schema

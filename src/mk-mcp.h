@@ -1,5 +1,6 @@
 /* mcp-kodi — MCP method dispatch.
  *
+ * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
  * Routes parsed JSON-RPC messages to the MCP lifecycle methods (§3.3):

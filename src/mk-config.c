@@ -1,4 +1,8 @@
-/* mcp-kodi — configuration loader/saver. See mk-config.h and ../TODO.md §7. */
+/* mcp-kodi — configuration loader/saver. See mk-config.h and ../TODO.md §7.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
+ * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
+ */
 
 #include "config.h"
 

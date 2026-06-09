@@ -1,4 +1,8 @@
-/* mcp-kodi — MCP method dispatch. See mk-mcp.h and ../TODO.md §3. */
+/* mcp-kodi — MCP method dispatch. See mk-mcp.h and ../TODO.md §3.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
+ * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
+ */
 
 #include "config.h"
 

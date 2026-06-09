@@ -1,5 +1,6 @@
 /* mcp-kodi — newline-delimited JSON-RPC transport over stdin/stdout.
  *
+ * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
  * The MCP stdio transport (§3.1, §3.2): a GMainLoop with an async read on

@@ -1,5 +1,6 @@
 /* mcp-kodi — Kodi JSON-RPC client over libsoup.
  *
+ * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
  * One client per process. Each call is made against a named config instance

@@ -1,5 +1,6 @@
 /* mcp-kodi — configuration loader/saver.
  *
+ * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
  * Loads the server's multi-instance config from

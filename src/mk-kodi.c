@@ -1,4 +1,8 @@
-/* mcp-kodi — Kodi JSON-RPC client over libsoup. See mk-kodi.h and ../TODO.md §4. */
+/* mcp-kodi — Kodi JSON-RPC client over libsoup. See mk-kodi.h and ../TODO.md §4.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
+ * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
+ */
 
 #include "config.h"
 
