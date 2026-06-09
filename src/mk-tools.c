@@ -591,9 +591,11 @@ handler_mute (MkTools *self, const MkToolDef *def, JsonObject *args,
  * Builds the **shared response shape** of the `instances` config tool (§11.6.3),
  * returned by all three actions so the caller always sees the resulting config
  * state. Lists each configured instance — `{ key, name?, host, scheme, insecure,
- * has_auth }` in sorted key order — alongside the `default` key. Credentials are
- * deliberately reduced to the boolean `has_auth`: the password is write-only and
- * never leaves the server.
+ * has_auth, allow_rpc }` in sorted key order — alongside the `default` key.
+ * Credentials are deliberately reduced to the boolean `has_auth`: the password
+ * is write-only and never leaves the server. `allow_rpc` is reported read-only
+ * (§7.7) so the caller can see which boxes permit the `rpc` escape hatch, but it
+ * cannot be changed here — only by hand-editing the config file.
  *
  * @return a newly allocated object node
  *         `{ "default": <key>|null, "instances": [ … ] }`.
@@ -635,6 +637,8 @@ instances_list (MkTools *self)
       json_builder_set_member_name (b, "has_auth");
       json_builder_add_boolean_value (b,
                                       inst->auth != NULL && inst->auth[0] != '\0');
+      json_builder_set_member_name (b, "allow_rpc");
+      json_builder_add_boolean_value (b, inst->allow_rpc);
       json_builder_end_object (b);
     }
   g_list_free (keys);
@@ -717,10 +721,15 @@ handler_instances (MkTools *self, const MkToolDef *def, JsonObject *args,
       gboolean insecure  = (args != NULL && json_object_has_member (args, "insecure"))
                              ? json_object_get_boolean_member_with_default (args, "insecure", FALSE)
                              : (cur ? cur->insecure : FALSE);
+      /* allow_rpc (§7.7) is deliberately never read from @args: the escape-hatch
+       * gate is hand-edit-only, so the model cannot grant itself rpc. Preserve
+       * the existing value (FALSE for a brand-new instance). */
+      gboolean allow_rpc = cur ? cur->allow_rpc : FALSE;
 
       /* mk_instance_new() copies every string, so reading from @cur here is safe
        * even though mk_config_set_instance() then frees @cur. */
-      MkInstance *inst = mk_instance_new (name, host, auth, scheme, insecure);
+      MkInstance *inst = mk_instance_new (name, host, auth, scheme, insecure,
+                                          allow_rpc);
       mk_config_set_instance (self->config, key, inst); /* takes ownership */
 
       if (args != NULL && json_object_has_member (args, "default")
@@ -1805,6 +1814,143 @@ handler_playfile (MkTools *self, const MkToolDef *def, JsonObject *args,
   return player_state (self, instance, error);
 }
 
+/* ---- rpc (§11.6.6) --------------------------------------------------------
+ *
+ * The escape hatch: send any JSON-RPC method to a box and return Kodi's raw
+ * reply unshaped, for anything §5/§11.6 don't model. Powerful and unconstrained,
+ * so it is gated per instance behind the hand-edit-only `allow_rpc` flag (§7.7):
+ * an instance that has not opted in refuses the call before it reaches Kodi, and
+ * the flag can never be set through the `instances` tool — only the model's
+ * operator can grant it.
+ */
+
+/**
+ * schema_rpc:
+ * @self: the table (used to name the instances that permit the hatch).
+ *
+ * Schema for the `rpc` tool (§11.6.6): the required `method`, an optional
+ * `params` object, and the optional `instance`. The `method` description names
+ * which configured instances currently permit `rpc` (those with `allow_rpc`),
+ * so the caller knows where it can be used without trial and error.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_rpc (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_instance (b, self, FALSE);
+
+  /* List the boxes that have opted in (§7.7), so the schema documents where the
+   * hatch is live. */
+  g_autoptr (GString) allowed = g_string_new (NULL);
+  GList *names = mk_config_instance_names (self->config);
+  for (GList *l = names; l != NULL; l = l->next)
+    {
+      MkInstance *inst = mk_config_get_instance (self->config, l->data);
+      if (inst != NULL && inst->allow_rpc)
+        {
+          if (allowed->len > 0)
+            g_string_append (allowed, ", ");
+          g_string_append (allowed, l->data);
+        }
+    }
+  g_list_free (names);
+
+  g_autoptr (GString) mdesc = g_string_new (
+    "JSON-RPC method to invoke verbatim, e.g. \"GUI.ActivateWindow\" or "
+    "\"Input.Up\". Returns Kodi's raw result unchanged. Escape hatch for methods "
+    "the dedicated tools don't model — disabled unless the target instance has "
+    "opted in (\"allow_rpc\" in the server config, set by hand only). ");
+  if (allowed->len > 0)
+    g_string_append_printf (mdesc, "Currently permitted on: %s.", allowed->str);
+  else
+    g_string_append (mdesc, "No configured instance currently permits it.");
+  prop_typed (b, "method", "string", mdesc->str);
+
+  prop_typed (b, "params", "object",
+              "Parameters object passed straight through to the method. Omit for "
+              "a method that takes none.");
+
+  static const char *const required[] = { "method", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_rpc:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments; `method` and optional `params`/`instance`.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `rpc` escape hatch (§11.6.6): builds the JSON-RPC envelope and
+ * POSTs it to the resolved instance (§4.1/§4.2), returning Kodi's `result`
+ * **verbatim** — no shaping, unlike every other tool. A Kodi `error` surfaces as
+ * a tool error (§3.4/§4.5).
+ *
+ * Gated per instance (§7.7): unless the target instance's config sets
+ * `allow_rpc: true` the call is refused here, before any Kodi request, with a
+ * clean tool error naming the instance and the flag. The gate is hand-edit-only
+ * — it cannot be flipped through the `instances` tool — so the model can never
+ * grant itself the hatch. An instance that is not configured at all is left to
+ * mk_kodi_call(), which reports the usual no-instance comms error.
+ *
+ * @return Kodi's raw result node, or NULL with @error set (missing `method`,
+ *         the hatch disabled, ill-typed `params`, or a call failure).
+ */
+static JsonNode *
+handler_rpc (MkTools *self, const MkToolDef *def, JsonObject *args,
+             GError **error)
+{
+  (void) def;
+  const char *instance = arg_instance (args);
+  const char *method = arg_str (args, "method", NULL);
+  if (method == NULL || method[0] == '\0')
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "rpc: \"method\" is required");
+      return NULL;
+    }
+
+  /* The escape-hatch gate (§7.7): a configured instance must have opted in. An
+   * unconfigured instance falls through to mk_kodi_call()'s no-instance error. */
+  MkInstance *inst = mk_config_get_instance (self->config, instance);
+  if (inst != NULL && !inst->allow_rpc)
+    {
+      const char *name = instance ? instance
+                                  : mk_config_get_default (self->config);
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "rpc: the escape hatch is disabled for instance \"%s\". "
+                   "Enable it by setting \"allow_rpc\": true on that instance in "
+                   "the server config (§7.7); it cannot be enabled via the "
+                   "instances tool.",
+                   name ? name : "(default)");
+      return NULL;
+    }
+
+  /* Optional params: pass the object straight through (borrowed). An explicit
+   * null or an absent member means "no params"; any other type is a usage
+   * error. */
+  JsonNode *params = NULL;
+  if (args != NULL && json_object_has_member (args, "params"))
+    {
+      JsonNode *p = json_object_get_member (args, "params");
+      if (p != NULL && JSON_NODE_HOLDS_OBJECT (p))
+        params = p;
+      else if (p != NULL && !JSON_NODE_HOLDS_NULL (p))
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "rpc: \"params\" must be an object");
+          return NULL;
+        }
+    }
+
+  return mk_kodi_call (self->kodi, instance, method, params, error);
+}
+
 /* ---- The tool table -------------------------------------------------------
  *
  * Being rebuilt from the comprehensive Kodi JSON-RPC inventory (../TODO.md §12)
@@ -2021,6 +2167,36 @@ static const MkToolDef mk_tool_defs[] = {
                 "Player.Open auto-selects the audio/video player. Works for any "
                 "reachable path, in-library or not.",
     schema_playfile, handler_playfile, NULL },
+
+  /* ---- Escape hatch — raw JSON-RPC passthrough, opt-in per instance
+   *      (§11.6.6, gate §7.7). ---- */
+
+  /**
+   * rpc (Escape hatch):
+   *
+   * Send any JSON-RPC method to a Kodi box and get its reply back unchanged —
+   * the catch-all for anything the dedicated tools don't model (§11.6.6, §2.3).
+   * Builds the JSON-RPC envelope and POSTs it to the target instance, returning
+   * Kodi's raw `result` verbatim; a Kodi error becomes a tool error.
+   *
+   * Powerful and unconstrained, so it is OFF by default and gated per instance:
+   * a box permits it only when its server config sets `allow_rpc: true` (§7.7),
+   * which is set by hand-editing the config file and cannot be enabled through
+   * the `instances` tool. Calling `rpc` on an instance that has not opted in
+   * returns a clean tool error and makes no Kodi request.
+   *
+   * Call:  <method> with the given <params>, returning Kodi's raw result.
+   * @param method (required): the JSON-RPC method, e.g. "GUI.ActivateWindow".
+   * @param params: parameters object passed straight through (optional).
+   * @param instance (optional): the Kodi instance to target; omitted uses the
+   *        configured default (§5.1). The instance must have `allow_rpc` set.
+   * @return Kodi's raw `result` for the method, unshaped. On a disabled instance
+   *         or a Kodi error, an `isError` result with the detail instead.
+   */
+  { "rpc", "Escape hatch: send a raw JSON-RPC method to Kodi and return its "
+           "reply unchanged. Disabled unless the target instance has opted in "
+           "(allow_rpc in the server config, set by hand only).",
+    schema_rpc, handler_rpc, NULL },
 };
 
 /**

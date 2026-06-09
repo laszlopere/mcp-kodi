@@ -35,6 +35,7 @@ G_DEFINE_QUARK (mk-config-error-quark, mk_config_error)
  * @auth: HTTP Basic credentials as "user:pass", or NULL for none.
  * @scheme: URL scheme ("http"/"https"); NULL defaults to "https".
  * @insecure: TRUE to accept a self-signed TLS certificate (curl -k).
+ * @allow_rpc: TRUE to opt this instance into the `rpc` escape hatch (§7.7).
  *
  * Allocates a new instance, duplicating all string arguments.
  *
@@ -45,7 +46,8 @@ mk_instance_new (const char *name,
                  const char *host,
                  const char *auth,
                  const char *scheme,
-                 gboolean    insecure)
+                 gboolean    insecure,
+                 gboolean    allow_rpc)
 {
   MkInstance *inst = g_new0 (MkInstance, 1);
   inst->name = g_strdup (name);
@@ -53,6 +55,7 @@ mk_instance_new (const char *name,
   inst->auth = g_strdup (auth);
   inst->scheme = g_strdup (scheme ? scheme : "https");
   inst->insecure = insecure;
+  inst->allow_rpc = allow_rpc;
   return inst;
 }
 
@@ -71,7 +74,7 @@ mk_instance_copy (const MkInstance *inst)
   if (inst == NULL)
     return NULL;
   return mk_instance_new (inst->name, inst->host, inst->auth, inst->scheme,
-                          inst->insecure);
+                          inst->insecure, inst->allow_rpc);
 }
 
 /**
@@ -278,7 +281,8 @@ mk_config_instance_names (MkConfig *self)
  * @o: a JSON object holding name/host/auth/scheme/insecure members.
  *
  * Builds an instance from a JSON object. Missing members fall back to sane
- * defaults (scheme "https", insecure FALSE, name/host/auth NULL).
+ * defaults (scheme "https", insecure FALSE, allow_rpc FALSE, name/host/auth
+ * NULL).
  *
  * @return a newly allocated MkInstance; free with mk_instance_free().
  */
@@ -290,7 +294,8 @@ instance_from_object (JsonObject *o)
   const char *auth   = json_object_get_string_member_with_default (o, "auth", NULL);
   const char *scheme = json_object_get_string_member_with_default (o, "scheme", "https");
   gboolean insecure  = json_object_get_boolean_member_with_default (o, "insecure", FALSE);
-  return mk_instance_new (name, host, auth, scheme, insecure);
+  gboolean allow_rpc = json_object_get_boolean_member_with_default (o, "allow_rpc", FALSE);
+  return mk_instance_new (name, host, auth, scheme, insecure, allow_rpc);
 }
 
 /**
@@ -418,7 +423,7 @@ apply_env_overrides (MkConfig *self)
   MkInstance *inst = g_hash_table_lookup (self->instances, name);
   if (inst == NULL)
     {
-      inst = mk_instance_new (NULL, NULL, NULL, NULL, FALSE);
+      inst = mk_instance_new (NULL, NULL, NULL, NULL, FALSE, FALSE);
       mk_config_set_instance (self, name, inst);
     }
   if (self->default_name == NULL)
@@ -514,7 +519,9 @@ mk_config_load (const char *path, GError **error)
  *
  * Renders the config as pretty-printed JSON in the version-2 shape, with
  * instances emitted in sorted key order, the "name" (display label) and "auth"
- * members each omitted when the instance has none.
+ * members each omitted when the instance has none. "allow_rpc" is emitted only
+ * when set, so a hand-enabled escape hatch (§7.7) survives a save while a box
+ * that never opted in stays clean.
  *
  * @return a newly allocated JSON string; free with g_free().
  */
@@ -565,6 +572,12 @@ serialise (MkConfig *self)
 
       json_builder_set_member_name (b, "insecure");
       json_builder_add_boolean_value (b, inst->insecure);
+
+      if (inst->allow_rpc)
+        {
+          json_builder_set_member_name (b, "allow_rpc");
+          json_builder_add_boolean_value (b, TRUE);
+        }
 
       json_builder_end_object (b);
     }
