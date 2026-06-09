@@ -492,7 +492,7 @@ Everything below this section is original design for *this* project.
         album/show/movie name; `number` = track/episode. A substring `title`
         hitting several containers is the one multi-call case → `total` is a sum,
         `offset` best-effort, flag approximate (§5.10).
-    [ ] 11.6.5 playfile — `{file}`. `Player.Open {"item":{"file":…}}` (§12.10.9):
+    [x] 11.6.5 playfile — `{file}`. `Player.Open {"item":{"file":…}}` (§12.10.9):
     plays any path (in-library or not), auto-selects the audio/video player,
     library-enriches the now-playing item; returns the player_state() snapshot.
     Plays one file (caller picks from a multi-leaf `search` result).

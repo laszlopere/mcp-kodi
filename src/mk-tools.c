@@ -1715,6 +1715,96 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
   return NULL;
 }
 
+/* ---- playfile (§11.6.5) ---------------------------------------------------
+ *
+ * Play one file by path. The natural partner to `search` (§5.10): the caller
+ * picks a `file` out of a multi-leaf search result and hands it here. Unlike the
+ * library `play` (by id), this opens an arbitrary path, so it works for items
+ * that are not in the library at all.
+ */
+
+#define MK_PLAYFILE_SETTLE_US (500 * 1000) /* let the new player start first */
+
+/**
+ * schema_playfile:
+ * @self: the table (used to name the configured instances).
+ *
+ * Schema for the `playfile` tool (§11.6.5): the required `file` path plus the
+ * optional `instance`.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_playfile (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_instance (b, self, FALSE);
+  prop_typed (b, "file", "string",
+              "Path of the file to play — the `file` field of a `search` result "
+              "row. Any path Kodi can reach works, in-library or not.");
+
+  static const char *const required[] = { "file", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_playfile:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments; `file` is the path to play.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `playfile` tool (§11.6.5): opens one file by path with
+ * `Player.Open { "item": { "file": <file> } }` (§12.10.9). Kodi auto-selects the
+ * audio vs video player from the file type and, when the path matches a scanned
+ * item, enriches the now-playing state back to the library id. Like the
+ * transport Buttons, it then returns the player_state() snapshot rather than
+ * Kodi's bare "OK", so the caller sees what is now loaded and playing.
+ *
+ * `Player.Open` replies "OK" the moment the open is queued, before the new
+ * player has started and its `speed`/item settle, so — as with handler_button()
+ * — a brief settle delay before snapshotting makes the reported state reflect
+ * the file that is now playing.
+ *
+ * @return the post-open player-state object, or NULL with @error set (missing
+ *         `file` or a call failure).
+ */
+static JsonNode *
+handler_playfile (MkTools *self, const MkToolDef *def, JsonObject *args,
+                  GError **error)
+{
+  (void) def;
+  const char *instance = arg_instance (args);
+  const char *file = arg_str (args, "file", NULL);
+  if (file == NULL || file[0] == '\0')
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "playfile: \"file\" is required");
+      return NULL;
+    }
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "item");
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "file");
+  json_builder_add_string_value (b, file);
+  json_builder_end_object (b);
+  json_builder_end_object (b);
+  g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+  g_autoptr (JsonNode) opened = mk_kodi_call (self->kodi, instance, "Player.Open",
+                                              params, error);
+  if (opened == NULL)
+    return NULL;
+
+  g_usleep (MK_PLAYFILE_SETTLE_US);
+  return player_state (self, instance, error);
+}
+
 /* ---- The tool table -------------------------------------------------------
  *
  * Being rebuilt from the comprehensive Kodi JSON-RPC inventory (../TODO.md §12)
@@ -1903,6 +1993,34 @@ static const MkToolDef mk_tool_defs[] = {
   { "search", "Find playable files by name: music/tv-show/movie, drilled to "
               "leaf files with paging (limit/offset) and a total count.",
     schema_search, handler_search, NULL },
+
+  /* ---- Playback tools — open content on a player (§11.6.5). ---- */
+
+  /**
+   * playfile (Playback tool):
+   *
+   * Play one file by path — the partner to `search` (§11.6.5, design §5.10).
+   * Takes a `file` (typically the `file` field of a `search` result row) and
+   * opens it with Player.Open `{ "item": { "file": <file> } }` (§12.10.9). Kodi
+   * auto-selects the audio vs video player from the file type and, when the path
+   * matches a scanned library item, enriches the now-playing state back to its
+   * library id. Plays a single file; for a multi-leaf `search` result the caller
+   * picks which row to play. Works for any path Kodi can reach, in-library or
+   * not.
+   *
+   * Call:  Player.Open { "item": { "file": <file> } }, then player_state() to
+   *        report what is now loaded/playing.
+   * @param file (required): path of the file to play.
+   * @param instance (optional): name of the Kodi instance to target; omitted
+   *        uses the configured default (§5.1).
+   * @return the resulting player-state snapshot (player_state()): `{ "state":
+   *         "playing"|"paused"|"stopped", "type", "file", "label", "title",
+   *         "time", "totaltime" }` (fields present when a player is active).
+   */
+  { "playfile", "Play one file by path (e.g. a `search` result's `file`): "
+                "Player.Open auto-selects the audio/video player. Works for any "
+                "reachable path, in-library or not.",
+    schema_playfile, handler_playfile, NULL },
 };
 
 /**
