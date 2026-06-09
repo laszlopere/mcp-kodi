@@ -1145,7 +1145,7 @@ Everything below this section is original design for *this* project.
     (ids can be renumbered, so an old `id` may later resolve to a different item or
     none). So treat `file`/`label`/`showtitle`/`album` as the durable identifiers
     and `id` as a best-effort replay shortcut.
-    [ ] 13.4.2 **Show/episode and album/artist — record them in v1.** For a
+    [x] 13.4.2 **Show/episode and album/artist — record them in v1.** For a
     useful log the entry must name *which show* and *which episode* for TV, and
     the *album*/*artist* for music — so v1 records, per media type:
     `showtitle` + `season` + `episode` (episodes), `album` + `artist` (+ `track`)

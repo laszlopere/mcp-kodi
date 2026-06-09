@@ -30,8 +30,9 @@
  * feed history, as a side effect that must not change `rpc`'s verbatim return
  * (§13.3.1). That wiring lands with the write path (§13.5–§13.9).
  *
- * Entry fields settled so far (§13.4 — the rest of the shape, show/episode and
- * album/artist, is still being pinned down in §13.4.2+):
+ * Entry fields (§13.4 — the per-item fields are now all settled; only how the
+ * wider GetItem is sourced (§13.4.3) and any deeper metadata (§13.4.4) remain
+ * open):
  *   - `at`    — the capture timestamp (§13.4.0): server wall-clock at the moment
  *               the snapshot is taken and the entry written (≈ when playback
  *               started, §13.2.2), from g_date_time_*. Stored as ISO-8601 **with
@@ -58,6 +59,16 @@
  *               (§13.4.1.1), so treat file/label/showtitle/album as the durable
  *               identifiers. A `playfile` of a path not in the library can't be
  *               enriched → `media` is "unknown" and `id` is -1.
+ *   - show/episode (§13.4.2): for a TV episode, `showtitle` (string) plus
+ *               `season` and `episode` (integers) — which show, which episode.
+ *   - album/song (§13.4.2): for music, `album` (string), `artist` (array of
+ *               strings, e.g. ["Abba"]) and `track` (integer).
+ * Unlike `media`/`id` (auto-injected), the §13.4.2 fields must be named in the
+ * `properties` array of Player.GetItem — but they are all valid List.Item.Base
+ * properties reachable in the **same single call** (which today asks only
+ * ["title","file"]), so widening that list costs no extra Kodi round-trip, only
+ * a longer field list. Per media type an entry carries only the fields that
+ * apply (a movie has neither show/episode nor album/artist); omit what's empty.
  *
  * This is the §13.1 foundation only: the module, its own storage path
  * (${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/history.json, §13.6), and
