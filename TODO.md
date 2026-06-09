@@ -130,7 +130,7 @@ Everything below this section is original design for *this* project.
   | `play`      | `instance?`, `type` (song/album/artist/movie/episode/musicvideo), `id` | `Player.Open` with the matching `item` key |
   | `seek`      | `instance?`, `time` (h/m/s) **or** `percentage` | `Player.Seek` on the active player |
   | `handoff`   | `from`, `to`                           | capture active item + position on `from` → `Player.Stop` on `from` → `Player.Open` on `to` → `Player.Seek` to that position |
-  | `search`    | `type` (music/tv-show/movie), `artist?`, `title?`, `season?`, `number?` | resolves the per-type chain to **leaf files** — see §5.10 |
+  | `search`    | `type` (music/tv-show/movie), `artist?`, `title?`, `season?`, `number?`, `limit?`, `offset?`, `count?` | resolves the per-type chain to **leaf files**; reports `total`; pages via `limit`/`offset` — see §5.10 |
   | `random`    | `instance?`, `type` (episode/movie/song), `query?`  | resolve filter → pick → `Player.Open` |
   | `episodes`  | `show`, `filter?` (SxxExx or text)     | `VideoLibrary.GetEpisodes` |
   | `status`    | `instance?` (`"*"` = all)              | `Player.GetActivePlayers` + `Player.GetItem` + `Player.GetProperties`; per instance |
@@ -200,6 +200,9 @@ Everything below this section is original design for *this* project.
   | `title`  | album name                  | show name                | movie title          |
   | `season` | —                           | season number            | —                    |
   | `number` | track number                | episode number           | —                    |
+  | `limit`  | max leaf rows returned (default cap, e.g. 50)                  |||
+  | `offset` | rows to skip — paginate together with `limit`                 |||
+  | `count`  | if true, return `total` only (zero rows) — a cheap count      |||
 
   `title` is the one renamed field (was "group"): it holds the named container
   for music/tv (album/show) and the title itself for a movie — the thing you
@@ -208,29 +211,53 @@ Everything below this section is original design for *this* project.
   "contains", value}`), so `"abba"` also hits "Black Sa**bba**th" — narrow with
   more fields.
 
-  Resolution chains (each step = a §12 method already captured):
-  - **music** — `GetArtists`(`artist`) → `artistid` → `GetAlbums {artistid}`
-    (+`title`) → `albumid` → `GetSongs {albumid}` (+`number`→track) → song
-    `file`s. (§12.3.6 documents the whole 3-call chain; §12.3.4 / §12.3.17.)
+  Resolution chains (each step = a §12 method already captured). The key design
+  choice: **descend to the album/season level only when the user names one**, so
+  every *wide* query (bare `artist`, bare show) is a **single** leaf call — which
+  makes `total`, `limit`, and `offset` map straight onto Kodi's `limits {start,
+  end, total}` with no app-side stitching:
+  - **music** — `GetArtists`(`artist`) → `artistid`. Then:
+    - no `title` → `GetSongs {artistid}` **directly** — every song by the artist
+      in one call (the §12.3.6 shortcut; `GetSongs` takes an `{artistid}` filter,
+      introspect.json:1132). Skips the album hop entirely.
+    - with `title` → `GetAlbums {artistid}`(+`title`) → `albumid` →
+      `GetSongs {albumid}` (+`number`→track). (§12.3.4 / §12.3.17.)
   - **tv-show** — `GetTVShows`(`title`) → `tvshowid` → `GetEpisodes {tvshowid,
-    season}` (+`number`→episode filter) → episode `file`s. (§12.16.21 incl. the
-    episode follow-up; §12.16.6.)
-  - **movie** — `GetMovies`(`title`) → movie `file`s directly (no sublevels).
-    (§12.16.12.)
+    season?}` (+`number`→episode filter) → episode `file`s, one call. (§12.16.21
+    incl. the episode follow-up; §12.16.6.)
+  - **movie** — `GetMovies`(`title`) → movie `file`s directly (no sublevels),
+    one call. (§12.16.12.)
 
   **Leaf-files semantics** (the chosen behaviour): `search` always returns the
   leaf rows it can reach with the fields given — never a bare container. Omitting
   lower fields *widens* to all leaves beneath:
-  - `{music, artist:"Abba"}` → every Abba song (all albums).
+  - `{music, artist:"Abba"}` → every Abba song (all albums, one `GetSongs` call).
   - `{music, artist:"Abba", title:"Arrival"}` → every track of Arrival.
   - `{music, artist:"Abba", title:"Arrival", number:3}` → just track 3.
   - `{tv-show, title:"Earth 2"}` → every episode; `+season:1` → that season;
     `+number:2` → exactly S01E02.
   - `{movie, title:"Alien"}` → the matching movie file(s).
   Each result row carries at least `file` (the `playfile` input) plus its library
-  id (`songid`/`episodeid`/`movieid`) and a human `label`/`title`. Cap the result
-  set (e.g. 50) and report when truncated — a bare `artist` can fan out to
-  hundreds of files (real data: one artist returned 65 albums, §12.3.6).
+  id (`songid`/`episodeid`/`movieid`) and a human `label`/`title`.
+
+  **Count and pagination.** Every Get\* response includes `limits.total` — the
+  full match count, independent of how many rows were returned. `search` always
+  surfaces that as `total`, so the count is honest even when rows are capped:
+  "how many Iron Maiden songs?" is `{music, artist:"Iron Maiden", count:true}` →
+  one `GetSongs {artistid}` with `limits {start:0, end:1}`, read `total`, return
+  zero rows. To build a long playlist, page with `limit`/`offset` (→ Kodi
+  `limits {start:offset, end:offset+limit}`) until `offset+len(rows) >= total`.
+  When `limit` is omitted the default cap applies and the response flags
+  truncation (`returned < total`). A bare `artist` can legitimately be hundreds
+  of songs (real data: one artist had 65 albums, §12.3.6) — `total` tells the
+  caller that up front; `limit`/`offset` walk it.
+
+  **The one multi-call case:** a substring `title` that matches *several* albums
+  or shows (e.g. two albums both containing "Live") forces a `GetSongs`/
+  `GetEpisodes` per match, so `total` is a **sum** across them and `offset` is
+  best-effort (sliced app-side over the concatenated leaves). The common paths —
+  bare `artist`, bare show, exact-ish `title` resolving to one container — stay
+  single-call with exact `limits`. Flag this set as approximate when it occurs.
 
   `playfile { file }` feeds that `file` to `Player.Open {item:{file}}` (§12.10.9):
   plays any path (no library entry needed), auto-selects the audio vs video
@@ -451,11 +478,20 @@ Everything below this section is original design for *this* project.
     files; no Kodi state change. Generic find-by-name tools (more to come).
     Full design in §5.10.
       [ ] 11.6.4.1 search — `{type:music|tv-show|movie, artist?, title?, season?,`
-        `number?}`. Drills the per-type chain to leaf-file rows (`{file, <id>,
-        label}`): music GetArtists→GetAlbums→GetSongs (§12.3.6); tv-show
-        GetTVShows→GetEpisodes (§12.16.21/§12.16.6); movie GetMovies (§12.16.12).
-        Omitting lower fields widens to all leaves beneath; cap the set and report
-        truncation. `title` = album/show/movie name; `number` = track/episode.
+        `number?, limit?, offset?, count?}`. Drills the per-type chain to
+        leaf-file rows (`{file, <id>, label}`): music GetArtists→GetSongs
+        `{artistid}` direct when no `title`, else GetArtists→GetAlbums→GetSongs
+        `{albumid}` (§12.3.6/§12.3.4/§12.3.17); tv-show GetTVShows→GetEpisodes
+        (§12.16.21/§12.16.6); movie GetMovies (§12.16.12). Descend to album/season
+        only when named, so each wide query is one Kodi call. Omitting lower
+        fields widens to all leaves beneath. Always report `total` (from Kodi
+        `limits.total`); `count:true` returns `total` with zero rows. `limit`/
+        `offset` → Kodi `limits {start:offset, end:offset+limit}` for paging a
+        long result (e.g. playlist build); default cap applies when `limit`
+        omitted, flagging truncation (`returned < total`). `title` =
+        album/show/movie name; `number` = track/episode. A substring `title`
+        hitting several containers is the one multi-call case → `total` is a sum,
+        `offset` best-effort, flag approximate (§5.10).
     [ ] 11.6.5 playfile — `{file}`. `Player.Open {"item":{"file":…}}` (§12.10.9):
     plays any path (in-library or not), auto-selects the audio/video player,
     library-enriches the now-playing item; returns the player_state() snapshot.
