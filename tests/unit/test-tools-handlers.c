@@ -506,6 +506,130 @@ case_handler_failure_shaped (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* ---- volume (relative Knob, §11.6.2.1) ------------------------------------ */
+
+/* Number of recorded Kodi calls this case. */
+static guint
+n_calls (void)
+{
+  return stub_kodi_methods != NULL ? stub_kodi_methods->len : 0;
+}
+
+/* step 0 (here: omitted) reads the live state and writes nothing — one round
+ * trip, no SetVolume, and the fixed bounds come back. */
+static void
+case_volume_read_only (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Application.GetProperties",
+                          "{ \"muted\": false, \"volume\": 30 }");
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "volume", NULL, &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "volume"), 30);
+      MK_CHECK (!json_object_get_boolean_member (p, "muted"));
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "min"), 0);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "max"), 100);
+    }
+
+  /* read only: GetProperties and nothing else */
+  MK_CHECK (called ("Application.GetProperties"));
+  MK_CHECK (!called ("Application.SetVolume"));
+  MK_CHECK_INT_EQ (n_calls (), 1);
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* A relative +N: read, set, and report the volume Kodi *settled* on — here the
+ * box echoes 42 even though the naive target is 40, and the handler must report
+ * 42, proving it trusts the setter's reply. muted is carried from the read
+ * (SetVolume never returns it). Two round trips. */
+static void
+case_volume_relative_step (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Application.GetProperties",
+                          "{ \"muted\": true, \"volume\": 30 }");
+  stub_kodi_set_response ("Application.SetVolume", "42");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"step\": 10 }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "volume", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "volume"), 42);
+      /* muted reused from the initial read, not from SetVolume */
+      MK_CHECK (json_object_get_boolean_member (p, "muted"));
+    }
+
+  /* read then write: two round trips */
+  MK_CHECK (called ("Application.GetProperties"));
+  MK_CHECK (called ("Application.SetVolume"));
+  MK_CHECK_INT_EQ (n_calls (), 2);
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* A step past the ceiling clamps to 100: from 95, +20 must target 100, not 115.
+ * SetVolume returns a non-integer here, so the handler falls back to its OWN
+ * computed target — which is exactly the clamp we want to verify. */
+static void
+case_volume_clamps_high (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Application.GetProperties",
+                          "{ \"muted\": false, \"volume\": 95 }");
+  stub_kodi_set_response ("Application.SetVolume", "{}"); /* non-int → use target */
+
+  g_autoptr (JsonNode) an = args_node ("{ \"step\": 20 }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "volume", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    MK_CHECK_INT_EQ (
+      json_object_get_int_member (json_node_get_object (payload), "volume"),
+      100);
+
+  MK_CHECK (called ("Application.SetVolume"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -516,6 +640,9 @@ main (int argc, char **argv)
     { "button-play",             case_button_play },
     { "mute",                    case_mute },
     { "unmute",                  case_unmute },
+    { "volume-read-only",        case_volume_read_only },
+    { "volume-relative-step",    case_volume_relative_step },
+    { "volume-clamps-high",      case_volume_clamps_high },
     { "rpc-disabled",            case_rpc_disabled },
     { "rpc-allowed",             case_rpc_allowed },
     { "instances-get",           case_instances_get },

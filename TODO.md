@@ -135,7 +135,7 @@ Everything below this section is original design for *this* project.
   | `random`    | `instance?`, `type` (episode/movie/song), `query?`  | resolve filter → pick → `Player.Open` |
   | `episodes`  | `show`, `filter?` (SxxExx or text)     | `VideoLibrary.GetEpisodes` |
   | `status`    | `instance?` (`"*"` = all)              | `Player.GetActivePlayers` + `Player.GetItem` + `Player.GetProperties`; per instance |
-  | `volume`    | `instance?`, `level` (0–100)           | `Application.SetVolume` |
+  | `volume`    | `instance?`, `step` (signed int; `0` = read only) | `Application.GetProperties` (read `volume`+`muted`) → `Application.SetVolume` clamped-absolute when `step`≠0; returns `{volume,muted,min,max}` |
   | `mute`      | `instance?`, `state` (on/off/toggle)   | `Application.SetMute` |
   | `speed`     | `instance?`, `speed` (−32…32, or `increment`/`decrement`) | `Player.SetSpeed` — fast-forward / rewind / resume normal |
   | `skip`      | `instance?`, `to` (`next`/`previous`, or item position) | `Player.GoTo` |
@@ -464,9 +464,35 @@ Everything below this section is original design for *this* project.
         whether Kodi answers and what is currently loaded/playing, without
         changing anything (no Input.ExecuteAction). Like the transport Buttons
         it shares the player_state() response shape.
-    [ ] 11.6.2 Knobs — set to a scalar value; $value = the knob argument:
-      [ ] 11.6.2.1 volume
-        `{"method":"Application.SetVolume","params":{"volume":"$value"}}`
+    [x] 11.6.2 Knobs — adjust a scalar; $value = the knob argument:
+      [x] 11.6.2.1 volume — a **relative** knob, never absolute. The AI must not
+        pick a target level: 50% may be deafening, or quieter than now — it has
+        no way to know without reading first. So it nudges from wherever the box
+        currently sits. The tool's `step` argument is a signed integer:
+          - `0`  → read only: report the current state, change nothing (the
+            "what is it now?" probe, mirroring noop's role for the player).
+          - `+N` / `−N` → raise / lower by N (a percentage delta).
+        The server resolves the step against the *live* level and always returns
+        the full state, so the AI knows where it landed and how much room is
+        left before it bottoms/tops out:
+          `{ "volume": <int>, "muted": <bool>, "min": 0, "max": 100 }`
+        `min`/`max` are Kodi's fixed 0–100 percentage bounds (there is no RPC to
+        query them); the server reports them as constants so the AI need not
+        hardcode the scale, and can tell when a further step would be clamped.
+
+        Kodi calls the server issues:
+          1. read current state — always, including for `step` 0:
+             `{"method":"Application.GetProperties","params":{"properties":["volume","muted"]}}`
+             → `{ "volume": <0–100>, "muted": <bool> }`
+          2. only when `step` ≠ 0, write the clamped absolute target. Kodi's own
+             `"increment"`/`"decrement"` step by a fixed 1, so to honour an
+             arbitrary ±N we compute the level ourselves and clamp to [0,100]:
+             `{"method":"Application.SetVolume","params":{"volume":<clamp(volume+step,0,100)>}}`
+             → the new volume (int). The setter only echoes `volume`, so the
+             `muted` flag carried into the response comes from step 1.
+        Read-only (`step` 0) is one round trip; an adjustment is two. Shares the
+        app_audio_state() shape (§11.6.1) plus the `min`/`max` bounds, so mute
+        and volume tools answer "is it muted, and how loud" identically.
     [x] 11.6.3 Config tools — manage the server's *own* instance config
     (`config.json`, §7); these make no Kodi call. One `instances` tool with an
     `action` enum (the §5.2 convention used by `queue`/`power`/`navigate`). `set`
@@ -544,10 +570,10 @@ Everything below this section is original design for *this* project.
   method inventory; §5/§11.6 decide how methods are grouped into MCP tools.
 
   [ ] 12.1 Application
-    [ ] 12.1.1 properties — Retrieves the values of the given properties (`Application.GetProperties`)
+    [x] 12.1.1 properties — Retrieves the values of the given properties (`Application.GetProperties`) — used by mute/unmute (§11.6.1) and the volume Knob (§11.6.2.1) to read back `volume`/`muted`
     [ ] 12.1.2 quit — Quit application (`Application.Quit`)
-    [ ] 12.1.3 mute — Toggle mute/unmute (`Application.SetMute`)
-    [ ] 12.1.4 volume — Set the current volume (`Application.SetVolume`)
+    [x] 12.1.3 mute — Toggle mute/unmute (`Application.SetMute`)
+    [x] 12.1.4 volume — Set the current volume (`Application.SetVolume`) — driven relatively by the volume Knob (§11.6.2.1)
 
   [ ] 12.2 Addons
     [ ] 12.2.1 executeAddon — Executes the given addon with the given parameters (if possible) (`Addons.ExecuteAddon`)

@@ -566,8 +566,30 @@ player_state (MkTools *self, const char *instance, GError **error)
  * @return a newly allocated object node — `{ "muted": <bool>, "volume": <int> }`
  *         — or NULL with @error set if the call fails.
  */
-static JsonNode *
-app_audio_state (MkTools *self, const char *instance, GError **error)
+/* Kodi's Application volume is a fixed 0–100 percentage, and the API exposes no
+ * way to query the scale, so the server reports the bounds as constants in the
+ * volume snapshot (§11.6.2.1) — letting the AI nudge relatively without
+ * hardcoding the range or guessing when a step would be clamped. */
+#define MK_VOLUME_MIN 0
+#define MK_VOLUME_MAX 100
+
+/**
+ * app_audio_read:
+ * @self: the tool table.
+ * @instance: target instance name, or NULL for the configured default.
+ * @volume: return location for the current volume (0–100), or NULL.
+ * @muted: return location for the current mute flag, or NULL.
+ * @error: return location for a GError, or NULL.
+ *
+ * Reads the application audio state with a single `Application.GetProperties`
+ * for `volume` and `muted` — the one read every audio tool funnels through, so
+ * a snapshot reflects Kodi's settled state rather than a setter's bare reply.
+ *
+ * @return TRUE and fills the requested out-params, or FALSE with @error set.
+ */
+static gboolean
+app_audio_read (MkTools *self, const char *instance, gint64 *volume,
+                gboolean *muted, GError **error)
 {
   g_autoptr (JsonBuilder) pb = json_builder_new ();
   json_builder_begin_object (pb);
@@ -583,15 +605,68 @@ app_audio_state (MkTools *self, const char *instance, GError **error)
                                            "Application.GetProperties", params,
                                            error);
   if (res == NULL)
-    return NULL;
+    return FALSE;
   JsonObject *props = json_node_get_object (res);
+  if (volume != NULL)
+    *volume = json_object_get_int_member_with_default (props, "volume", 0);
+  if (muted != NULL)
+    *muted = json_object_get_boolean_member_with_default (props, "muted", FALSE);
+  return TRUE;
+}
 
+/**
+ * audio_snapshot:
+ * @volume: the volume to report (0–100).
+ * @muted: the mute flag to report.
+ * @with_bounds: also emit the fixed `min`/`max` volume bounds (§11.6.2.1).
+ *
+ * Builds the shared audio response object `{ "muted": <bool>, "volume": <int>
+ * }`, optionally extended with `"min"`/`"max"` for the volume Knob so the AI
+ * sees where it landed and how much room remains.
+ *
+ * @return a newly allocated object node.
+ */
+static JsonNode *
+audio_snapshot (gint64 volume, gboolean muted, gboolean with_bounds)
+{
   g_autoptr (JsonBuilder) b = json_builder_new ();
   json_builder_begin_object (b);
-  copy_member (b, props, "muted");
-  copy_member (b, props, "volume");
+  json_builder_set_member_name (b, "muted");
+  json_builder_add_boolean_value (b, muted);
+  json_builder_set_member_name (b, "volume");
+  json_builder_add_int_value (b, volume);
+  if (with_bounds)
+    {
+      json_builder_set_member_name (b, "min");
+      json_builder_add_int_value (b, MK_VOLUME_MIN);
+      json_builder_set_member_name (b, "max");
+      json_builder_add_int_value (b, MK_VOLUME_MAX);
+    }
   json_builder_end_object (b);
   return json_builder_get_root (b);
+}
+
+/**
+ * app_audio_state:
+ * @self: the tool table.
+ * @instance: target instance name, or NULL for the configured default.
+ * @error: return location for a GError, or NULL.
+ *
+ * The shared audio snapshot `{ "muted": <bool>, "volume": <int> }` returned by
+ * mute/unmute (§11.6.1): read the settled state, shape it. The volume Knob
+ * (§11.6.2.1) uses app_audio_read()/audio_snapshot() directly so it can also
+ * report the bounds and avoid a redundant round-trip.
+ *
+ * @return a newly allocated object node, or NULL with @error set.
+ */
+static JsonNode *
+app_audio_state (MkTools *self, const char *instance, GError **error)
+{
+  gint64 volume = 0;
+  gboolean muted = FALSE;
+  if (!app_audio_read (self, instance, &volume, &muted, error))
+    return NULL;
+  return audio_snapshot (volume, muted, FALSE);
 }
 
 /**
@@ -702,6 +777,102 @@ handler_mute (MkTools *self, const MkToolDef *def, JsonObject *args,
     return NULL;
 
   return app_audio_state (self, instance, error);
+}
+
+/**
+ * schema_volume:
+ * @self: the table, used to enumerate instance names.
+ *
+ * Schema for the volume Knob (§11.6.2.1): the optional `instance` plus an
+ * optional integer `step`. `step` is a *relative* change in percentage points —
+ * 0 (or omitted) reads the current volume without changing it, positive raises,
+ * negative lowers — never an absolute level, so the AI nudges from the live
+ * value instead of guessing a target.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_volume (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+  prop_instance (b, self, FALSE);
+  prop_typed (b, "step", "integer",
+              "Relative volume change in percentage points. 0 or omitted reads "
+              "the current volume without changing it; positive raises, "
+              "negative lowers. The result is clamped to the 0-100 range "
+              "reported as min/max.");
+  schema_end (b, NULL);
+  return json_builder_get_root (b);
+}
+
+/* Defined alongside the other argument readers, below; used here by the volume
+ * Knob to read its optional integer `step`. */
+static gboolean arg_int (JsonObject *args, const char *name, gint64 *out);
+
+/**
+ * handler_volume:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments (optional `instance`, optional integer `step`).
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the volume Knob (§11.6.2.1) as a **relative** adjustment, never an
+ * absolute set: the AI cannot safely pick a level it has not read, so it nudges
+ * from the box's live volume. The `step` argument is a signed integer — 0 (or
+ * omitted) reads the current state and changes nothing (the audio analogue of
+ * noop), `+N`/`−N` raises/lowers by N percentage points.
+ *
+ * Always reads first with one `Application.GetProperties` (`volume` + `muted`);
+ * for a non-zero `step` it then writes the clamped absolute target with
+ * `Application.SetVolume` (Kodi's own increment/decrement step by a fixed 1, so
+ * the server computes the level itself to honour an arbitrary ±N and clamp to
+ * [0,100]). The setter echoes only the new volume, so the `muted` flag in the
+ * reply is carried from the initial read — a read-only call is one round-trip,
+ * an adjustment two. Returns the audio snapshot extended with the fixed
+ * `min`/`max` bounds: `{ "muted", "volume", "min", "max" }`.
+ *
+ * @return the resulting audio snapshot, or NULL with @error set.
+ */
+static JsonNode *
+handler_volume (MkTools *self, const MkToolDef *def, JsonObject *args,
+                GError **error)
+{
+  (void) def;
+  const char *instance = arg_instance (args);
+
+  gint64 step = 0;
+  arg_int (args, "step", &step); /* absent → 0 → read-only */
+
+  gint64 volume = 0;
+  gboolean muted = FALSE;
+  if (!app_audio_read (self, instance, &volume, &muted, error))
+    return NULL;
+
+  if (step != 0)
+    {
+      gint64 target = CLAMP (volume + step, MK_VOLUME_MIN, MK_VOLUME_MAX);
+
+      g_autoptr (JsonBuilder) b = json_builder_new ();
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "volume");
+      json_builder_add_int_value (b, target);
+      json_builder_end_object (b);
+      g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+      g_autoptr (JsonNode) set = mk_kodi_call (self->kodi, instance,
+                                               "Application.SetVolume", params,
+                                               error);
+      if (set == NULL)
+        return NULL;
+
+      /* Kodi returns the new volume; fall back to our clamped target if the
+       * reply is not the bare integer we expect. Mute is unchanged by
+       * SetVolume, so it is reused from the read above. */
+      volume = JSON_NODE_HOLDS_VALUE (set) ? json_node_get_int (set) : target;
+    }
+
+  return audio_snapshot (volume, muted, TRUE);
 }
 
 /**
@@ -2325,6 +2496,32 @@ static const MkToolDef mk_tool_defs[] = {
    */
   { "unmute", "Unmute the target instance's audio output.",
     schema_instance_only, handler_mute, "false" },
+
+  /* ---- Knobs — adjust a scalar relative to its live value (§11.6.2). ---- */
+
+  /**
+   * volume (Knob):
+   *
+   * Adjust the target instance's volume *relatively* (§11.6.2.1). Never set an
+   * absolute level: pick a `step` and the box moves from wherever it is now, so
+   * the caller cannot accidentally blast or silence it by guessing a number it
+   * has not read. `step` is a signed integer in percentage points — 0 (or
+   * omitted) reports the current volume without changing it (a read probe),
+   * positive raises, negative lowers; the result is clamped to 0-100.
+   *
+   * Call:  Application.GetProperties (volume + muted) to read; when `step` ≠ 0,
+   *        Application.SetVolume with the clamped absolute target.
+   * @param step (optional): relative change in percentage points; 0/omitted
+   *        reads only.
+   * @param instance (optional): name of the Kodi instance to target; omitted
+   *        uses the configured default (§5.1).
+   * @return the resulting audio snapshot with the fixed scale bounds:
+   *         `{ "muted": <bool>, "volume": <int>, "min": 0, "max": 100 }`.
+   */
+  { "volume", "Adjust the target instance's volume by a relative step (in "
+              "percentage points); step 0 or omitted just reports the current "
+              "volume. Returns volume, mute state, and the min/max bounds.",
+    schema_volume, handler_volume, NULL },
 
   /**
    * noop (Button):
