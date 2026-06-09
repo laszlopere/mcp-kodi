@@ -295,7 +295,8 @@ Everything below this section is original design for *this* project.
       ├── mk-mcp.{c,h}      MCP method dispatch (initialize/list/call/ping)
       ├── mk-kodi.{c,h}     Kodi JSON-RPC client over libsoup
       ├── mk-tools.{c,h}    tool table: schemas + handlers → mk-kodi calls
-      └── mk-state.{c,h}    playback state file (json, atomic write)
+      ├── mk-state.{c,h}    playback state file (json, atomic write)
+      └── mk-history.{c,h}  playback history log — global, append, atomic (§13)
   ```
 
 ---
@@ -533,7 +534,8 @@ Everything below this section is original design for *this* project.
     or need the monitoring loop §2.1/§10.1 avoids. Revisit once more of the §5.2
     tool surface lands.
   [ ] 11.8 Playback state file, per-instance (`mk-state`)
-  [ ] 11.9 Build clean, test against live Kodi, write README
+  [ ] 11.9 Playback history, global append-only log (`mk-history`) — see §13
+  [ ] 11.10 Build clean, test against live Kodi, write README
 
 ## 12. Comprehensive Kodi JSON-RPC coverage
 
@@ -1017,3 +1019,228 @@ Everything below this section is original design for *this* project.
   [ ] 12.17 XBMC
     [ ] 12.17.1 infoBooleans — Retrieve info booleans about Kodi and the system (`XBMC.GetInfoBooleans`)
     [ ] 12.17.2 infoLabels — Retrieve info labels about Kodi and the system (`XBMC.GetInfoLabels`)
+
+---
+
+## 13. Playback history
+
+  A chronological, cross-instance log of what was actually played, so the AI can
+  answer "what did I watch last week", "what music did I put on yesterday",
+  "what was on in the kids' room last month". Designed here; the read-back tool
+  is parked until we have a real file to look at (§13.10).
+
+  [ ] 13.1 **Purpose, and how it differs from state (§8).** The per-instance
+  state file (§8) is *forward-looking intent* — `last_played`, last episode per
+  show — to drive "what next", resume and handoff. This history is the opposite:
+  a *backward-looking, append-mostly log* of what already played, spanning **all
+  instances in one list**. Different shape, different file, different lifecycle —
+  history and state do **not** share storage (a history append must never race a
+  state write, same separation rationale as §8.2 vs §7.1).
+
+  [ ] 13.2 **No monitoring — capture is call-driven only.** We do not poll and we
+  do not subscribe to Kodi's WebSocket push (§2.1, §10.1). The only moments we
+  learn what is playing are the moments a tool call runs and produces a
+  now-playing snapshot. Consequences, stated plainly so the blind spots are on
+  record rather than discovered later:
+    [ ] 13.2.1 Playback the user starts from the **physical remote / Kodi UI** is
+    invisible — we never see it unless some later tool call happens to snapshot it.
+    [ ] 13.2.2 **No playlist/queue tracking.** We record the item playing at the
+    moment of the call (the *first* item when a play starts); subsequent tracks
+    Kodi advances to on its own are not seen. (No `Playlist`/queue support yet,
+    §12.11 — deliberately out of scope for v1.)
+    [ ] 13.2.3 The log is therefore a record of *what the assistant caused or
+    observed*, not a complete audit of the box. Honest about its gaps; good
+    enough for "what did we play".
+
+  [ ] 13.3 **The snapshot is the raw material — no extra Kodi call.** Every
+  playback-affecting tool already ends by building the canonical `player_state()`
+  snapshot (§5.4: `state`, `type`, `file`, `label`, `title`, `time`,
+  `totaltime`) — `play`/`playfile`/`random`/`handoff` and the transport Buttons.
+  History **reuses that exact snapshot**; from it plus the instance key and a
+  capture timestamp we compose one entry (point 4 of the brief). No round-trip
+  beyond the one the tool already makes.
+    [ ] 13.3.1 **The escape hatch too.** The `rpc` tool (§11.6.6) returns Kodi's
+    raw `result` verbatim and takes **no** snapshot — so an `rpc` that started
+    playback (a hand-rolled `Player.Open`) would slip past history. After a
+    *successful* `rpc` call, take a `player_state()` snapshot **purely to feed
+    history**. This is a side effect: it must **not** change `rpc`'s verbatim
+    return value (§11.6.6 still returns the raw `result` unshaped). A
+    stopped/empty snapshot records nothing (§13.5), so non-playback `rpc` calls
+    cost one cheap extra `Player.GetActivePlayers` and append nothing.
+
+  [ ] 13.4 **Entry shape (draft).** One object per played item, built straight
+  from the snapshot (§13.3) plus the instance key/name and capture time:
+  ```json
+  // a TV episode
+  {
+    "at": "<iso8601>",
+    "instance": "hall",
+    "name": "Living Room TV",
+    "kind": "video",
+    "media": "episode",
+    "id": 4838,
+    "title": "First Contact (2)",
+    "showtitle": "Earth 2",
+    "season": 1,
+    "episode": 2,
+    "file": "/media/Serials/Earth 2/Earth.2.s01.e02.....avi",
+    "label": "1x02. First Contact (2)"
+  }
+  // a song / album track
+  {
+    "at": "<iso8601>",
+    "instance": "hall",
+    "name": "Living Room TV",
+    "kind": "audio",
+    "media": "song",
+    "id": 86,
+    "title": "Ring Ring",
+    "album": "Ring Ring",
+    "artist": ["Abba"],
+    "track": 1,
+    "file": "/media/Music/.../01 Ring Ring.mp3",
+    "label": "Ring Ring"
+  }
+  ```
+  Per-media fields are included when they apply (a movie carries neither
+  `showtitle`/`season`/`episode` nor `album`/`artist`); omit what's empty.
+  We do **not** store `time`/`totaltime`: at capture a freshly started item sits
+  at ≈0, and without polling (§13.2) we never learn whether or how far it
+  finished — so the entry asserts only *"this was played at `at`"*. `label`/`file`
+  are the human-identifiable fields (for this library the path itself already
+  carries artist/album/show).
+    [ ] 13.4.0 **`at` — the capture timestamp.** Server wall-clock at the moment
+    the snapshot was taken and the entry written (≈ when playback started, §13.2.2),
+    from `g_date_time_*`. It is the backbone of the feature: every "last week /
+    yesterday / last month" query (§13.10) filters on it, it is the sort key, and
+    it drives the age-based trim (§13.8.2). Store it **with an explicit timezone**
+    — UTC `…Z` or local-with-offset (`2026-06-09T19:30:00+02:00`) — never a bare
+    local time: an offset-less stamp makes range queries wrong across DST/zone
+    changes. Pick one form (UTC is the safe default; convert to local only when
+    presenting). `at` records *start*, not completion or duration (§13.2).
+    [ ] 13.4.1 **Media type and library id are free — record them in v1.** The
+    snapshot's current `type` (from `Player.GetActivePlayers`) is only the
+    **player kind** — `audio`/`video` — so it tells music from video but **not**
+    movie from TV episode from music video. The precise media type is already in
+    the `Player.GetItem` response we make every snapshot: Kodi injects `type`
+    (`song`/`episode`/`movie`/`musicvideo`/`picture`/`channel`/`unknown`) and the
+    library `id` (`songid`/`episodeid`/`movieid`) automatically — they are
+    **identity fields, not requestable `properties`** (absent from
+    `List.Item.Base`/`List.Item.All` in the introspect schema; confirmed live in
+    §12.10.9: `{"id":4838,"type":"episode"}`, `{"id":86,"type":"song"}`), so we
+    get them at **zero extra Kodi cost** — `player_state()` just discards them
+    today. So the history entry above carries both: `kind` = player kind
+    (audio/video), `media` = the real media type, `id` = the library id. Caveats:
+    a `playfile` of a path **not** in the library can't be enriched → `media` is
+    `"unknown"` and `id` is `-1`; and surfacing the media type means using a key
+    other than `type` (the snapshot already spends `type` on the player kind), so
+    this entry renames them `kind` + `media` to avoid the collision.
+    [ ] 13.4.1.1 **What `id` is good for, and isn't.** The stored `id` is the
+    library handle for `Player.Open {<media>id: N}` — so a future read tool
+    (§13.10) could replay a logged item by `id` instead of re-searching by name.
+    But it is a *convenience* handle, not a durable key: it is **library-scoped**
+    (only valid on a box that shares that library backend — the §5.6 shared-library
+    assumption; an `id` logged for one instance must **not** be replayed on another
+    with a separate local library), and **not stable across a library clean/rescan**
+    (ids can be renumbered, so an old `id` may later resolve to a different item or
+    none). So treat `file`/`label`/`showtitle`/`album` as the durable identifiers
+    and `id` as a best-effort replay shortcut.
+    [ ] 13.4.2 **Show/episode and album/artist — record them in v1.** For a
+    useful log the entry must name *which show* and *which episode* for TV, and
+    the *album*/*artist* for music — so v1 records, per media type:
+    `showtitle` + `season` + `episode` (episodes), `album` + `artist` (+ `track`)
+    (songs). Unlike `type`/`id` (§13.4.1) these are **not** auto-injected — they
+    must be named in the `properties` array of `Player.GetItem` — but they are
+    all valid `List.Item.Base` properties reachable in the **same single call**
+    we already make (it currently asks only `["title","file"]`,
+    `src/mk-tools.c`), so widening that list costs **no extra Kodi round-trip**,
+    only a longer field list. `artist` is an array of strings (e.g. `["Abba"]`);
+    `season`/`episode`/`track` are integers; `showtitle`/`album` are strings.
+    [ ] 13.4.3 **Open implementation choice — where the wider `GetItem` lives.**
+    Two ways to source the §13.4.2 fields; pick one when building `mk-history`:
+      [ ] 13.4.3.1 *Widen the shared `player_state()` `GetItem`* so the now-playing
+      snapshot itself carries show/episode/album/artist. One call, one source of
+      truth, history just copies it — and every `status`/transport reply gets
+      richer too (arguably a feature: "playing S01E02 of Earth 2"). Cost: a larger
+      status JSON on every call. **Recommended.**
+      [ ] 13.4.3.2 *Keep `player_state()` lean and have the history path issue its
+      own richer `Player.GetItem`* when it records. Keeps the shared snapshot
+      small, but adds one extra `GetItem` per recorded play (rare, dedup'd — §13.5)
+      and a second code path that can drift from the snapshot.
+    Decide against a real `history.json` (§13.10) — but the fields themselves are
+    committed for v1; this is only *how* to fetch them.
+    [ ] 13.4.4 **Deeper metadata stays parked.** Anything past §13.4.2 — genre,
+    year, rating, full cast, album art — is not worth carrying in a play log;
+    leave it to a later `*Details` lookup keyed off the stored `id` if ever
+    needed. Same wait-for-real-data discipline as point 7 of the brief.
+
+  [ ] 13.5 **When to append — dedup, don't flood.** Appending on every snapshot
+  would bury the log: every pause, `volume`, `seek`, `noop` re-observes the same
+  item. So:
+    [ ] 13.5.1 Record only when the snapshot shows something **loaded** —
+    `state != "stopped"`; a stopped snapshot appends nothing.
+    [ ] 13.5.2 Record only when it is a **new item** — compare against the most
+    recent entry *for that instance*; same `file` (or id) ⇒ skip (same thing,
+    just re-observed); a different `file` ⇒ append.
+    This yields one entry per distinct thing played per instance — the "first
+    item when play starts" (point 3) — and naturally ignores pause/resume/volume
+    churn on the same item.
+
+  [ ] 13.6 **The file.** One **global** file (all instances in one list, point
+  4), separate from config (§7) and per-instance state (§8):
+  `${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/history.json`. A JSON array of
+  entries via the json-glib we already use — symmetric with §7/§8. Newest-first
+  reads naturally for "recent" (order TBD with the read tool, §13.10). Directory
+  `0700` on first write; file `0600` (it records viewing habits — mildly private).
+
+  [ ] 13.7 **Concurrent writers — lock, do not "last-write-wins".** Several
+  copies of this server can run at once (one per MCP client/session, §2.1), all
+  appending to the one file. **Bare "last write wins via atomic rename" is the
+  wrong model for an append log:** two processes each read base *N*, each append
+  their own entry, each `rename()` — the second clobbers the first's entry. That
+  is the classic lost-update, and an append log must not silently drop entries.
+  So **serialize the whole read-modify-write** instead:
+    [ ] 13.7.1 Take an exclusive advisory lock (`flock` `LOCK_EX`) on the history
+    file (or a sidecar `history.json.lock`) for the critical section.
+    [ ] 13.7.2 Under the lock: read the current array → dedup/append the new entry
+    (§13.5) → trim (§13.8) → write a temp file in the same dir, `fsync`, then
+    `rename()` over the target (atomic replacement — the §7.4/§8.4 discipline).
+    [ ] 13.7.3 Release the lock. MCP calls are human-paced and a record is a few
+    KB, so the lock is held microseconds and contention is negligible.
+    [ ] 13.7.4 *Alternative considered:* JSONL + `O_APPEND` (kernel-atomic for
+    small records, no read needed to append) — but the size-trim (§13.8) still
+    needs a locked rewrite, so that is two mechanisms where one locked
+    read-modify-write does the job. Prefer the single locked path for simplicity
+    and json-glib symmetry; revisit only if append volume ever grows.
+
+  [ ] 13.8 **Retention / size cap.** The log must answer "last week / last month"
+  comfortably, so keep plenty — but bound it so the file can't grow without
+  limit (point 6). On each write, *after* appending, trim the oldest entries
+  beyond a cap, oldest-first:
+    [ ] 13.8.1 By count — keep the newest `MK_HISTORY_MAX` entries (named
+    constant; start generous, e.g. 10000).
+    [ ] 13.8.2 And/or by age — drop entries older than ~180 days.
+    Both bounds are constants in `mk-history`, tuned once we see real volume.
+    With sparse, call-driven entries (§13.2) 10k rows is many months —
+    comfortably past "last month".
+
+  [ ] 13.9 **Source layout.** New module `mk-history.{c,h}` (added to the §6.1
+  tree alongside `mk-state`):
+    [ ] 13.9.1 `mk_history_record(self, instance, snapshot)` — the write path:
+    lock → read → dedup/append → trim → atomic write (§13.5–13.8). The tool layer
+    calls it from the single point where a playback-affecting handler holds its
+    snapshot; `rpc` calls it with the extra snapshot from §13.3.1.
+    [ ] 13.9.2 **Best-effort — history never fails the call.** A history write
+    failure (lock, disk, parse) must **not** fail the underlying tool call: log
+    to stderr (§3.1) and carry on. The user's `play` succeeded even if logging it
+    didn't.
+    [ ] 13.9.3 `mk_history_read(...)` — the read path for the future tool
+    (§13.10); signature TBD.
+
+  [ ] 13.10 **Read tool — deferred (point 7).** A future `history` tool to read
+  the log back, likely with filters: `instance` (or `"*"`), a time window
+  (`since`/`until`, or "last 7 days"), `type`, and a `limit`. Exact args and
+  output shaping are deliberately left open until we have a real `history.json`
+  to inspect and can see what questions it must actually answer — the same
+  wait-for-real-data stance as §11.7 and §13.4.1. For now the server only
+  **writes** the log; nothing reads it programmatically yet.
