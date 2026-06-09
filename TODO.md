@@ -1216,13 +1216,13 @@ Everything below this section is original design for *this* project.
     read-modify-write does the job. Prefer the single locked path for simplicity
     and json-glib symmetry; revisit only if append volume ever grows.
 
-  [ ] 13.8 **Retention / size cap.** The log must answer "last week / last month"
+  [x] 13.8 **Retention / size cap.** The log must answer "last week / last month"
   comfortably, so keep plenty — but bound it so the file can't grow without
   limit (point 6). On each write, *after* appending, trim the oldest entries
   beyond a cap, oldest-first:
-    [ ] 13.8.1 By count — keep the newest `MK_HISTORY_MAX` entries (named
+    [x] 13.8.1 By count — keep the newest `MK_HISTORY_MAX` entries (named
     constant; start generous, e.g. 10000).
-    [ ] 13.8.2 And/or by age — drop entries older than ~180 days.
+    [x] 13.8.2 And/or by age — drop entries older than ~180 days.
     Both bounds are constants in `mk-history`, tuned once we see real volume.
     With sparse, call-driven entries (§13.2) 10k rows is many months —
     comfortably past "last month".
