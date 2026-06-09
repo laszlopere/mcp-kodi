@@ -29,6 +29,9 @@ Makefile.in
 /tests/*.trs
 /tests/test-suite.log
 
+# C unit-test build output (tests/unit/run-unit-tests.sh)
+/tests/unit/build/
+
 # Debian packaging build artifacts (the debian/ source files are tracked)
 /debian/.debhelper/
 /debian/debhelper-build-stamp
