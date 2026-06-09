@@ -8,10 +8,13 @@
 
 #include "mk-tools.h"
 
+#include "mk-history.h"
+
 struct _MkTools
 {
-  MkConfig *config; /* borrowed; must outlive the table */
-  MkKodi   *kodi;   /* borrowed; must outlive the table */
+  MkConfig  *config;  /* borrowed; must outlive the table */
+  MkKodi    *kodi;    /* borrowed; must outlive the table */
+  MkHistory *history; /* owned; the playback-history log (§13) */
 };
 
 G_DEFINE_QUARK (mk-tools-error-quark, mk_tools_error)
@@ -2379,7 +2382,9 @@ make_result (const char *text, gboolean is_error)
  * @config: configuration for instance names/defaults; borrowed, not owned.
  * @kodi: the Kodi client handlers drive; borrowed, not owned.
  *
- * Creates the tool table. Both @config and @kodi must outlive it.
+ * Creates the tool table. Both @config and @kodi must outlive it. The table
+ * also owns a playback-history log (§13) bound to the default path; no handler
+ * writes to it yet (§13.1 is foundation only).
  *
  * @return a newly allocated MkTools; free with mk_tools_free().
  */
@@ -2392,6 +2397,7 @@ mk_tools_new (MkConfig *config, MkKodi *kodi)
   MkTools *self = g_new0 (MkTools, 1);
   self->config = config;
   self->kodi = kodi;
+  self->history = mk_history_new (NULL);
   return self;
 }
 
@@ -2399,14 +2405,15 @@ mk_tools_new (MkConfig *config, MkKodi *kodi)
  * mk_tools_free:
  * @self: the table to free, or NULL.
  *
- * Frees the table. The borrowed config and Kodi client are left untouched.
- * Safe to call with NULL.
+ * Frees the table and the history log it owns. The borrowed config and Kodi
+ * client are left untouched. Safe to call with NULL.
  */
 void
 mk_tools_free (MkTools *self)
 {
   if (self == NULL)
     return;
+  mk_history_free (self->history);
   g_free (self);
 }
 

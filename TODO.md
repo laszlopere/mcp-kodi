@@ -1029,7 +1029,7 @@ Everything below this section is original design for *this* project.
   "what was on in the kids' room last month". Designed here; the read-back tool
   is parked until we have a real file to look at (§13.10).
 
-  [ ] 13.1 **Purpose, and how it differs from state (§8).** The per-instance
+  [x] 13.1 **Purpose, and how it differs from state (§8).** The per-instance
   state file (§8) is *forward-looking intent* — `last_played`, last episode per
   show — to drive "what next", resume and handoff. This history is the opposite:
   a *backward-looking, append-mostly log* of what already played, spanning **all
