@@ -1196,21 +1196,21 @@ Everything below this section is original design for *this* project.
   reads naturally for "recent" (order TBD with the read tool, §13.10). Directory
   `0700` on first write; file `0600` (it records viewing habits — mildly private).
 
-  [ ] 13.7 **Concurrent writers — lock, do not "last-write-wins".** Several
+  [x] 13.7 **Concurrent writers — lock, do not "last-write-wins".** Several
   copies of this server can run at once (one per MCP client/session, §2.1), all
   appending to the one file. **Bare "last write wins via atomic rename" is the
   wrong model for an append log:** two processes each read base *N*, each append
   their own entry, each `rename()` — the second clobbers the first's entry. That
   is the classic lost-update, and an append log must not silently drop entries.
   So **serialize the whole read-modify-write** instead:
-    [ ] 13.7.1 Take an exclusive advisory lock (`flock` `LOCK_EX`) on the history
+    [x] 13.7.1 Take an exclusive advisory lock (`flock` `LOCK_EX`) on the history
     file (or a sidecar `history.json.lock`) for the critical section.
-    [ ] 13.7.2 Under the lock: read the current array → dedup/append the new entry
+    [x] 13.7.2 Under the lock: read the current array → dedup/append the new entry
     (§13.5) → trim (§13.8) → write a temp file in the same dir, `fsync`, then
     `rename()` over the target (atomic replacement — the §7.4/§8.4 discipline).
-    [ ] 13.7.3 Release the lock. MCP calls are human-paced and a record is a few
+    [x] 13.7.3 Release the lock. MCP calls are human-paced and a record is a few
     KB, so the lock is held microseconds and contention is negligible.
-    [ ] 13.7.4 *Alternative considered:* JSONL + `O_APPEND` (kernel-atomic for
+    [x] 13.7.4 *Alternative considered:* JSONL + `O_APPEND` (kernel-atomic for
     small records, no read needed to append) — but the size-trim (§13.8) still
     needs a locked rewrite, so that is two mechanisms where one locked
     read-modify-write does the job. Prefer the single locked path for simplicity
