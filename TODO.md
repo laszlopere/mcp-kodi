@@ -1172,7 +1172,7 @@ Everything below this section is original design for *this* project.
       code path can't drift from itself.
     Decide against a real `history.json` (§13.10) — but the fields themselves are
     committed for v1; this is only *how* to fetch them.
-    [ ] 13.4.4 **Deeper metadata stays parked.** Anything past §13.4.2 — genre,
+    [x] 13.4.4 **Deeper metadata stays parked.** Anything past §13.4.2 — genre,
     year, rating, full cast, album art — is not worth carrying in a play log;
     leave it to a later `*Details` lookup keyed off the stored `id` if ever
     needed. Same wait-for-real-data discipline as point 7 of the brief.
