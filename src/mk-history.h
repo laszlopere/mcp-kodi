@@ -30,6 +30,35 @@
  * feed history, as a side effect that must not change `rpc`'s verbatim return
  * (§13.3.1). That wiring lands with the write path (§13.5–§13.9).
  *
+ * Entry fields settled so far (§13.4 — the rest of the shape, show/episode and
+ * album/artist, is still being pinned down in §13.4.2+):
+ *   - `at`    — the capture timestamp (§13.4.0): server wall-clock at the moment
+ *               the snapshot is taken and the entry written (≈ when playback
+ *               started, §13.2.2), from g_date_time_*. Stored as ISO-8601 **with
+ *               an explicit timezone** — UTC `…Z` is the default; never a bare
+ *               local time, which makes range queries wrong across DST/zone
+ *               changes. It is the sort key, the filter for "last week /
+ *               yesterday / last month" queries (§13.10), and what drives the
+ *               age-based trim (§13.8.2). Records the *start*, not completion or
+ *               duration (§13.2).
+ *   - `kind`  — the player kind (§13.4.1): `audio` or `video`, the snapshot's
+ *               existing `type` from Player.GetActivePlayers. Tells music from
+ *               video but not movie from episode from music video.
+ *   - `media` — the real media type (§13.4.1): `song`/`episode`/`movie`/
+ *               `musicvideo`/`picture`/`channel`/`unknown`. Kodi injects it into
+ *               the Player.GetItem reply as an **identity field** (not a
+ *               requestable property), so it is free; player_state() just
+ *               discards it today. Surfacing it needs a key other than `type`
+ *               (the snapshot already spends `type` on the player kind), hence
+ *               the `kind` + `media` split.
+ *   - `id`    — the library id (§13.4.1): the auto-injected songid/episodeid/
+ *               movieid, also free. A best-effort replay handle for
+ *               Player.Open {<media>id: N}, NOT a durable key — it is
+ *               library-scoped and not stable across a library clean/rescan
+ *               (§13.4.1.1), so treat file/label/showtitle/album as the durable
+ *               identifiers. A `playfile` of a path not in the library can't be
+ *               enriched → `media` is "unknown" and `id` is -1.
+ *
  * This is the §13.1 foundation only: the module, its own storage path
  * (${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/history.json, §13.6), and
  * lifecycle. The write path — record/dedup/lock/trim (§13.5–§13.9) — and the

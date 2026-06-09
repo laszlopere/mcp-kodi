@@ -1109,7 +1109,7 @@ Everything below this section is original design for *this* project.
   finished — so the entry asserts only *"this was played at `at`"*. `label`/`file`
   are the human-identifiable fields (for this library the path itself already
   carries artist/album/show).
-    [ ] 13.4.0 **`at` — the capture timestamp.** Server wall-clock at the moment
+    [x] 13.4.0 **`at` — the capture timestamp.** Server wall-clock at the moment
     the snapshot was taken and the entry written (≈ when playback started, §13.2.2),
     from `g_date_time_*`. It is the backbone of the feature: every "last week /
     yesterday / last month" query (§13.10) filters on it, it is the sort key, and
@@ -1118,7 +1118,7 @@ Everything below this section is original design for *this* project.
     local time: an offset-less stamp makes range queries wrong across DST/zone
     changes. Pick one form (UTC is the safe default; convert to local only when
     presenting). `at` records *start*, not completion or duration (§13.2).
-    [ ] 13.4.1 **Media type and library id are free — record them in v1.** The
+    [x] 13.4.1 **Media type and library id are free — record them in v1.** The
     snapshot's current `type` (from `Player.GetActivePlayers`) is only the
     **player kind** — `audio`/`video` — so it tells music from video but **not**
     movie from TV episode from music video. The precise media type is already in
@@ -1135,7 +1135,7 @@ Everything below this section is original design for *this* project.
     `"unknown"` and `id` is `-1`; and surfacing the media type means using a key
     other than `type` (the snapshot already spends `type` on the player kind), so
     this entry renames them `kind` + `media` to avoid the collision.
-    [ ] 13.4.1.1 **What `id` is good for, and isn't.** The stored `id` is the
+    [x] 13.4.1.1 **What `id` is good for, and isn't.** The stored `id` is the
     library handle for `Player.Open {<media>id: N}` — so a future read tool
     (§13.10) could replay a logged item by `id` instead of re-searching by name.
     But it is a *convenience* handle, not a durable key: it is **library-scoped**
