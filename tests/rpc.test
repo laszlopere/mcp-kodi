@@ -9,7 +9,10 @@
 #   - an opted-in instance: ping/echo come back verbatim, a Kodi error becomes a
 #     tool error, and bad arguments are clean tool errors;
 #   - an instance that has NOT opted in: `rpc` is refused before any Kodi call,
-#     with an error that points at `allow_rpc`.
+#     with an error that points at `allow_rpc`;
+#   - the realistic two-box topology in one config: the local test Kodi opted in
+#     (default), the remote mini02 not — proving the gate is keyed per-instance
+#     by the `instance` argument (mini02 is refused without ever being contacted).
 # It also checks that the gate cannot be flipped through the `instances` tool —
 # the whole point of the hand-edit-only design.
 #
@@ -34,6 +37,13 @@ set -u
 KODI_HOST=${KODI_HOST:-127.0.0.1:8080}
 KODI_AUTH=${KODI_AUTH:-kodi:kodi}
 KODI_SCHEME=${KODI_SCHEME:-http}
+
+# The remote production box (mini02) plays the "rpc disabled" role in the
+# realistic two-instance config (section 5). Overridable, but it need NOT be
+# reachable: the gate refuses rpc *before* any network call, so the disabled-side
+# assertions hold even off the homelab, and mini02's auth is never used.
+KODI_REMOTE_HOST=${KODI_REMOTE_HOST:-mini02.homelab.local:8443}
+KODI_REMOTE_SCHEME=${KODI_REMOTE_SCHEME:-https}
 
 SKIP=77
 
@@ -91,6 +101,25 @@ write_config () { # dir allow_rpc-bool
 }
 ON="$WORK/on";  write_config "$ON"  true
 OFF="$WORK/off"; write_config "$OFF" false
+
+# A single config holding BOTH boxes as the deployment really runs them: the
+# local test Kodi opted into rpc (and default), the remote mini02 not. mini02
+# carries NO allow_rpc key at all — absent means disabled (§7.7), the real
+# production posture — and a dummy auth, since the gate refuses it pre-network.
+BOTH="$WORK/both"
+mkdir -p "$BOTH/mcp-kodi"
+remote_insecure=false
+[ "$KODI_REMOTE_SCHEME" = https ] && remote_insecure=true
+jq -n --arg host "$KODI_HOST" --arg auth "$KODI_AUTH" --arg scheme "$KODI_SCHEME" \
+      --argjson insecure "$insecure" \
+      --arg rhost "$KODI_REMOTE_HOST" --arg rscheme "$KODI_REMOTE_SCHEME" \
+      --argjson rinsecure "$remote_insecure" \
+  '{version:2, default:"local",
+    instances:{
+      local:  {host:$host,  auth:$auth,           scheme:$scheme,  insecure:$insecure,  allow_rpc:true},
+      mini02: {host:$rhost, auth:"unused:unused", scheme:$rscheme, insecure:$rinsecure}
+    }}' \
+  > "$BOTH/mcp-kodi/config.json"
 
 # ---- talking to the server under test (MCP over stdio) --------------------
 
@@ -210,6 +239,41 @@ eq "instances get reports allow_rpc:true" true "$got"
 
 schema=$(mcp_tool_schema "$ON" rpc)
 contains "rpc schema names the permitted instance" \
+         "$(printf '%s' "$schema" | jq -r '.properties.method.description')" "local"
+
+# ===========================================================================
+# 5. Realistic two-instance topology in ONE config: local opted-in (default),
+#    remote mini02 not. Proves the gate is keyed per-instance by the `instance`
+#    argument — local plays, mini02 is refused. mini02 is never contacted: the
+#    gate refuses before any Kodi call, so these hold even off the homelab.
+# ===========================================================================
+echo "-- two-instance: local on (default), mini02 off"
+
+# Default instance is local → opted-in → raw pong from the live test box.
+b=$(mcp_tool_cfg "$BOTH" rpc '{"method":"JSONRPC.Ping"}')
+eq "rpc on the default (local) is not an error"  false    "$(res_err "$b")"
+eq "default rpc returns the raw \"pong\""         '"pong"' "$(res_text "$b")"
+
+# Explicit local → same.
+b=$(mcp_tool_cfg "$BOTH" rpc '{"instance":"local","method":"JSONRPC.Ping"}')
+eq "rpc on explicit local returns raw \"pong\""   '"pong"' "$(res_text "$b")"
+
+# Explicit mini02 → refused by the gate, before any network call, with an error
+# that names both the instance and the flag to set.
+b=$(mcp_tool_cfg "$BOTH" rpc '{"instance":"mini02","method":"JSONRPC.Ping"}')
+eq       "rpc on mini02 is refused"               true "$(res_err "$b")"
+contains "mini02 refusal names allow_rpc"         "$(g "$(res_body "$b")" '.error')" "allow_rpc"
+contains "mini02 refusal names the instance"      "$(g "$(res_body "$b")" '.error')" "mini02"
+
+# instances get reflects the split posture: local on, mini02 (no key) reported off.
+b=$(mcp_tool_cfg "$BOTH" instances '{"action":"get"}')
+pb=$(res_body "$b")
+eq "instances get: local allow_rpc:true"   true  "$(printf '%s' "$pb" | jq -r '.instances[]|select(.key=="local")|.allow_rpc')"
+eq "instances get: mini02 allow_rpc:false" false "$(printf '%s' "$pb" | jq -r '.instances[]|select(.key=="mini02")|.allow_rpc')"
+
+# The rpc schema advertises the permitted instance (local), guiding the model.
+schema=$(mcp_tool_schema "$BOTH" rpc)
+contains "rpc schema names local as permitted" \
          "$(printf '%s' "$schema" | jq -r '.properties.method.description')" "local"
 
 # ---- tally ----------------------------------------------------------------
