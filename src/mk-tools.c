@@ -528,7 +528,22 @@ player_state (MkTools *self, const char *instance, GError **error)
   copy_member (b, props, "time");
   copy_member (b, props, "totaltime");
   json_builder_end_object (b);
-  return json_builder_get_root (b);
+  JsonNode *root = json_builder_get_root (b);
+
+  /* §13.3/§13.9.1: feed the playback-history log from this very snapshot — the
+   * single point every playback-affecting tool funnels through, so it is the
+   * one place history needs to hook. Best-effort and dedup'd (§13.5/§13.9.2):
+   * status/noop re-observing the same item add nothing, and a logging failure
+   * never fails this call. The stored `instance` is the resolved config key
+   * (never NULL) with the box's display label as `name`. */
+  if (self->history != NULL)
+    {
+      const char *key = instance ? instance : mk_config_get_default (self->config);
+      MkInstance *inst = mk_config_get_instance (self->config, key);
+      mk_history_record (self->history, key, inst ? inst->name : NULL, root);
+    }
+
+  return root;
 }
 
 /**
@@ -2053,7 +2068,29 @@ handler_rpc (MkTools *self, const MkToolDef *def, JsonObject *args,
         }
     }
 
-  return mk_kodi_call (self->kodi, instance, method, params, error);
+  g_autoptr (JsonNode) result =
+    mk_kodi_call (self->kodi, instance, method, params, error);
+  if (result == NULL)
+    return NULL;
+
+  /* §13.3.1: rpc returns Kodi's raw result and takes no snapshot of its own, so
+   * a hand-rolled Player.Open would slip past history. After a *successful*
+   * call, take one player_state() snapshot purely to feed the log — it records
+   * as a side effect (§13.9.1). This must NOT change rpc's verbatim return
+   * (§11.6.6), so the snapshot and any error are discarded. A non-playback rpc
+   * just yields a stopped or duplicate snapshot that records nothing (§13.5),
+   * costing only the cheap Player.GetActivePlayers probe. A brief settle delay
+   * (as the Buttons use) lets a hand-rolled Player.Open register an active
+   * player before we snapshot, so the capture isn't lost to the start-up race. */
+  if (self->history != NULL)
+    {
+      g_usleep (MK_BUTTON_SETTLE_US);
+      g_autoptr (GError) ignored = NULL;
+      g_autoptr (JsonNode) snap = player_state (self, instance, &ignored);
+      (void) snap;
+    }
+
+  return g_steal_pointer (&result);
 }
 
 /* ---- The tool table -------------------------------------------------------

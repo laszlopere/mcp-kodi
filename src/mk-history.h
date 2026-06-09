@@ -80,6 +80,7 @@
 #define MK_HISTORY_H
 
 #include <glib.h>
+#include <json-glib/json-glib.h>
 
 G_BEGIN_DECLS
 
@@ -110,6 +111,26 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (MkHistory, mk_history_free)
 
 /* The log file this instance writes to (the resolved PATH); owned by @self. */
 const char *mk_history_path (MkHistory *self);
+
+/* Record what is playing in @snapshot to the log (§13.9.1). @snapshot is the
+ * canonical player_state() now-playing object (§5.4/§13.3); @instance is its
+ * config key and @name the human display label (@name may be NULL). Runs the
+ * full locked read-modify-write: it appends nothing unless something is loaded
+ * and it is a *new* item for @instance (§13.5), else it composes one entry
+ * (§13.4), prepends it newest-first, trims by count and age (§13.8) and
+ * atomically rewrites the file under an exclusive lock (§13.7).
+ *
+ * Best-effort (§13.9.2): a logging failure must never fail the originating tool
+ * call, so this reports no GError — it warns to stderr and returns. The boolean
+ * says only whether an entry was appended (FALSE = nothing loaded, a duplicate
+ * of the instance's last entry, or a swallowed write error); callers ignore it,
+ * but it lets tests assert the dedup/skip behaviour.
+ *
+ * @return TRUE if a new entry was written; FALSE if skipped or on error. */
+gboolean mk_history_record (MkHistory  *self,
+                            const char *instance,
+                            const char *name,
+                            JsonNode   *snapshot);
 
 G_END_DECLS
 

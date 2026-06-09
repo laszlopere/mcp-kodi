@@ -1229,14 +1229,20 @@ Everything below this section is original design for *this* project.
 
   [ ] 13.9 **Source layout.** New module `mk-history.{c,h}` (added to the §6.1
   tree alongside `mk-state`):
-    [ ] 13.9.1 `mk_history_record(self, instance, snapshot)` — the write path:
-    lock → read → dedup/append → trim → atomic write (§13.5–13.8). The tool layer
-    calls it from the single point where a playback-affecting handler holds its
-    snapshot; `rpc` calls it with the extra snapshot from §13.3.1.
-    [ ] 13.9.2 **Best-effort — history never fails the call.** A history write
+    [x] 13.9.1 `mk_history_record(self, instance, name, snapshot)` — the write
+    path: lock → read → dedup/append → trim → atomic write (§13.5–13.8). Wired
+    from the single point every playback-affecting handler funnels through —
+    `player_state()` itself — so transport/play/status/noop all feed it for free
+    (dedup, §13.5, absorbs the re-observations); `rpc` issues its own post-call
+    `player_state()` snapshot (§13.3.1), after a brief settle delay so a
+    hand-rolled `Player.Open` has registered before the snapshot. The `instance`
+    key carries the box's display label as `name` (added to the signature).
+    [x] 13.9.2 **Best-effort — history never fails the call.** A history write
     failure (lock, disk, parse) must **not** fail the underlying tool call: log
     to stderr (§3.1) and carry on. The user's `play` succeeded even if logging it
-    didn't.
+    didn't. Realized in `mk_history_record`: every failure path `g_warning`s and
+    returns FALSE, it reports no GError, and a parse/shape error on the existing
+    file aborts **without** clobbering it.
     [ ] 13.9.3 `mk_history_read(...)` — the read path for the future tool
     (§13.10); signature TBD.
 
