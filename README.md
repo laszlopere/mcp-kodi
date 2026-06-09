@@ -8,12 +8,21 @@ There is **no user-facing CLI**: you talk to the AI, the AI calls this server's
 tools, and the server speaks JSON-RPC to Kodi. The only interface is MCP over
 stdio.
 
-> **Status — early but already useful (v0.1.0).** The set of dedicated,
+**Where this is going.** The plan is a complete, full-featured package that lets
+any MCP-compatible AI transform the entire media-player experience — not just
+press buttons, but reinvent how you discover, queue, and enjoy your media. Tell
+the assistant what you're in the mood for and let it run the room: build the
+evening's lineup, pick up where you left off last night, adapt on the fly, and
+surface things you'd never have found yourself. We're aiming for something
+genuinely new — a mind-blowingly different way to live with your media player.
+
+> **Status — early, but already remarkable (v0.1.0).** The set of dedicated,
 > purpose-built tools is deliberately small. What makes the current build
 > capable well beyond that list is the **`rpc` escape hatch** (see below): an
 > opt-in passthrough to *any* Kodi JSON-RPC method. Between the handful of
 > first-class tools and that escape hatch, an assistant can already drive nearly
-> everything Kodi exposes.
+> everything Kodi exposes — remarkable enough that we decided to publish early
+> rather than wait for the full vision to land. Expect frequent releases.
 
 ---
 
@@ -63,41 +72,49 @@ See the full Kodi method surface in
 
 ---
 
-## Requirements
-
-Build-time (all via `pkg-config`):
-
-- A C compiler and the autotools (`autoconf`, `automake`, `libtool`, `pkg-config`)
-- `glib-2.0` ≥ 2.80, `gobject-2.0`, `gio-2.0`, `gio-unix-2.0`
-- `json-glib-1.0` ≥ 1.6
-- `libsoup-3.0` ≥ 3.0
-
-On Debian/Ubuntu:
-
-```sh
-sudo apt install build-essential autoconf automake libtool pkg-config \
-  libglib2.0-dev libjson-glib-dev libsoup-3.0-dev
-```
-
-Run-time: a reachable Kodi box with its JSON-RPC web server enabled — see
-[Kodi server setup](#kodi-server-setup).
-
----
-
-## Build
-
-```sh
-./autogen.sh        # first checkout only — generates ./configure
-./configure
-make
-```
-
-The binary lands at `src/mcp-kodi`. `make install` is supported but not required;
-you can register the in-tree binary directly with your MCP client.
-
----
-
 ## Configuration
+
+### Set up Kodi for remote control
+
+Before mcp-kodi can reach a box, that Kodi has to allow remote control. In Kodi,
+open **Settings → Services → Control** and turn on **Allow remote control via
+HTTP**, then set a **username and password** right there. Those same credentials
+go into this server's config as `auth`, in `user:pass` form.
+
+mcp-kodi speaks **HTTPS**, so for normal use you put a small reverse proxy in
+front of Kodi's plain-HTTP control port. [Caddy](https://caddyserver.com) with
+`tls internal` is the easy choice: it terminates HTTPS and forwards to Kodi on
+`localhost`. Point the instance's `host` at the proxy and set `insecure: true`
+to accept its self-signed certificate. The full step-by-step walkthrough — the
+exact Kodi menus, installing Caddy, and the Caddyfile — is in
+[docs/kodi-server-setup.md](docs/kodi-server-setup.md).
+
+Most Kodi players already sit on a home LAN behind a router/firewall and are not
+exposed to the internet, so turning on the HTTP control interface there is
+generally safe. The login/password and the HTTPS proxy add defence in depth —
+just keep the proxy on a trusted network and don't forward its port to the open
+internet.
+
+### Registering a Kodi instance
+
+There are two ways to add a box. The simplest is to **let the AI do it**: once
+the MCP server is loaded, just tell the assistant about your Kodi — its address
+and login — and it registers the instance for you through the `instances` tool
+(`set`), writing the entry into the config file.
+
+You can also **do it by hand**, by editing `config.json` directly. Two things
+are deliberately *off-limits* to the AI, so hand-editing is the only way to set
+them:
+
+- **The password.** `auth` is write-only — the `instances` tool never returns a
+  stored password, so the assistant can register a box but can never read back
+  the credentials. If you'd rather the AI never see the password at all, type it
+  into the file yourself.
+- **The escape hatch.** `allow_rpc` is **not** a field the `instances` tool can
+  write, so the assistant can never grant itself the unrestricted `rpc`
+  passthrough. Enabling it is always an explicit, out-of-band human edit.
+
+### The config file
 
 The server reads `${XDG_CONFIG_HOME:-~/.config}/mcp-kodi/config.json`. It holds a
 map of named Kodi instances and names one `default`:
@@ -137,20 +154,6 @@ instance named `default` and rewritten in the `version: 2` shape on the next sav
 
 > **Note:** config is read **once at startup**. After hand-editing `config.json`
 > (e.g. to set `allow_rpc`), restart the server so it re-reads the file.
-
----
-
-## Kodi server setup
-
-Kodi must have its JSON-RPC web server turned on, and — for normal remote use —
-an HTTPS reverse proxy in front of it (mcp-kodi speaks HTTPS). A step-by-step
-guide, written for non-server-admins, is in
-[docs/kodi-server-setup.md](docs/kodi-server-setup.md).
-
-The short version: enable **Settings → Services → Control → Allow remote
-control via HTTP**, then put [Caddy](https://caddyserver.com) (with `tls
-internal`) in front of Kodi's port 8080 and point `host` at the proxy with
-`insecure: true`.
 
 ---
 
@@ -198,14 +201,6 @@ living room?"* (`noop`), *"find Pink Floyd's Animals and play it"* (`search` →
 
 ---
 
-## Design & internals
-
-The full design spec — protocol handling, tool semantics, config format, and the
-live-Kodi captures behind each tool — lives in [TODO.md](TODO.md). Tool surface
-and Kodi method references: [docs/](docs/).
-
----
-
 ## License
 
 Copyright © 2026 Laszlo Pere &lt;laszlopere@gmail.com&gt;. An independent,
@@ -217,7 +212,13 @@ redistribute and/or modify it under those terms; it comes with no warranty. See
 
 ---
 
-## Sponsor
+## Support this project
 
-If this project is useful to you, you can support its development through
-[GitHub Sponsors](https://github.com/sponsors/laszlopere). Thank you!
+If this project is useful to you, please consider supporting it through
+[GitHub Sponsors](https://github.com/sponsors/laszlopere). Every bit of support
+keeps it alive — funding the time to ship the frequent releases this is built
+on, and to chase the full vision.
+
+And if you're still on the fence: ask your Claude whether this project is good
+for you — and if it recommends it (as most Claude do), support it by becoming a
+sponsor.
