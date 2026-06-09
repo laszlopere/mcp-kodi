@@ -130,7 +130,7 @@ Everything below this section is original design for *this* project.
   | `play`      | `instance?`, `type` (song/album/artist/movie/episode/musicvideo), `id` | `Player.Open` with the matching `item` key |
   | `seek`      | `instance?`, `time` (h/m/s) **or** `percentage` | `Player.Seek` on the active player |
   | `handoff`   | `from`, `to`                           | capture active item + position on `from` → `Player.Stop` on `from` → `Player.Open` on `to` → `Player.Seek` to that position |
-  | `search`    | `type` (tvshow/movie/album/artist/song), `query` | `VideoLibrary.*` / `AudioLibrary.*` Get + filter |
+  | `search`    | `type` (music/tv-show/movie), `artist?`, `title?`, `season?`, `number?` | resolves the per-type chain to **leaf files** — see §5.10 |
   | `random`    | `instance?`, `type` (episode/movie/song), `query?`  | resolve filter → pick → `Player.Open` |
   | `episodes`  | `show`, `filter?` (SxxExx or text)     | `VideoLibrary.GetEpisodes` |
   | `status`    | `instance?` (`"*"` = all)              | `Player.GetActivePlayers` + `Player.GetItem` + `Player.GetProperties`; per instance |
@@ -149,7 +149,7 @@ Everything below this section is original design for *this* project.
   | `text`      | `instance?`, `text`, `done?`           | `Input.SendText` — type into the focused field |
   | `screen`    | `instance?`, `window?` (home/visualisation/…), `fullscreen?` | `GUI.ActivateWindow` / `GUI.SetFullscreen` |
   | `power`     | `instance?`, `action` (shutdown/reboot/suspend/hibernate/quit/ejectoptical) | `System.*` / `Application.Quit` |
-  | `playfile`  | `instance?`, `path`                    | `Player.Open` with a `file` item — play a path not in the library |
+  | `playfile`  | `instance?`, `file`                    | `Player.Open` with a `{file}` item (§12.10.9) — plays the `file` from a `search` result; works for any path, in-library or not |
   | `files`     | `instance?`, `path?` (a source/dir; omitted → sources) | `Files.GetSources` / `Files.GetDirectory` |
   | `rpc`       | `instance?`, `method`, `params?` (object) | passthrough — any JSON-RPC method |
 
@@ -186,6 +186,65 @@ Everything below this section is original design for *this* project.
   [ ] 5.9 **Library-browse tools** (`recent`, `continue`, `genres`) return id +
   title rows the same shape `search`/`episodes` use, so the AI can chain a browse
   result straight into `play`/`queue` by id (§5.3).
+  [ ] 5.10 **Generic `search` → `playfile` (find then play).** One `search` tool
+  spans all three media types and drills its per-type hierarchy down to playable
+  **leaf files**; `playfile` then plays a `file` from the result. Verified against
+  a live Kodi 20.5 — the captures backing each step are in §12 (linked below).
+
+  Fields (all optional except `type`; an LLM fills only what the user named):
+
+  | Field    | music                       | tv-show                  | movie                |
+  |----------|-----------------------------|--------------------------|----------------------|
+  | `type`   | `"music"`                   | `"tv-show"`              | `"movie"`            |
+  | `artist` | performer (filters artist)  | —                        | —                    |
+  | `title`  | album name                  | show name                | movie title          |
+  | `season` | —                           | season number            | —                    |
+  | `number` | track number                | episode number           | —                    |
+
+  `title` is the one renamed field (was "group"): it holds the named container
+  for music/tv (album/show) and the title itself for a movie — the thing you
+  search by. `number` is the position within a group (track or episode). All
+  text matching is substring + case-insensitive (`filter {field, operator:
+  "contains", value}`), so `"abba"` also hits "Black Sa**bba**th" — narrow with
+  more fields.
+
+  Resolution chains (each step = a §12 method already captured):
+  - **music** — `GetArtists`(`artist`) → `artistid` → `GetAlbums {artistid}`
+    (+`title`) → `albumid` → `GetSongs {albumid}` (+`number`→track) → song
+    `file`s. (§12.3.6 documents the whole 3-call chain; §12.3.4 / §12.3.17.)
+  - **tv-show** — `GetTVShows`(`title`) → `tvshowid` → `GetEpisodes {tvshowid,
+    season}` (+`number`→episode filter) → episode `file`s. (§12.16.21 incl. the
+    episode follow-up; §12.16.6.)
+  - **movie** — `GetMovies`(`title`) → movie `file`s directly (no sublevels).
+    (§12.16.12.)
+
+  **Leaf-files semantics** (the chosen behaviour): `search` always returns the
+  leaf rows it can reach with the fields given — never a bare container. Omitting
+  lower fields *widens* to all leaves beneath:
+  - `{music, artist:"Abba"}` → every Abba song (all albums).
+  - `{music, artist:"Abba", title:"Arrival"}` → every track of Arrival.
+  - `{music, artist:"Abba", title:"Arrival", number:3}` → just track 3.
+  - `{tv-show, title:"Earth 2"}` → every episode; `+season:1` → that season;
+    `+number:2` → exactly S01E02.
+  - `{movie, title:"Alien"}` → the matching movie file(s).
+  Each result row carries at least `file` (the `playfile` input) plus its library
+  id (`songid`/`episodeid`/`movieid`) and a human `label`/`title`. Cap the result
+  set (e.g. 50) and report when truncated — a bare `artist` can fan out to
+  hundreds of files (real data: one artist returned 65 albums, §12.3.6).
+
+  `playfile { file }` feeds that `file` to `Player.Open {item:{file}}` (§12.10.9):
+  plays any path (no library entry needed), auto-selects the audio vs video
+  player from the file type, and — when the file matches a scanned item — Kodi
+  enriches the now-playing state back to the library id. Plays **one** file; for
+  multi-leaf results the caller picks which (a future "queue all" path → §queue).
+  Returns the post-open `player_state()` snapshot, like the transport Buttons.
+
+  Notes / gotchas surfaced while exploring (all in §12): the episode-number
+  filter `value` is a **string**; `playerid` for follow-up control is not fixed
+  (audio=0, video=1) — read it from `GetActivePlayers`; scraped `title`/`label`
+  can differ from the on-disk filename; duplicate albums and malformed/empty tags
+  exist in real libraries, so dedupe/guard. This generic `search` subsumes the
+  separate `episodes` row (§5.2) — fold or keep as a thin alias (decide later).
 
 ---
 
@@ -388,6 +447,19 @@ Everything below this section is original design for *this* project.
         `default` (caller must `set` a different `default` first), so the config
         is never left defaultless/empty. (Needs a new `mk_config_remove_instance`
         in the config API.)
+    [ ] 11.6.4 Search tools — resolve the library by name down to playable leaf
+    files; no Kodi state change. Generic find-by-name tools (more to come).
+    Full design in §5.10.
+      [ ] 11.6.4.1 search — `{type:music|tv-show|movie, artist?, title?, season?,`
+        `number?}`. Drills the per-type chain to leaf-file rows (`{file, <id>,
+        label}`): music GetArtists→GetAlbums→GetSongs (§12.3.6); tv-show
+        GetTVShows→GetEpisodes (§12.16.21/§12.16.6); movie GetMovies (§12.16.12).
+        Omitting lower fields widens to all leaves beneath; cap the set and report
+        truncation. `title` = album/show/movie name; `number` = track/episode.
+    [ ] 11.6.5 playfile — `{file}`. `Player.Open {"item":{"file":…}}` (§12.10.9):
+    plays any path (in-library or not), auto-selects the audio/video player,
+    library-enriches the now-playing item; returns the player_state() snapshot.
+    Plays one file (caller picks from a multi-leaf `search` result).
   [ ] 11.7 Resources/prompts
   [ ] 11.8 Playback state file, per-instance (`mk-state`)
   [ ] 11.9 Build clean, test against live Kodi, write README
@@ -414,9 +486,110 @@ Everything below this section is original design for *this* project.
     [ ] 12.3.1 clean — Cleans the audio library from non-existent items (`AudioLibrary.Clean`)
     [ ] 12.3.2 export — Exports all items from the audio library (`AudioLibrary.Export`)
     [ ] 12.3.3 albumDetails — Retrieve details about a specific album (`AudioLibrary.GetAlbumDetails`)
-    [ ] 12.3.4 albums — Retrieve all albums from specified artist (and role) or that has songs of the specified genre (`AudioLibrary.GetAlbums`)
+    [x] 12.3.4 albums — Retrieve all albums from specified artist (and role) or that has songs of the specified genre (`AudioLibrary.GetAlbums`) — see chain in 12.3.6 (step 2): `{"artistid": N}` or `{"genreid": N}` filter.
     [ ] 12.3.5 artistDetails — Retrieve details about a specific artist (`AudioLibrary.GetArtistDetails`)
-    [ ] 12.3.6 artists — Retrieve all artists. For backward compatibility by default this implicitly does not include those that only contribute other roles, however absolutely all artists can be returned using allroles=true (`AudioLibrary.GetArtists`)
+    [x] 12.3.6 artists — Retrieve all artists. For backward compatibility by default this implicitly does not include those that only contribute other roles, however absolutely all artists can be returned using allroles=true (`AudioLibrary.GetArtists`)
+        Music is a 3-level hierarchy and needs up to three calls to reach a
+        playable file: artist → album → song. Same `filter`/`sort`/`limits`/
+        `properties` shape as the video Get* methods. The chain below drills from
+        an artist name down to the song `file`.
+
+        Step 1 — find the artist (`AudioLibrary.GetArtists`):
+        ```json
+        {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "method": "AudioLibrary.GetArtists",
+          "params": {
+            "filter": { "field": "artist", "operator": "contains", "value": "abba" },
+            "properties": ["genre"],
+            "sort": { "method": "artist", "order": "ascending" }
+          }
+        }
+        ```
+        ```json
+        {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "limits": { "start": 0, "end": 2, "total": 2 },
+            "artists": [
+              { "artistid": 3,  "artist": "Abba",          "label": "Abba",          "genre": [] },
+              { "artistid": 31, "artist": "Black Sabbath", "label": "Black Sabbath", "genre": [] }
+            ]
+          }
+        }
+        ```
+        Note: `contains` is a substring match — `"abba"` also matched
+        "Black Sa**bba**th". `artistid` carries into step 2.
+
+        Step 2 — albums of that artist (`AudioLibrary.GetAlbums`, see 12.3.4).
+        Use the special `{"artistid": N}` filter (not a field/operator rule):
+        ```json
+        {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "method": "AudioLibrary.GetAlbums",
+          "params": {
+            "filter": { "artistid": 3 },
+            "properties": ["title", "year", "artist"],
+            "sort": { "method": "year", "order": "ascending" },
+            "limits": { "start": 0, "end": 5 }
+          }
+        }
+        ```
+        ```json
+        {
+          "id": 2,
+          "jsonrpc": "2.0",
+          "result": {
+            "limits": { "start": 0, "end": 5, "total": 65 },
+            "albums": [
+              { "albumid": 4, "title": "Arrival", "label": "Arrival", "year": 0, "artist": ["Arrival (Digitally Remastered)"] },
+              { "albumid": 9, "title": "Arrival", "label": "Arrival", "year": 0, "artist": ["Abba"] },
+              { "albumid": 8, "title": "Ring Ring", "label": "Ring Ring", "year": 0, "artist": ["Abba"] }
+            ]
+          }
+        }
+        ```
+        Data caveats (real library): `total` 65 because three overlapping ABBA
+        discography folders created duplicate albums (e.g. "Arrival" = albumid 4
+        and 9); `year` is 0 when tags lack it; one album's `artist` is a malformed
+        tag ("Arrival (Digitally Remastered)"). `albumid` carries into step 3.
+
+        Step 3 — songs of that album = the file level (`AudioLibrary.GetSongs`,
+        see 12.3.17). Special `{"albumid": N}` filter; request `file`:
+        ```json
+        {
+          "jsonrpc": "2.0",
+          "id": 3,
+          "method": "AudioLibrary.GetSongs",
+          "params": {
+            "filter": { "albumid": 8 },
+            "properties": ["title", "track", "duration", "artist", "album", "file"],
+            "sort": { "method": "track", "order": "ascending" },
+            "limits": { "start": 0, "end": 3 }
+          }
+        }
+        ```
+        ```json
+        {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "result": {
+            "limits": { "start": 0, "end": 3, "total": 31 },
+            "songs": [
+              { "songid": 86, "track": 1, "title": "Ring Ring",                   "duration": 184, "artist": ["Abba"], "album": "Ring Ring", "file": "/home/pipas/net/storage03/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/01 Ring Ring.mp3" },
+              { "songid": 87, "track": 2, "title": "Another Town, Another Train", "duration": 192, "artist": ["Abba"], "album": "Ring Ring", "file": "/home/pipas/net/storage03/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/02 Another Town, Another Train.mp3" },
+              { "songid": 88, "track": 3, "title": "Disillusion",                 "duration": 185, "artist": ["Abba"], "album": "Ring Ring", "file": "/home/pipas/net/storage03/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/03 Disillusion.mp3" }
+            ]
+          }
+        }
+        ```
+        `songid` is the `Player.Open {songid}` handle; `file` is the playable path;
+        `duration` is seconds. Shortcuts: skip levels with `GetSongs`
+        `{"artistid": N}` (all songs by an artist) or `{"genreid": N}`; albums also
+        accept `{"genreid": N}`. `title` field filter works at every level too.
     [ ] 12.3.7 availableArt — Retrieve all potential art URLs for a media item by art type (`AudioLibrary.GetAvailableArt`)
     [ ] 12.3.8 availableArtTypes — Retrieve a list of potential art types for a media item (`AudioLibrary.GetAvailableArtTypes`)
     [ ] 12.3.9 genres — Retrieve all genres (`AudioLibrary.GetGenres`)
@@ -427,7 +600,7 @@ Everything below this section is original design for *this* project.
     [ ] 12.3.14 recentlyPlayedSongs — Retrieve recently played songs (`AudioLibrary.GetRecentlyPlayedSongs`)
     [ ] 12.3.15 roles — Retrieve all contributor roles (`AudioLibrary.GetRoles`)
     [ ] 12.3.16 songDetails — Retrieve details about a specific song (`AudioLibrary.GetSongDetails`)
-    [ ] 12.3.17 songs — Retrieve all songs from specified album, artist or genre (`AudioLibrary.GetSongs`)
+    [x] 12.3.17 songs — Retrieve all songs from specified album, artist or genre (`AudioLibrary.GetSongs`) — see chain in 12.3.6 (step 3): `{"albumid": N}`/`{"artistid": N}`/`{"genreid": N}` filter; `file` = playable path, `songid` = Player.Open handle.
     [ ] 12.3.18 sources — Get all music sources, including unique ID (`AudioLibrary.GetSources`)
     [ ] 12.3.19 scan — Scans the audio sources for new library items (`AudioLibrary.Scan`)
     [ ] 12.3.20 setAlbumDetails — Update the given album with the given details (`AudioLibrary.SetAlbumDetails`)
@@ -506,7 +679,48 @@ Everything below this section is original design for *this* project.
     [ ] 12.10.6 viewMode — Get view mode of video player (`Player.GetViewMode`)
     [ ] 12.10.7 goTo — Go to previous/next/specific item in the playlist (`Player.GoTo`)
     [ ] 12.10.8 move — If picture is zoomed move viewport left/right/up/down otherwise skip previous/next (`Player.Move`)
-    [ ] 12.10.9 open — Start playback of either the playlist with the given ID, a slideshow with the pictures from the given directory or a single file or an item from the database. (`Player.Open`)
+    [x] 12.10.9 open — Start playback of either the playlist with the given ID, a slideshow with the pictures from the given directory or a single file or an item from the database. (`Player.Open`)
+        The play-a-file call. `item` is a union; the file form `{"file": <path>}`
+        plays an arbitrary path with no library entry required — this is the
+        find→play target for the `file` paths surfaced by 12.16.21 / 12.16.12 /
+        12.3.6. (Other `item` forms: `{"episodeid"|"movieid"|"songid"|"albumid"|
+        "artistid": N}` for library items, `{"playlistid": N}`, `{"directory": …}`.)
+        Picks the right player (audio/video) from the file type automatically.
+        Request:
+        ```json
+        {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "method": "Player.Open",
+          "params": {
+            "item": {
+              "file": "/home/pipas/net/storage03/Music/ABBA - Discography 1973-2006 Mp3 320 kbps/2005 The Complete Studio Recordings/1973 Ring Ring @320/01 Ring Ring.mp3"
+            }
+          }
+        }
+        ```
+        Reply (just an ack — playback state is fetched separately):
+        ```json
+        { "id": 1, "jsonrpc": "2.0", "result": "OK" }
+        ```
+        Verify with `Player.GetActivePlayers` (→ `playerid` 0, `type` "audio")
+        then `Player.GetItem` (→ the now-playing item). Notable: when the file
+        matches a scanned library item, Kodi enriches it automatically — opening
+        the path above came back as `{"id": 86, "type": "song", "title": "Ring
+        Ring", "album": "Ring Ring", "artist": ["Abba"]}` (`id` 86 = the `songid`
+        from 12.3.6 step 3), so a file-based open still yields library metadata.
+        Video file — identical call with a video path (Earth 2 S01E02 from the
+        12.16.21 follow-up). The reply is again `"OK"`, but the player differs:
+        `GetActivePlayers` → `playerid` **1**, `type` "video" (audio was `playerid`
+        **0**) — so the file extension selects the player. `GetItem` enriched it to
+        the library episode: `{"id": 4838, "type": "episode", "title": "First
+        Contact (2)", "showtitle": "Earth 2", "season": 1, "episode": 2}`
+        (`id` 4838 = the `episodeid` from 12.16.21). Lesson for the generic tool:
+        the `playerid` for follow-up control (pause/seek/stop) isn't fixed — read
+        it back from `GetActivePlayers` after opening.
+        Notes: `result` is just `"OK"`, not the item — confirm via GetItem/noop.
+        Opening replaces current playback (it interrupted a paused video here).
+        `options` (2nd param) can set `resume`, `playername`, etc.
     [ ] 12.10.10 playPause — Pauses or unpause playback and returns the new state (`Player.PlayPause`)
     [ ] 12.10.11 rotate — Rotates current picture (`Player.Rotate`)
     [ ] 12.10.12 seek — Seek through the playing item (`Player.Seek`)
@@ -568,7 +782,56 @@ Everything below this section is original design for *this* project.
     [ ] 12.16.9 movieDetails — Retrieve details about a specific movie (`VideoLibrary.GetMovieDetails`)
     [ ] 12.16.10 movieSetDetails — Retrieve details about a specific movie set (`VideoLibrary.GetMovieSetDetails`)
     [ ] 12.16.11 movieSets — Retrieve all movie sets (`VideoLibrary.GetMovieSets`)
-    [ ] 12.16.12 movies — Retrieve all movies (`VideoLibrary.GetMovies`)
+    [x] 12.16.12 movies — Retrieve all movies (`VideoLibrary.GetMovies`)
+        Same find pattern as 12.16.21 (GetTVShows): `filter` with
+        `{field:"title", operator:"contains", value:…}` (case-insensitive), plus
+        `sort`, `limits`, `properties`. Unlike a show, a movie has a direct
+        playable `file` — handy for "find then play".
+        Request:
+        ```json
+        {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "method": "VideoLibrary.GetMovies",
+          "params": {
+            "filter": {
+              "field": "title",
+              "operator": "contains",
+              "value": "alien"
+            },
+            "properties": ["title", "year", "genre", "rating", "playcount", "runtime", "file"],
+            "sort": { "method": "year", "order": "ascending" }
+          }
+        }
+        ```
+        Reply (Kodi 20.5; library still mid-scan, so only one match so far —
+        the query returns all matches once scraped). Movie shape differs from a
+        show: `movieid` handle, `file` is the playable path, `genre` is an array,
+        `rating` a float, `runtime` in seconds, `playcount` (no episode counts):
+        ```json
+        {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "limits": { "start": 0, "end": 1, "total": 1 },
+            "movies": [
+              {
+                "movieid": 1,
+                "title": "Alien",
+                "label": "Alien",
+                "year": 1979,
+                "genre": ["Horror", "Science Fiction"],
+                "rating": 8.170000076293945,
+                "runtime": 7020,
+                "playcount": 0,
+                "file": "/home/pipas/net/storage03/Movies/Alien/Alien.1979.Directors.Cut.720p.BluRay.x264.AAC-ETRG.mp4"
+              }
+            ]
+          }
+        }
+        ```
+        Notes: no filter → all movies. Empty `movies:[]`/`total:0` when nothing
+        matches (or not yet scraped). Field name is `title` (not `name`).
     [ ] 12.16.13 musicVideoDetails — Retrieve details about a specific music video (`VideoLibrary.GetMusicVideoDetails`)
     [ ] 12.16.14 musicVideos — Retrieve all music videos (`VideoLibrary.GetMusicVideos`)
     [ ] 12.16.15 recentlyAddedEpisodes — Retrieve all recently added tv episodes (`VideoLibrary.GetRecentlyAddedEpisodes`)
@@ -577,7 +840,92 @@ Everything below this section is original design for *this* project.
     [ ] 12.16.18 seasonDetails — Retrieve details about a specific tv show season (`VideoLibrary.GetSeasonDetails`)
     [ ] 12.16.19 seasons — Retrieve all tv seasons (`VideoLibrary.GetSeasons`)
     [ ] 12.16.20 tVShowDetails — Retrieve details about a specific tv show (`VideoLibrary.GetTVShowDetails`)
-    [ ] 12.16.21 tVShows — Retrieve all tv shows (`VideoLibrary.GetTVShows`)
+    [x] 12.16.21 tVShows — Retrieve all tv shows (`VideoLibrary.GetTVShows`)
+        Find shows by name: `filter` with `{field:"title", operator:"contains", value:…}`
+        (case-insensitive). Also supports `sort`, `limits`, and `properties`.
+        Request:
+        ```json
+        {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "method": "VideoLibrary.GetTVShows",
+          "params": {
+            "filter": {
+              "field": "title",
+              "operator": "contains",
+              "value": "earth"
+            },
+            "properties": ["title", "year", "episode", "watchedepisodes"],
+            "sort": { "method": "title", "order": "ascending" }
+          }
+        }
+        ```
+        Reply (Kodi 20.5; `tvshowid` is the handle for follow-up calls; `episode`/
+        `watchedepisodes` give progress; `label`==`title`):
+        ```json
+        {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "limits": { "start": 0, "end": 4, "total": 4 },
+            "tvshows": [
+              { "tvshowid": 94, "title": "Earth 2",                "label": "Earth 2",                "year": 1994, "episode": 21, "watchedepisodes": 0 },
+              { "tvshowid": 54, "title": "Earth: Final Conflict",   "label": "Earth: Final Conflict",   "year": 1997, "episode": 6,  "watchedepisodes": 0 },
+              { "tvshowid": 46, "title": "Elliott from Earth",      "label": "Elliott from Earth",      "year": 2021, "episode": 16, "watchedepisodes": 0 },
+              { "tvshowid": 35, "title": "Search for Second Earth", "label": "Search for Second Earth", "year": 2018, "episode": 4,  "watchedepisodes": 0 }
+            ]
+          }
+        }
+        ```
+        Notes: no filter → all shows. Empty `tvshows:[]` with `total:0` when nothing
+        matches (or not yet scraped). Field name is `title` (not `name`).
+
+        Follow-up — request one specific episode of a found show. Take the
+        `tvshowid` from the reply above (Earth 2 = 94) and call
+        `VideoLibrary.GetEpisodes` (see 12.16.6) with `season` + an episode-number
+        `filter` to pin a single S/E. The `file` it returns is the playable path,
+        and `episodeid` is the handle for `Player.Open {episodeid}` /
+        `GetEpisodeDetails`.
+        Request (Earth 2, S01E02 — note `episode` filter value is a string):
+        ```json
+        {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "method": "VideoLibrary.GetEpisodes",
+          "params": {
+            "tvshowid": 94,
+            "season": 1,
+            "filter": { "field": "episode", "operator": "is", "value": "2" },
+            "properties": ["title", "season", "episode", "file", "firstaired", "runtime"]
+          }
+        }
+        ```
+        Reply (exactly one episode):
+        ```json
+        {
+          "id": 2,
+          "jsonrpc": "2.0",
+          "result": {
+            "limits": { "start": 0, "end": 1, "total": 1 },
+            "episodes": [
+              {
+                "episodeid": 4838,
+                "title": "First Contact (2)",
+                "label": "1x02. First Contact (2)",
+                "season": 1,
+                "episode": 2,
+                "firstaired": "1994-11-06",
+                "runtime": 0,
+                "file": "/home/pipas/net/storage03/Serials/Earth 2/Earth.2.s01.e02.The.man.who.fell.to.earth.(Two).avi"
+              }
+            ]
+          }
+        }
+        ```
+        Notes: omit the `episode` filter to list a whole season (add `limits` for
+        paging; `total` is the season's episode count). `runtime` is 0 when the
+        scraper didn't supply a duration. `label` reflects the scraped title, which
+        can differ from the on-disk filename.
     [ ] 12.16.22 tags — Retrieve all tags (`VideoLibrary.GetTags`)
     [ ] 12.16.23 refreshEpisode — Refresh the given episode in the library (`VideoLibrary.RefreshEpisode`)
     [ ] 12.16.24 refreshMovie — Refresh the given movie in the library (`VideoLibrary.RefreshMovie`)
