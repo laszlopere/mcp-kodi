@@ -524,7 +524,56 @@ Everything below this section is original design for *this* project.
     the model cannot grant itself the hatch. An instance without the flag returns
     a clean tool error naming the instance and the flag; the schema lists which
     configured instances currently permit `rpc`.
-  [ ] 11.7 Resources/prompts
+  [ ] 11.7 Prompts (MCP `prompts/*`). Resources are deferred — see 11.7.6.
+    User-controlled prompt templates (surface as slash-commands / menu items in
+    the MCP client) that encode the common multi-step workflows so the model
+    drives the right tools in the right order. No Kodi state of their own; a
+    prompt just returns the seed messages — every action still goes through the
+    §5.2 tools.
+      [ ] 11.7.1 **Advertise the capability.** `initialize` adds `prompts` to
+        `capabilities` (`{ "tools": {}, "prompts": {} }`, alongside the existing
+        tools entry, mk-mcp.c). `listChanged` is **not** set — the prompt set is
+        static for the process, so no `notifications/prompts/list_changed`.
+      [ ] 11.7.2 **Dispatch two methods** (§3.3 routing, mk-mcp.c):
+        `prompts/list` → `{ "prompts": [ { name, description, arguments? } ] }`,
+        each argument `{ name, description, required }`; and `prompts/get`
+        `{ name, arguments? }` → `{ description, messages: [ { role,
+        content: { type: "text", text } } ] }`. Unknown prompt name → invalid
+        params (`-32602`, §3.4); a missing required argument → the same.
+      [ ] 11.7.3 **Prompts are pure templates** — building `prompts/get` makes
+        **no** Kodi call. The handler substitutes the supplied arguments into a
+        fixed message body and returns it; the model then issues the tool calls
+        the text guides it toward. This keeps prompts stateless and instance-
+        agnostic (each takes an optional `instance` like the tools, defaulting to
+        the config `default`).
+      [ ] 11.7.4 **Prompt set** (initial; `instance?` arg implied on each):
+
+        | Prompt              | Args                      | Seeds a request to… |
+        |---------------------|---------------------------|---------------------|
+        | `now-playing`       | `instance?`               | call `status` (`instance:"*"` when omitted) and summarise what plays on each box |
+        | `continue-watching` | `show?`, `instance?`      | use `continue`/`episodes` + per-instance state (§8) to resume or play the next episode of `show` |
+        | `put-on-music`      | `artist?`, `album?`, `instance?` | `search {type:music}` → `playfile`, then `screen` to the visualiser |
+        | `movie-night`       | `title`, `instance?`      | `search {type:movie}` → `playfile` (`title` required) |
+        | `troubleshoot`      | `instance?`               | `ping` then `info` as a reachability/health probe, report what answered |
+
+      [ ] 11.7.5 **Gating on unbuilt tools.** Several prompts reference tools not
+        yet implemented (`status`, `continue`, `episodes`, `screen`) and the §8
+        state file (11.8). The prompt *text* may name them ahead of the tools —
+        a prompt is just guidance — but a prompt is only worth **listing** once
+        the tools it drives exist. Ship `troubleshoot` and `put-on-music`/
+        `movie-night` first (their tools — `ping`/`info`/`search`/`playfile` —
+        are built), and add `now-playing`/`continue-watching` when `status`/
+        `continue`/§8 land. List only the ready ones.
+      [ ] 11.7.6 **Resources deferred (rationale).** MCP Resources are not
+        implemented now. The server's stance is stateless, JSON-via-tools (§2.1/
+        §2.2): the obvious resource candidates (`status`, `instances`, `players`,
+        `queue` list) are already tools, and a *subscribable* live-state resource
+        would require the long-lived monitoring loop §2.1/§10.1 deliberately
+        avoid. If revisited, the only non-tool-shaped candidates are two static,
+        listable resources — `kodi://instances` (masked config overview, mirrors
+        `instances get`) and a `kodi://help` tool/library catalog — never
+        templated live data or subscriptions. Left out until there's a concrete
+        need.
   [ ] 11.8 Playback state file, per-instance (`mk-state`)
   [ ] 11.9 Build clean, test against live Kodi, write README
 
