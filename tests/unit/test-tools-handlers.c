@@ -503,6 +503,249 @@ case_queue_bad_args (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* ---- getplaylist ------------------------------------------------------------ */
+
+/* No `type`: the active player's playlist is read — resolve the player, read
+ * its playlistid/position, list the items. Library rows carry their library id
+ * under the `<type>id` key (re-queueable as-is); an off-library row (type
+ * "unknown", id -1) carries only its file. `position` is present: the playlist
+ * read IS the active one. */
+static void
+case_getplaylist_active (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 1, \"type\": \"video\" } ]");
+  stub_kodi_set_response ("Player.GetProperties",
+                          "{ \"playlistid\": 1, \"position\": 1 }");
+  stub_kodi_set_response (
+    "Playlist.GetItems",
+    "{ \"items\": ["
+    "    { \"label\": \"Ep 1\", \"type\": \"episode\", \"id\": 30584,"
+    "      \"file\": \"/v/rd-1x01.avi\" },"
+    "    { \"label\": \"raw.mkv\", \"type\": \"unknown\", \"id\": -1,"
+    "      \"file\": \"/v/raw.mkv\" } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 2, \"total\": 2 } }");
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "getplaylist", NULL, &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_STR_EQ (json_object_get_string_member (p, "type"), "video");
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 2);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "position"), 1);
+
+      JsonArray *items = json_object_get_array_member (p, "items");
+      MK_CHECK_INT_EQ (json_array_get_length (items), 2);
+
+      JsonObject *r0 = json_array_get_object_element (items, 0);
+      MK_CHECK_INT_EQ (json_object_get_int_member (r0, "episodeid"), 30584);
+      MK_CHECK_STR_EQ (json_object_get_string_member (r0, "file"),
+                       "/v/rd-1x01.avi");
+      MK_CHECK_STR_EQ (json_object_get_string_member (r0, "type"), "episode");
+
+      /* the off-library row: no <type>id key at all, identity is the file. */
+      JsonObject *r1 = json_array_get_object_element (items, 1);
+      MK_CHECK (!json_object_has_member (r1, "unknownid"));
+      MK_CHECK_STR_EQ (json_object_get_string_member (r1, "file"),
+                       "/v/raw.mkv");
+      MK_CHECK_STR_EQ (json_object_get_string_member (r1, "type"), "unknown");
+    }
+
+  MK_CHECK (called ("Player.GetActivePlayers"));
+  MK_CHECK (called ("Player.GetProperties"));
+  MK_CHECK (called ("Playlist.GetItems"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* A provided `type` always wins: with the AUDIO player active, type "video"
+ * reads the video playlist — and since the playlist read is not the active
+ * one, no `position` is reported (a cursor into someone else's playlist would
+ * be meaningless). The same call with type "audio" — the active playlist —
+ * carries the position. */
+static void
+case_getplaylist_type_wins (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 0, \"type\": \"audio\" } ]");
+  stub_kodi_set_response ("Player.GetProperties",
+                          "{ \"playlistid\": 0, \"position\": 2 }");
+  stub_kodi_set_response (
+    "Playlist.GetItems",
+    "{ \"items\": [ { \"label\": \"Heat\", \"type\": \"movie\", \"id\": 1,"
+    "                 \"file\": \"/m/heat.mkv\" } ] }");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"type\": \"video\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "getplaylist", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_STR_EQ (json_object_get_string_member (p, "type"), "video");
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 1);
+      MK_CHECK (!json_object_has_member (p, "position"));
+    }
+  MK_CHECK (called ("Playlist.GetItems"));
+
+  /* type "audio" IS the active playlist: position present. */
+  g_autoptr (JsonNode) an2 = args_node ("{ \"type\": \"audio\" }");
+  g_autoptr (JsonNode) res2 =
+    mk_tools_call (tools, "getplaylist", json_node_get_object (an2), &error);
+
+  MK_CHECK (error == NULL);
+  is_error = TRUE;
+  g_autoptr (JsonNode) payload2 = envelope_payload (res2, &is_error);
+  MK_CHECK (!is_error);
+  if (payload2 != NULL && JSON_NODE_HOLDS_OBJECT (payload2))
+    {
+      JsonObject *p = json_node_get_object (payload2);
+      MK_CHECK_STR_EQ (json_object_get_string_member (p, "type"), "audio");
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "position"), 2);
+    }
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* No `type` and nothing playing — no active player, or non-playlist playback
+ * (playlistid -1) — is an EMPTY result, not an error, and Playlist.GetItems
+ * is never reached. */
+static void
+case_getplaylist_nothing_playing (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  /* No active player at all. */
+  stub_kodi_set_response ("Player.GetActivePlayers", "[]");
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "getplaylist", NULL, &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 0);
+      MK_CHECK (!json_object_has_member (p, "position"));
+      MK_CHECK_INT_EQ (
+        json_array_get_length (json_object_get_array_member (p, "items")), 0);
+    }
+  MK_CHECK (!called ("Playlist.GetItems"));
+
+  /* Non-playlist playback: a player is active but reports playlistid -1. */
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 1, \"type\": \"video\" } ]");
+  stub_kodi_set_response ("Player.GetProperties", "{ \"playlistid\": -1 }");
+
+  g_autoptr (JsonNode) res2 =
+    mk_tools_call (tools, "getplaylist", NULL, &error);
+
+  MK_CHECK (error == NULL);
+  is_error = TRUE;
+  g_autoptr (JsonNode) payload2 = envelope_payload (res2, &is_error);
+  MK_CHECK (!is_error);
+  if (payload2 != NULL && JSON_NODE_HOLDS_OBJECT (payload2))
+    MK_CHECK_INT_EQ (
+      json_object_get_int_member (json_node_get_object (payload2), "total"),
+      0);
+  MK_CHECK (!called ("Playlist.GetItems"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* A `type` with nothing playing still reads that playlist — the named-playlist
+ * path needs no player at all (Player.GetProperties is skipped). An empty
+ * playlist (Kodi's reply has no `items` member) is an empty list. A `type`
+ * outside audio/video/picture is refused before any Kodi call. */
+static void
+case_getplaylist_named_idle (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers", "[]");
+  /* An empty playlist: limits only, no `items` member. */
+  stub_kodi_set_response ("Playlist.GetItems",
+                          "{ \"limits\": { \"start\": 0, \"end\": 0,"
+                          "                \"total\": 0 } }");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"type\": \"audio\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "getplaylist", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_STR_EQ (json_object_get_string_member (p, "type"), "audio");
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 0);
+      MK_CHECK (!json_object_has_member (p, "position"));
+      MK_CHECK_INT_EQ (
+        json_array_get_length (json_object_get_array_member (p, "items")), 0);
+    }
+  MK_CHECK (called ("Playlist.GetItems"));
+  MK_CHECK (!called ("Player.GetProperties"));
+
+  /* An unknown playlist kind is a tool error before any Kodi call. */
+  stub_kodi_reset ();
+  g_autoptr (JsonNode) an2 = args_node ("{ \"type\": \"slideshow\" }");
+  g_autoptr (JsonNode) res2 =
+    mk_tools_call (tools, "getplaylist", json_node_get_object (an2), &error);
+
+  MK_CHECK (error == NULL);
+  is_error = FALSE;
+  g_autoptr (JsonNode) payload2 = envelope_payload (res2, &is_error);
+  MK_CHECK (is_error);
+  if (payload2 != NULL && JSON_NODE_HOLDS_OBJECT (payload2))
+    {
+      const char *msg = json_object_get_string_member (
+        json_node_get_object (payload2), "error");
+      MK_CHECK (msg != NULL && strstr (msg, "audio/video/picture") != NULL);
+    }
+  MK_CHECK (!called ("Player.GetActivePlayers"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
 /* ---- transport button (play) ---------------------------------------------- */
 
 static void
@@ -952,6 +1195,10 @@ main (int argc, char **argv)
     { "queue-type-mismatch",     case_queue_type_mismatch },
     { "queue-nothing-playing",   case_queue_nothing_playing },
     { "queue-bad-args",          case_queue_bad_args },
+    { "getplaylist-active",      case_getplaylist_active },
+    { "getplaylist-type-wins",   case_getplaylist_type_wins },
+    { "getplaylist-no-playback", case_getplaylist_nothing_playing },
+    { "getplaylist-named-idle",  case_getplaylist_named_idle },
     { "button-play",             case_button_play },
     { "stop-clears-playlist",    case_stop_clears_playlist },
     { "stop-nothing-playing",    case_stop_nothing_playing },
