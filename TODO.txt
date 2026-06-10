@@ -127,31 +127,25 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     atomic; seeds resume / next-episode / handoff; missing file = empty
     state.
 
-[ ] 11.9 Playback history, global append-only log (mk-history) — see
-    13.9 / 13.10. One cross-instance log at
-    ~/.local/state/mcp-kodi/history.json; capture is call-driven only (no
-    polling, no monitoring loop), so it records what the assistant caused
-    or observed, not a complete audit.
-
-[ ] 11.10 Build clean, test against live Kodi, write README
-
-[ ] 13.9 mk-history module
-    [x] 13.9.1 mk_history_record — write path: flock-serialized
+[ ] 11.9 Playback history, global append-only log (mk-history). One
+    cross-instance log at ~/.local/state/mcp-kodi/history.json; capture
+    is call-driven today, so it records what the assistant caused or
+    observed — 11.9.5 adds a polling loop to also catch playback started
+    outside the MCP server. (tests/history.test)
+    [x] 11.9.1 mk_history_record — write path: flock-serialized
         read-modify-write (never bare last-write-wins), dedup (append only
         a newly observed item, so pause/volume churn is ignored), trim by
         count and age, atomic write; wired from player_state() so every
         playback-affecting tool feeds it; best-effort — a history failure
         never fails the tool call
-
-[ ] 13.10 History read path + tool (tests/history.test)
-    [x] 13.10.1 mk_history_read — read primitive: shared lock, walks
+    [x] 11.9.2 mk_history_read — read primitive: shared lock, walks
         newest-first, instance/since/until window + limit, reports the
         total before the limit; missing file = zero entries, not an error
-    [x] 13.10.2 history tool — ISO-8601 since/until window over the log,
+    [x] 11.9.3 history tool — ISO-8601 since/until window over the log,
         newest-first; instance omitted means all boxes (inverts the
         default-instance convention — the log is cross-instance by
         nature); limit defaults to 50 with a truncated flag
-    [ ] 13.10.3 Strengthen the merge for live monitoring. Today
+    [ ] 11.9.4 Strengthen the merge for live monitoring. Today
         mk_history_record dedups against only the instance's single
         newest entry, and entries are ordered by arrival (prepend), not
         by observation time. A future live-monitoring feature means
@@ -166,8 +160,21 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         skip (keep the earliest `at`; consider a last_seen field) — so
         recording stays idempotent under concurrent flock-serialized
         writers.
+    [ ] 11.9.5 Live monitoring — poll the Kodi instances so the history
+        also captures playback not initiated through the MCP server
+        (e.g. started from the TV remote). Poll every ~2 minutes by
+        timer (websocket notifications may or may not be available, so
+        don't depend on them): query each configured instance's active
+        player + current item and feed it through mk_history_record,
+        which keeps updating the history and dedups repeat sightings.
+        An unreachable box is normal (powered off) and must be skipped
+        silently. This is the feature 11.9.4's merge hardening prepares
+        for — with several mcp-kodi processes polling the same boxes,
+        the merge must stay idempotent.
 
-[ ] 13.11 Config hot-reload (mk-config). The server loads config.json once
+[ ] 11.10 Build clean, test against live Kodi, write README
+
+[ ] 11.11 Config hot-reload (mk-config). The server loads config.json once
     at startup (main.c) and the one MkConfig is shared by mk-kodi and
     mk-tools, so a hand edit to the file — notably an allow_rpc grant,
     which is hand-edit-only by design — is invisible until restart.
@@ -180,3 +187,13 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     resolves instances per-request, so an in-place update is enough). A
     malformed file on reload should keep the last good config, not kill
     the server.
+
+[ ] 11.12 Missing media file — proper error reporting. Check what happens
+    when a library item's file is missing from disk and playback fails:
+    Kodi's Player.Open may still return "OK" while playback silently
+    never starts, so the play/playfile/queue tools must detect the
+    failure and report a proper error message to the client instead of
+    claiming success. Test fixture: on mini02 (living-room TV), songid
+    592 — "/home/pipas/net/storage0x/Music/Iron Maiden/1980 - Iron
+    Maiden/01 Prowler.mp3" — exists in the music library but the file is
+    missing from disk; use it to verify the behavior.
