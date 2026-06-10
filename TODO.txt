@@ -114,7 +114,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         playback-affecting tool feeds it; best-effort — a history failure
         never fails the tool call
 
-[x] 13.10 History read path + tool (tests/history.test)
+[ ] 13.10 History read path + tool (tests/history.test)
     [x] 13.10.1 mk_history_read — read primitive: shared lock, walks
         newest-first, instance/since/until window + limit, reports the
         total before the limit; missing file = zero entries, not an error
@@ -122,3 +122,32 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         newest-first; instance omitted means all boxes (inverts the
         default-instance convention — the log is cross-instance by
         nature); limit defaults to 50 with a truncated flag
+    [ ] 13.10.3 Strengthen the merge for live monitoring. Today
+        mk_history_record dedups against only the instance's single
+        newest entry, and entries are ordered by arrival (prepend), not
+        by observation time. A future live-monitoring feature means
+        several mcp-kodi processes observing the same playback and
+        recording it at slightly different times; their findings must
+        merge into one event even when observations arrive late or out
+        of order (process B's older sighting of X landing after process
+        A already logged X then Y must not spawn a spurious second X).
+        Match the incoming observation against a recent per-instance
+        time window instead of the single newest entry, insert by the
+        observation's `at` timestamp, and on a match merge rather than
+        skip (keep the earliest `at`; consider a last_seen field) — so
+        recording stays idempotent under concurrent flock-serialized
+        writers.
+
+[ ] 13.11 Config hot-reload (mk-config). The server loads config.json once
+    at startup (main.c) and the one MkConfig is shared by mk-kodi and
+    mk-tools, so a hand edit to the file — notably an allow_rpc grant,
+    which is hand-edit-only by design — is invisible until restart.
+    Detect changes at runtime and reload: either a GFileMonitor on the
+    file, or a cheap mtime stat before each tools/call. Must ignore the
+    server's own atomic saves from the instances tool (temp + rename
+    fires the monitor / bumps the mtime), and must update the existing
+    MkConfig in place — mk-kodi and mk-tools borrow the pointer, so
+    swapping in a new object would leave them stale (mk-kodi already
+    resolves instances per-request, so an in-place update is enough). A
+    malformed file on reload should keep the last good config, not kill
+    the server.
