@@ -4,7 +4,7 @@
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
  * Companion to test-tools.c. Where that suite covers tools/list, the unknown
- * tool, and noop, this one exercises the OTHER handlers — searchmedia, contributors,
+ * tool, and nowplaying, this one exercises the OTHER handlers — searchmedia, contributors,
  * playfile, the transport Buttons, mute/unmute, the rpc escape hatch and its
  * gate, plus a handler failure path — all driven against the *programmable* stub
  * (stub-kodi-prog.c): each handler's Kodi calls are answered with realistic
@@ -2261,13 +2261,13 @@ case_handler_failure_shaped (void)
   MkKodi *kodi;
   MkTools *tools = make_tools (&cfg, &kodi);
 
-  /* Make the very first call noop issues fail; the handler returns NULL with a
-   * GError, which mk_tools_call must shape into an isError result rather than
-   * propagate as a NULL/protocol error. */
+  /* Make the very first call nowplaying issues fail; the handler returns NULL
+   * with a GError, which mk_tools_call must shape into an isError result rather
+   * than propagate as a NULL/protocol error. */
   stub_kodi_set_error ("Player.GetActivePlayers");
 
   GError *error = NULL;
-  g_autoptr (JsonNode) res = mk_tools_call (tools, "noop", NULL, &error);
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "nowplaying", NULL, &error);
 
   MK_CHECK (error == NULL); /* shaped into the envelope, not returned */
   MK_CHECK (res != NULL);

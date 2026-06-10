@@ -437,10 +437,15 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     guaranteed to reach the model (Claude Code does not surface
     outputSchema in the model-visible tool definition).
 
-[ ] 11.17 Rename/alias noop — same discoverability argument as the
+[x] 11.17 Rename/alias noop — same discoverability argument as the
     11.6.4.5 search→searchmedia rename: an assistant hunting "what's
     playing" looks for status/nowplaying, not a name that says "does
     nothing".
+    Done as a hard rename (no alias, mirroring 11.6.4.5): the MCP tool name
+    noop → nowplaying, with the description leading on "what is playing".
+    Error prefixes/cross-references and docs (README, KODI-API) follow;
+    internal symbols (handler_noop, noop_snapshot, the noop-routes-through-
+    stub unit case) keep theirs.
 
 [ ] 11.18 skipnext / skipprevious Buttons — "skip this song"; reuse
     handler_button via Input.ExecuteAction, cheapest missing remote keys.

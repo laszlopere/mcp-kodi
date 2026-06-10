@@ -43,7 +43,7 @@ boxes when `instance` is omitted).
 | `volume`   | Adjust the volume by a **relative** signed step (percentage points); step `0`/omitted just reads. Never an absolute level, so the assistant can't blast or silence the box by guessing. Returns volume, mute state, and the `0`–`100` bounds. |
 | `mute`     | Mute the box's audio output. |
 | `unmute`   | Unmute the box's audio output. |
-| `noop`     | Report the player state without changing anything — a reachability + state probe. |
+| `nowplaying` | Report what is playing without changing anything — also a reachability + state probe. |
 
 **Search & discovery**
 
@@ -74,7 +74,7 @@ Most action tools return a small player-state snapshot — `{ "state":
 "time", "totaltime" }`, plus per-media fields where they apply (`artist`,
 `album`, `track`, `showtitle`, `season`, `episode`) —
 so the assistant always sees the effect of its action: this covers
-`play`/`pause`/`stop`, `playfile`, `queue`, `dropplaylists`, and `noop`. The
+`play`/`pause`/`stop`, `playfile`, `queue`, `dropplaylists`, and `nowplaying`. The
 audio tools `volume`/`mute`/`unmute` return `{ "muted", "volume" }` (`volume`
 also adds the `min`/`max` bounds). The read tools (`searchmedia`,
 `contributors`, `getplaylist`, `history`) return their own paged result
@@ -220,7 +220,7 @@ Add a stdio server entry pointing at the binary:
 ```
 
 Once registered, ask your assistant things like *"what's the player doing in the
-living room?"* (`noop`), *"find Pink Floyd's Animals and play it"* (`searchmedia` →
+living room?"* (`nowplaying`), *"find Pink Floyd's Animals and play it"* (`searchmedia` →
 `playfile`), or *"mute the bedroom"* (`mute`).
 
 ---

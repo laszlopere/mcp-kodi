@@ -122,13 +122,13 @@ check_invariants () { # body type expected-offset label
 echo "searchmedia functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
 
 # ===========================================================================
-# 1. Reachability + noop (the prerequisite the task calls out explicitly).
+# 1. Reachability + nowplaying (the prerequisite the task calls out explicitly).
 # ===========================================================================
-echo "-- reachability / noop"
-noop=$(mcp_tool noop '{}')
-eq "noop is not an error" false "$(res_err "$noop")"
+echo "-- reachability / nowplaying"
+noop=$(mcp_tool nowplaying '{}')
+eq "nowplaying is not an error" false "$(res_err "$noop")"
 nbody=$(res_body "$noop")
-is_true "noop reports a player state field" "$(j "$nbody" 'has("state")')"
+is_true "nowplaying reports a player state field" "$(j "$nbody" 'has("state")')"
 echo "   (player state: $(g "$nbody" '.state'))"
 
 # ===========================================================================

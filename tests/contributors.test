@@ -136,11 +136,11 @@ has_row_in () { # body name container
 echo "contributors functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
 
 # ===========================================================================
-# 1. Reachability + noop.
+# 1. Reachability + nowplaying.
 # ===========================================================================
-echo "-- reachability / noop"
-noop=$(mcp_tool noop '{}')
-eq "noop is not an error" false "$(res_err "$noop")"
+echo "-- reachability / nowplaying"
+noop=$(mcp_tool nowplaying '{}')
+eq "nowplaying is not an error" false "$(res_err "$noop")"
 
 # ===========================================================================
 # 2. Discover real library people to assert against — one per source.

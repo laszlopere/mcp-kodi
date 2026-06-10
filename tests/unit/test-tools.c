@@ -13,7 +13,7 @@
  * Covered:
  *   - tools/list renders one well-formed entry per tool;
  *   - an unknown tool name is a protocol-level error;
- *   - the `noop` handler issues the expected Kodi RPCs and shapes a result,
+ *   - the `nowplaying` handler issues the expected Kodi RPCs and shapes a result,
  *     entirely against the stubs.
  */
 
@@ -101,7 +101,7 @@ case_tools_list_shape (void)
           continue;
         }
       const char *name = json_object_get_string_member (e, "name");
-      if (name != NULL && strcmp (name, "noop") == 0)
+      if (name != NULL && strcmp (name, "nowplaying") == 0)
         saw_noop = TRUE;
       if (name != NULL && strcmp (name, "rpc") == 0)
         {
@@ -150,15 +150,15 @@ case_unknown_tool_is_error (void)
   mk_config_free (cfg);
 }
 
-/* Run `noop` and hand back the parsed now-playing snapshot object node (owned
- * by the caller). The handler funnels through player_state(), so this is how a
- * case inspects the snapshot player_state() built from the stub's
+/* Run `nowplaying` and hand back the parsed now-playing snapshot object node
+ * (owned by the caller). The handler funnels through player_state(), so this is
+ * how a case inspects the snapshot player_state() built from the stub's
  * Player.GetItem reply (which a case can shape with stub_kodi_set_item). */
 static JsonNode *
 noop_snapshot (MkTools *tools)
 {
   GError *error = NULL;
-  g_autoptr (JsonNode) res = mk_tools_call (tools, "noop", NULL, &error);
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "nowplaying", NULL, &error);
   MK_CHECK (error == NULL);
   MK_CHECK (res != NULL);
   if (res == NULL)
@@ -290,7 +290,7 @@ case_noop_routes_through_stub (void)
   MkTools *tools = make_tools (&cfg, &kodi);
 
   GError *error = NULL;
-  g_autoptr (JsonNode) res = mk_tools_call (tools, "noop", NULL, &error);
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "nowplaying", NULL, &error);
 
   MK_CHECK (error == NULL);
   MK_CHECK (res != NULL);
@@ -317,7 +317,7 @@ case_noop_routes_through_stub (void)
           MK_CHECK_STR_EQ (json_object_get_string_member (s, "type"), "audio");
         }
 
-      /* noop declares an outputSchema, so the same payload also rides as
+      /* nowplaying declares an outputSchema, so the same payload also rides as
        * structuredContent — the schema-validatable mirror of the text */
       MK_CHECK (json_object_has_member (o, "structuredContent"));
       if (json_object_has_member (o, "structuredContent"))
@@ -331,7 +331,7 @@ case_noop_routes_through_stub (void)
         }
     }
 
-  /* noop snapshots the player: GetActivePlayers → GetProperties → GetItem,
+  /* nowplaying snapshots the player: GetActivePlayers → GetProperties → GetItem,
    * all served by the stub — no real traffic. */
   MK_CHECK (called ("Player.GetActivePlayers"));
   MK_CHECK (called ("Player.GetProperties"));

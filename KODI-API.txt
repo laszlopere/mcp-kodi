@@ -318,7 +318,7 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
         (id 4838 = the episodeid from 12.16.21). Lesson for the generic tool:
         the playerid for follow-up control (pause/seek/stop) isn't fixed — read
         it back from GetActivePlayers after opening.
-        Notes: result is just "OK", not the item — confirm via GetItem/noop.
+        Notes: result is just "OK", not the item — confirm via GetItem/nowplaying.
         Opening replaces current playback (it interrupted a paused video here).
         options (2nd param) can set resume, playername, etc.
         Missing files (verified live for 11.12, 19.4 + 20.5): a plain path

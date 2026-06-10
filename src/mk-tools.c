@@ -665,7 +665,7 @@ player_state (MkTools *self, const char *instance, GError **error)
   /* Feed the playback-history log from this very snapshot — the
    * single point every playback-affecting tool funnels through, so it is the
    * one place history needs to hook. Best-effort and dedup'd:
-   * status/noop re-observing the same item add nothing, and a logging failure
+   * status/nowplaying re-observing the same item add nothing, and a logging failure
    * never fails this call. The stored `instance` is the resolved config key
    * (never NULL) with the box's display label as `name`. */
   if (self->history != NULL)
@@ -984,7 +984,7 @@ handler_stop (MkTools *self, const MkToolDef *def, JsonObject *args,
  * @args: the call arguments (optional `instance`), or NULL.
  * @error: return location for a GError, or NULL.
  *
- * Implements the noop Button: unlike handler_button() it sends no
+ * Implements the nowplaying Button: unlike handler_button() it sends no
  * `Input.ExecuteAction` and changes nothing — it simply returns the
  * player_state() snapshot for the target instance. Because building that
  * snapshot already calls Kodi (`Player.GetActivePlayers` and friends), a clean
@@ -1084,7 +1084,7 @@ static gboolean arg_int (JsonObject *args, const char *name, gint64 *out);
  * absolute set: the AI cannot safely pick a level it has not read, so it nudges
  * from the box's live volume. The `step` argument is a signed integer — 0 (or
  * omitted) reads the current state and changes nothing (the audio analogue of
- * noop), `+N`/`−N` raises/lowers by N percentage points.
+ * nowplaying), `+N`/`−N` raises/lowers by N percentage points.
  *
  * Always reads first with one `Application.GetProperties` (`volume` + `muted`);
  * for a non-zero `step` it then writes the clamped absolute target with
@@ -4271,7 +4271,7 @@ handler_history (MkTools *self, const MkToolDef *def, JsonObject *args,
  * @self: the table (unused; the shape is fixed).
  *
  * Output schema of the player-state snapshot (player_state()) shared by every
- * playback-affecting tool and `noop`. Only `state` is guaranteed: the rest
+ * playback-affecting tool and `nowplaying`. Only `state` is guaranteed: the rest
  * appears when a player is active, the per-media fields only where they
  * apply, and an empty field is omitted rather than emitted blank.
  *
@@ -4720,7 +4720,7 @@ static const MkToolDef mk_tool_defs[] = {
     schema_volume, handler_volume, NULL, out_schema_volume },
 
   /**
-   * noop (Button):
+   * nowplaying (Button):
    *
    * Do nothing to the player, just report its state. Fires no action and
    * changes nothing; it only builds and returns the player_state()
@@ -4736,11 +4736,11 @@ static const MkToolDef mk_tool_defs[] = {
    *         yields the categorised tool error, telling the caller Kodi is
    *         unreachable and why.
    */
-  { "noop", "Report the target instance's player state without changing "
-            "anything — a reachability and state probe. Returns the "
-            "player-state snapshot { \"state\", \"media\", \"id\", \"title\", "
-            "\"artist\", \"time\", \"totaltime\", … }; { \"state\": "
-            "\"stopped\" } when idle.",
+  { "nowplaying", "Report what is playing on the target instance without "
+                  "changing anything — also a reachability and state probe. "
+                  "Returns the player-state snapshot { \"state\", \"media\", "
+                  "\"id\", \"title\", \"artist\", \"time\", \"totaltime\", … }; "
+                  "{ \"state\": \"stopped\" } when idle.",
     schema_instance_only, handler_noop, NULL, out_schema_snapshot },
 
   /* ---- Config tools — read/write the server's own instance config.
