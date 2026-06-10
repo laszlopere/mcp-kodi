@@ -9,8 +9,9 @@
 # single play (which auto-creates the one-item playlist, §13.2.2), queues the
 # second behind it — by library id, then by file with next:true — and asserts
 # against Kodi's own Playlist.GetItems that the queue grew as requested while
-# the playing item never changed. It then stops and clears, leaving no media
-# running.
+# the playing item never changed. Cleanup runs through the `stop` tool, which
+# per §11.6.1.3 must also clear the playlist it stopped — asserted too — so
+# no media keeps running and no queue lingers.
 #
 # Caller mistakes are exercised thoroughly: every malformed argument set, the
 # nothing-playing refusal, an unconfigured instance, and a nonexistent library
@@ -110,6 +111,7 @@ mcp_tool () { # name arguments-json  ->  tool result object
 queue    () { mcp_tool queue    "$1"; }        # arguments-json -> result object
 playfile () { mcp_tool playfile "$1"; }
 search   () { mcp_tool search   "$1"; }
+stop_t   () { mcp_tool stop     "$1"; }
 res_err  () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
 res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
 jargs    () { jq -cn "$@"; }                   # build an arguments object safely
@@ -331,13 +333,18 @@ else
 fi
 
 # ===========================================================================
-# 7. Cleanup — stop playback and clear the playlist the test grew, leaving
-#    the player in the safe neutral state. The volume guard's EXIT trap then
-#    restores the original volume.
+# 7. Cleanup via the `stop` tool — which also asserts its §11.6.1.3 contract:
+#    stop ends playback AND clears the playlist it was consuming, so the
+#    queue this test grew must be gone afterwards with no explicit
+#    Playlist.Clear. The volume guard's EXIT trap then restores the volume.
 # ===========================================================================
-now=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
-[ -n "$now" ] && kodi_rpc Player.Stop "{\"playerid\":$now}" >/dev/null 2>&1
-kodi_rpc Playlist.Clear "{\"playlistid\":$plid}" >/dev/null 2>&1
+echo "-- stop clears the queue"
+b=$(stop_t '{}')
+eq "stop is not an error" false "$(res_err "$b")"
+eq "stop reports the stopped state" stopped "$(g "$(res_body "$b")" '.state')"
+eq "stop cleared the grown playlist" 0 \
+   "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
+       | jq -r '.result.items // [] | length')"
 
 # ---- tally ----------------------------------------------------------------
 echo "------------------------------------------------------------"

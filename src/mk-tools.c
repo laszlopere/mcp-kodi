@@ -715,6 +715,102 @@ handler_button (MkTools *self, const MkToolDef *def, JsonObject *args,
 }
 
 /**
+ * handler_stop:
+ * @self: the tool table.
+ * @def: this Button's table row; @def->action is "stop".
+ * @args: the call arguments (optional `instance`), or NULL.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the stop Button (§11.6.1.3): the handler_button() keypress plus an
+ * automatic playlist clear. Kodi's stop ends *playback* but leaves the *queue*
+ * intact (confirmed live: a stopped 2-item playlist still lists both entries),
+ * so a bare stop would strand stale items that only `dropplaylists` could
+ * remove. To the caller "stop" means "done with this", so the playlist the
+ * player was consuming is cleared too:
+ *
+ *   1. Resolve the active player's `playlistid` — *before* the keypress, since
+ *      afterwards there is no active player left to ask. No active player, or
+ *      non-playlist playback (`playlistid < 0`, live TV / streams): nothing to
+ *      clear, the keypress alone suffices.
+ *   2. `Input.ExecuteAction { "action": "stop" }`, then the settle delay
+ *      (handler_button()).
+ *   3. `Playlist.Clear { playlistid }` on the playlist from step 1.
+ *
+ * Other playlists are left alone — clearing *everything* is `dropplaylists`'
+ * job (§11.6.9); stop touches only what it stopped.
+ *
+ * @return the post-action player-state object (`{ "state": "stopped" }` on
+ *         success), or NULL with @error set.
+ */
+static JsonNode *
+handler_stop (MkTools *self, const MkToolDef *def, JsonObject *args,
+              GError **error)
+{
+  const char *instance = arg_instance (args);
+
+  /* Step 1: which playlist is being consumed, while there is still an active
+   * player to ask. */
+  gint64 playlistid = -1;
+  g_autoptr (JsonNode) active =
+    mk_kodi_call (self->kodi, instance, "Player.GetActivePlayers", NULL, error);
+  if (active == NULL)
+    return NULL;
+  JsonArray *players =
+    JSON_NODE_HOLDS_ARRAY (active) ? json_node_get_array (active) : NULL;
+  if (players != NULL && json_array_get_length (players) > 0)
+    {
+      JsonObject *p0 = json_array_get_object_element (players, 0);
+      gint64 playerid =
+        json_object_get_int_member_with_default (p0, "playerid", 0);
+
+      static const char *const fields[] = { "playlistid", NULL };
+      g_autoptr (JsonNode) pparams = player_props (playerid, fields);
+      g_autoptr (JsonNode) pres = mk_kodi_call (self->kodi, instance,
+                                                "Player.GetProperties", pparams,
+                                                error);
+      if (pres == NULL)
+        return NULL;
+      playlistid = json_object_get_int_member_with_default (
+        json_node_get_object (pres), "playlistid", -1);
+    }
+
+  /* Step 2: the keypress. */
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "action");
+  json_builder_add_string_value (b, def->action);
+  json_builder_end_object (b);
+  g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+  g_autoptr (JsonNode) acted = mk_kodi_call (self->kodi, instance,
+                                             "Input.ExecuteAction", params,
+                                             error);
+  if (acted == NULL)
+    return NULL;
+  g_usleep (MK_BUTTON_SETTLE_US);
+
+  /* Step 3: clear the queue the player was consuming, so stop leaves no stale
+   * items behind. */
+  if (playlistid >= 0)
+    {
+      g_autoptr (JsonBuilder) cb = json_builder_new ();
+      json_builder_begin_object (cb);
+      json_builder_set_member_name (cb, "playlistid");
+      json_builder_add_int_value (cb, playlistid);
+      json_builder_end_object (cb);
+      g_autoptr (JsonNode) cparams = json_builder_get_root (cb);
+
+      g_autoptr (JsonNode) cleared = mk_kodi_call (self->kodi, instance,
+                                                   "Playlist.Clear", cparams,
+                                                   error);
+      if (cleared == NULL)
+        return NULL;
+    }
+
+  return player_state (self, instance, error);
+}
+
+/**
  * handler_noop:
  * @self: the tool table.
  * @def: this Button's table row (unused; it fires no action).
@@ -2665,19 +2761,26 @@ static const MkToolDef mk_tool_defs[] = {
    * stop (Button):
    *
    * Press Stop on the Kodi remote — stop the active player on the target
-   * instance. A remote keypress, not a player command: no playerid and no
-   * active-player resolution (§11.6.1).
+   * instance — and clear the playlist it was consuming (§11.6.1.3). Kodi's
+   * stop ends playback but leaves the queue intact, so without the clear any
+   * items queued behind the stopped one would linger invisibly; to the caller
+   * "stop" means "done with this", queue included. Live/non-playlist playback
+   * and an already-stopped player skip the clear (nothing to remove); other
+   * playlists are untouched (`dropplaylists`, §11.6.9, clears everything).
    *
-   * Call:  Input.ExecuteAction { "action": "stop" }, then player_state() to
-   *        report the effect.
+   * Call:  Player.GetActivePlayers + Player.GetProperties to resolve the
+   *        consumed playlistid (before the keypress kills the player),
+   *        Input.ExecuteAction { "action": "stop" }, Playlist.Clear on that
+   *        playlist, then player_state() to report the effect.
    * @param instance (optional): name of the Kodi instance to target; omitted
    *        uses the configured default (§5.1).
    * @return the resulting player-state snapshot (player_state()); after a
    *         successful stop nothing is loaded, so `{ "state": "stopped" }`.
    */
   { "stop", "Press Stop on the Kodi remote: stop the active player on the "
-            "target instance.",
-    schema_instance_only, handler_button, "stop" },
+            "target instance and clear the playlist it was playing, so no "
+            "queued items linger.",
+    schema_instance_only, handler_stop, "stop" },
 
   /**
    * mute (Button):

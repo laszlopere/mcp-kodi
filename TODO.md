@@ -455,6 +455,14 @@ Everything below this section is original design for *this* project.
         `{"method":"Input.ExecuteAction","params":{"action":"pause"}}`
       [x] 11.6.1.3 stop
         `{"method":"Input.ExecuteAction","params":{"action":"stop"}}`
+        — plus an automatic playlist clear: Kodi's stop ends playback but
+        leaves the queue intact (confirmed live, a stopped 2-item playlist
+        still lists both entries), so the handler resolves the active player's
+        `playlistid` *before* the keypress and issues `Playlist.Clear` on it
+        after, leaving no stale queue behind. The one Button that resolves the
+        active player. No active player or `playlistid < 0` (live TV/streams):
+        keypress only, nothing to clear. Other playlists untouched —
+        clearing everything is dropplaylists' job (§11.6.9).
       [x] 11.6.1.4 mute
         `{"method":"Application.SetMute","params":{"mute":true}}`
       [x] 11.6.1.5 unmute
@@ -868,7 +876,7 @@ Everything below this section is original design for *this* project.
 
   [ ] 12.11 Playlist
     [x] 12.11.1 add — Add item(s) to playlist (`Playlist.Add`) — the `queue` tool's append (§11.6.7)
-    [ ] 12.11.2 clear — Clear playlist (`Playlist.Clear`)
+    [x] 12.11.2 clear — Clear playlist (`Playlist.Clear`) — the stop Button's auto-clear (§11.6.1.3); dropplaylists (§11.6.9) will reuse it
     [ ] 12.11.3 items — Get all items from playlist (`Playlist.GetItems`)
     [ ] 12.11.4 playlists — Returns all existing playlists (`Playlist.GetPlaylists`)
     [ ] 12.11.5 properties — Retrieves the values of the given properties (`Playlist.GetProperties`)

@@ -544,6 +544,80 @@ case_button_play (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* ---- stop: the keypress plus the automatic playlist clear ------------------ */
+
+/* Stop on an active player resolves the consumed playlist BEFORE the keypress
+ * and clears exactly that one after it, so no queued items linger (Kodi's own
+ * stop leaves the queue intact, §11.6.1.3). */
+static void
+case_stop_clears_playlist (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 1, \"type\": \"video\" } ]");
+  stub_kodi_set_response ("Player.GetProperties",
+                          "{ \"playlistid\": 1, \"speed\": 1 }");
+  stub_kodi_set_response ("Input.ExecuteAction", "\"OK\"");
+  stub_kodi_set_response ("Playlist.Clear", "\"OK\"");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"Ep\", \"file\": \"/v/ep.mkv\","
+    "  \"type\": \"episode\", \"id\": 3 } }");
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "stop", NULL, &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  (void) payload;
+  MK_CHECK (!is_error);
+
+  /* resolve, keypress, clear — all three legs ran. */
+  MK_CHECK (called ("Player.GetActivePlayers"));
+  MK_CHECK (called ("Input.ExecuteAction"));
+  MK_CHECK (called ("Playlist.Clear"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* Stop with nothing playing fires the (no-op) keypress but has no playlist to
+ * resolve, so Playlist.Clear must NOT be issued. */
+static void
+case_stop_nothing_playing (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers", "[]");
+  stub_kodi_set_response ("Input.ExecuteAction", "\"OK\"");
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "stop", NULL, &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    MK_CHECK_STR_EQ (
+      json_object_get_string_member (json_node_get_object (payload), "state"),
+      "stopped");
+
+  MK_CHECK (called ("Input.ExecuteAction"));
+  MK_CHECK (!called ("Playlist.Clear"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
 /* ---- mute / unmute --------------------------------------------------------- */
 
 static void
@@ -879,6 +953,8 @@ main (int argc, char **argv)
     { "queue-nothing-playing",   case_queue_nothing_playing },
     { "queue-bad-args",          case_queue_bad_args },
     { "button-play",             case_button_play },
+    { "stop-clears-playlist",    case_stop_clears_playlist },
+    { "stop-nothing-playing",    case_stop_nothing_playing },
     { "mute",                    case_mute },
     { "unmute",                  case_unmute },
     { "volume-read-only",        case_volume_read_only },
