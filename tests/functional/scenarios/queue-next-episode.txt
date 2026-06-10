@@ -1,0 +1,31 @@
+# queue-next-episode: start ONE episode as a single play (no playlist built by
+# hand), then — while it plays — append the next episode to the playlist and let
+# Kodi auto-advance to it. This is the key baseline: a "single play" is really a
+# one-item video playlist (id 1), so queuing the next episode needs no new
+# playlist, just Playlist.Add against playlist 1.
+#
+# Episode 1 ("1x01. The End") runs 30:02, so the last ~5 s is time 29:57.
+# Drive the "next episode is starting" step with a longer settle, e.g.
+#   run-scenario.sh -s 4 -w 12 <this file>
+#
+# Format: '# title', then a raw JSON-RPC request line, then '[state] observation'.
+
+# start ONE Red Dwarf episode as a single play (this replaces video playlist 1)
+{"jsonrpc":"2.0","id":1,"method":"Player.Open","params":{"item":{"episodeid":30584}}}
+[playing] Red Dwarf "1x01. The End" starts playing fullscreen
+
+# while it is playing, append the NEXT episode to the same playlist (no new playlist)
+{"jsonrpc":"2.0","id":2,"method":"Playlist.Add","params":{"playlistid":1,"item":{"episodeid":30585}}}
+[playing] episode 1 keeps playing; "1x02. Future Echoes" is now queued behind it
+
+# jump to the last 5 seconds of episode 1
+{"jsonrpc":"2.0","id":3,"method":"Player.Seek","params":{"playerid":1,"value":{"time":{"hours":0,"minutes":29,"seconds":57}}}}
+[playing] episode 1 jumps to its final ~5 seconds; the progress bar is at the very end
+
+# check that the next episode is starting (drive with -w 12)
+{"jsonrpc":"2.0","id":4,"method":"JSONRPC.Ping"}
+[playing] episode 1 ends and "1x02. Future Echoes" starts automatically
+
+# press stop
+{"jsonrpc":"2.0","id":5,"method":"Input.ExecuteAction","params":{"action":"stop"}}
+[stopped] video stops; Kodi returns to the menu/home
