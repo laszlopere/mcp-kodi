@@ -2111,6 +2111,392 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
   return NULL;
 }
 
+/* ---- contributors ----------------------------------------------------------
+ *
+ * Find *people* by name — bands, solo artists, composers, actors, directors —
+ * instead of media. Each row is `{ name, in: [containers] }`: the exact name IS
+ * the follow-up handle (`search` takes names, and Kodi's person filters are
+ * name-only — no id-based filter exists), and `in` lists where feeding it back
+ * will hit (albums/songs for music people, movies/tvshows for cast and crew),
+ * so the caller knows where to drill next without Kodi-specific knowledge.
+ *
+ * Music people come from one server-filtered `AudioLibrary.GetArtists` call
+ * (KODI-API 12.3.6; `allroles` folds in composers, conductors, lyricists —
+ * 12.3.15). Actors and directors have no Get* method at all, so they are
+ * enumerated through the virtual `videodb://` nodes with `Files.GetDirectory`
+ * (KODI-API 12.5.1) — those listings take sort and limits but NO filter, so
+ * name matching is app-side over the paged labels. Hits from every source are
+ * merged case-insensitively into one row per person.
+ */
+
+#define MK_CONTRIB_NODE_PAGE 1000 /* labels per Files.GetDirectory page */
+
+/* Container bits for a row's `in` list — where the person's name yields hits
+ * when fed back into `search`. Bits make the cross-source merge a cheap OR;
+ * mk_contrib_containers spells them out in emission order. */
+enum
+{
+  MK_CONTRIB_ALBUMS  = 1 << 0,
+  MK_CONTRIB_SONGS   = 1 << 1,
+  MK_CONTRIB_MOVIES  = 1 << 2,
+  MK_CONTRIB_TVSHOWS = 1 << 3,
+};
+
+static const struct
+{
+  guint       bit;
+  const char *label;
+} mk_contrib_containers[] = {
+  { MK_CONTRIB_ALBUMS,  "albums"  },
+  { MK_CONTRIB_SONGS,   "songs"   },
+  { MK_CONTRIB_MOVIES,  "movies"  },
+  { MK_CONTRIB_TVSHOWS, "tvshows" },
+};
+
+/* One merged contributor: the display name (first spelling seen wins), its
+ * casefolded form (the merge/sort key, borrowed by the handler's index hash),
+ * and the container bits accumulated across the sources. */
+typedef struct
+{
+  char  *name;
+  char  *key;
+  guint  in;
+} MkContribRow;
+
+/**
+ * contrib_row_free:
+ * @row: the row to free.
+ *
+ * Frees one MkContribRow — the rows array's element free func.
+ */
+static void
+contrib_row_free (gpointer row)
+{
+  MkContribRow *r = row;
+  g_free (r->name);
+  g_free (r->key);
+  g_free (r);
+}
+
+/**
+ * contrib_add:
+ * @index: casefolded name → row lookup (keys borrowed from the rows).
+ * @rows: the row store (owns the rows).
+ * @name: the person's display name as this source spells it.
+ * @in: the container bit(s) this source contributes.
+ *
+ * Records that @name yields hits @in, merging case-insensitively into an
+ * existing row when the person was already seen through another source (or the
+ * same source under a different spelling of the case).
+ */
+static void
+contrib_add (GHashTable *index, GPtrArray *rows, const char *name, guint in)
+{
+  g_autofree char *key = g_utf8_casefold (name, -1);
+  MkContribRow *row = g_hash_table_lookup (index, key);
+  if (row == NULL)
+    {
+      row = g_new0 (MkContribRow, 1);
+      row->name = g_strdup (name);
+      row->key = g_steal_pointer (&key);
+      g_ptr_array_add (rows, row);
+      g_hash_table_insert (index, row->key, row);
+    }
+  row->in |= in;
+}
+
+/**
+ * contrib_row_cmp:
+ * @a: pointer to the first MkContribRow*.
+ * @b: pointer to the second MkContribRow*.
+ *
+ * Orders rows by their casefolded name, so the merged set pages
+ * deterministically regardless of which source produced each row.
+ *
+ * @return the strcmp-style ordering of the two rows' keys.
+ */
+static gint
+contrib_row_cmp (gconstpointer a, gconstpointer b)
+{
+  const MkContribRow *ra = *(MkContribRow *const *) a;
+  const MkContribRow *rb = *(MkContribRow *const *) b;
+  return g_strcmp0 (ra->key, rb->key);
+}
+
+/**
+ * contrib_music:
+ * @self: the tool table.
+ * @instance: target instance, or NULL for the default.
+ * @name: the person-name substring to match (case-insensitive).
+ * @index: casefolded name → row lookup, fed to contrib_add().
+ * @rows: the row store, fed to contrib_add().
+ * @error: return location for a GError, or NULL.
+ *
+ * Collects the matching music people in one server-filtered
+ * `AudioLibrary.GetArtists` call: `allroles: true` folds in artists known only
+ * as composers/conductors/lyricists (KODI-API 12.3.15) and `albumartistsonly:
+ * false` keeps song-only artists regardless of the GUI setting. Every hit
+ * drills to `songs`; only an `isalbumartist` also drills to `albums` (a
+ * GetAlbums artist filter finds nothing for the rest).
+ *
+ * @return TRUE on success (even with zero matches), FALSE with @error set on a
+ *         call failure.
+ */
+static gboolean
+contrib_music (MkTools *self, const char *instance, const char *name,
+               GHashTable *index, GPtrArray *rows, GError **error)
+{
+  static const char *const props[] = { "isalbumartist", NULL };
+
+  g_autoptr (JsonBuilder) pb = json_builder_new ();
+  json_builder_begin_object (pb);
+  add_field_filter (pb, "artist", "contains", name);
+  json_builder_set_member_name (pb, "albumartistsonly");
+  json_builder_add_boolean_value (pb, FALSE);
+  json_builder_set_member_name (pb, "allroles");
+  json_builder_add_boolean_value (pb, TRUE);
+  add_properties (pb, props);
+  add_sort (pb, "artist");
+  json_builder_end_object (pb);
+  g_autoptr (JsonNode) params = json_builder_get_root (pb);
+
+  g_autoptr (JsonNode) result = mk_kodi_call (self->kodi, instance,
+                                              "AudioLibrary.GetArtists", params,
+                                              error);
+  if (result == NULL)
+    return FALSE;
+
+  g_autoptr (GPtrArray) items = collect_items (result, "artists");
+  for (guint i = 0; i < items->len; i++)
+    {
+      JsonObject *it = g_ptr_array_index (items, i);
+      const char *label = json_object_get_string_member_with_default (
+        it, "artist",
+        json_object_get_string_member_with_default (it, "label", NULL));
+      if (label == NULL || label[0] == '\0')
+        continue;
+      guint in = MK_CONTRIB_SONGS;
+      if (json_object_get_boolean_member_with_default (it, "isalbumartist",
+                                                       FALSE))
+        in |= MK_CONTRIB_ALBUMS;
+      contrib_add (index, rows, label, in);
+    }
+  return TRUE;
+}
+
+/**
+ * contrib_node:
+ * @self: the tool table.
+ * @instance: target instance, or NULL for the default.
+ * @directory: the virtual people node to enumerate (a videodb:// path).
+ * @in: the container bit a hit in this node drills to.
+ * @name: the person-name substring to match (case-insensitive).
+ * @index: casefolded name → row lookup, fed to contrib_add().
+ * @rows: the row store, fed to contrib_add().
+ * @error: return location for a GError, or NULL.
+ *
+ * Collects the matching people of one `videodb://` node by paging its full
+ * listing through `Files.GetDirectory {directory, media: "video"}` (KODI-API
+ * 12.5.1) in MK_CONTRIB_NODE_PAGE windows and matching each label app-side with
+ * ci_contains() — the node listings take NO filter param, so a full enumeration
+ * is the only way to search them. An empty page ends the walk even when
+ * `limits.total` claims more, so an inconsistent reply cannot loop forever.
+ *
+ * @return TRUE on success (even with zero matches), FALSE with @error set on a
+ *         call failure.
+ */
+static gboolean
+contrib_node (MkTools *self, const char *instance, const char *directory,
+              guint in, const char *name, GHashTable *index, GPtrArray *rows,
+              GError **error)
+{
+  for (gint64 start = 0;;)
+    {
+      g_autoptr (JsonBuilder) pb = json_builder_new ();
+      json_builder_begin_object (pb);
+      json_builder_set_member_name (pb, "directory");
+      json_builder_add_string_value (pb, directory);
+      json_builder_set_member_name (pb, "media");
+      json_builder_add_string_value (pb, "video");
+      add_sort (pb, "label");
+      add_limits (pb, start, start + MK_CONTRIB_NODE_PAGE);
+      json_builder_end_object (pb);
+      g_autoptr (JsonNode) params = json_builder_get_root (pb);
+
+      g_autoptr (JsonNode) result = mk_kodi_call (self->kodi, instance,
+                                                  "Files.GetDirectory", params,
+                                                  error);
+      if (result == NULL)
+        return FALSE;
+
+      gint64 total = list_total (result);
+      g_autoptr (GPtrArray) items = collect_items (result, "files");
+      for (guint i = 0; i < items->len; i++)
+        {
+          JsonObject *it = g_ptr_array_index (items, i);
+          const char *label =
+            json_object_get_string_member_with_default (it, "label", NULL);
+          if (label != NULL && ci_contains (label, name))
+            contrib_add (index, rows, label, in);
+        }
+
+      start += MK_CONTRIB_NODE_PAGE;
+      if (items->len == 0 || start >= total)
+        return TRUE;
+    }
+}
+
+/**
+ * build_contributors_result:
+ * @rows: the merged, sorted row set.
+ * @offset: rows to skip.
+ * @limit: max rows to emit.
+ * @count: when TRUE, emit zero rows (a count-only response).
+ *
+ * Builds the `contributors` response: `{ total, returned, offset, truncated,
+ * rows: [ { name, in: [containers] } ] }`. Paging is over the merged set
+ * (matching is partly app-side, so the set is already fully collected);
+ * `truncated` is TRUE when rows remain beyond this page.
+ *
+ * @return a newly allocated result object node; free with json_node_unref().
+ */
+static JsonNode *
+build_contributors_result (GPtrArray *rows, gint64 offset, gint64 limit,
+                           gboolean count)
+{
+  gint64 total = rows->len;
+  gint64 first = count ? total : MIN (offset, total);
+  gint64 end = count ? total : MIN (first + limit, total);
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "total");
+  json_builder_add_int_value (b, total);
+  json_builder_set_member_name (b, "returned");
+  json_builder_add_int_value (b, end - first);
+  json_builder_set_member_name (b, "offset");
+  json_builder_add_int_value (b, offset);
+  json_builder_set_member_name (b, "truncated");
+  json_builder_add_boolean_value (b, offset + (end - first) < total);
+
+  json_builder_set_member_name (b, "rows");
+  json_builder_begin_array (b);
+  for (gint64 i = first; i < end; i++)
+    {
+      const MkContribRow *row = g_ptr_array_index (rows, (guint) i);
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "name");
+      json_builder_add_string_value (b, row->name);
+      json_builder_set_member_name (b, "in");
+      json_builder_begin_array (b);
+      for (gsize c = 0; c < G_N_ELEMENTS (mk_contrib_containers); c++)
+        if (row->in & mk_contrib_containers[c].bit)
+          json_builder_add_string_value (b, mk_contrib_containers[c].label);
+      json_builder_end_array (b);
+      json_builder_end_object (b);
+    }
+  json_builder_end_array (b);
+
+  json_builder_end_object (b);
+  return json_builder_get_root (b);
+}
+
+/**
+ * schema_contributors:
+ * @self: the table (used to name the configured instances).
+ *
+ * Schema for the `contributors` tool: the required `name` plus the
+ * paging controls.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_contributors (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_instance (b, self, FALSE);
+  prop_typed (b, "name", "string",
+              "Person name to look for (substring, case-insensitive): a band, "
+              "solo artist, composer, actor, or director.");
+  prop_typed (b, "limit", "integer",
+              "Max rows to return (default 50, max 500). Page with offset.");
+  prop_typed (b, "offset", "integer",
+              "Number of rows to skip — paginate together with limit.");
+  prop_typed (b, "count", "boolean",
+              "When true, return only the total match count (zero rows).");
+
+  static const char *const required[] = { "name", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_contributors:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments; `name` is required.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `contributors` tool: collects the matching people from the
+ * music library (contrib_music()) and the three video people nodes
+ * (contrib_node() over videodb://movies/actors/, videodb://movies/directors/,
+ * videodb://tvshows/actors/), merges them case-insensitively, sorts by name,
+ * and pages the merged set. Makes no Kodi state change.
+ *
+ * @return the contributors-result node, or NULL with @error set (missing name
+ *         or a call failure).
+ */
+static JsonNode *
+handler_contributors (MkTools *self, const MkToolDef *def, JsonObject *args,
+                      GError **error)
+{
+  static const struct
+  {
+    const char *directory;
+    guint       in;
+  } nodes[] = {
+    { "videodb://movies/actors/",    MK_CONTRIB_MOVIES  },
+    { "videodb://movies/directors/", MK_CONTRIB_MOVIES  },
+    { "videodb://tvshows/actors/",   MK_CONTRIB_TVSHOWS },
+  };
+
+  (void) def;
+  const char *instance = arg_instance (args);
+  const char *name = arg_str (args, "name", NULL);
+  if (name == NULL || name[0] == '\0')
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "contributors: \"name\" is required");
+      return NULL;
+    }
+
+  gint64 limit = MK_SEARCH_DEFAULT_LIMIT, offset = 0, v = 0;
+  if (arg_int (args, "limit", &v))
+    limit = v;
+  if (arg_int (args, "offset", &v))
+    offset = v;
+  limit = CLAMP (limit, 0, MK_SEARCH_MAX_LIMIT);
+  if (offset < 0)
+    offset = 0;
+  gboolean count = arg_bool (args, "count");
+
+  g_autoptr (GPtrArray) rows =
+    g_ptr_array_new_with_free_func (contrib_row_free);
+  g_autoptr (GHashTable) index = g_hash_table_new (g_str_hash, g_str_equal);
+
+  if (!contrib_music (self, instance, name, index, rows, error))
+    return NULL;
+  for (gsize n = 0; n < G_N_ELEMENTS (nodes); n++)
+    if (!contrib_node (self, instance, nodes[n].directory, nodes[n].in, name,
+                       index, rows, error))
+      return NULL;
+
+  g_ptr_array_sort (rows, contrib_row_cmp);
+  return build_contributors_result (rows, offset, limit, count);
+}
+
 /* ---- playfile -------------------------------------------------------------
  *
  * Play one file by path. The natural partner to `search`: the caller
@@ -3185,6 +3571,41 @@ static const MkToolDef mk_tool_defs[] = {
   { "search", "Find playable files by name: music/tv-show/movie, drilled to "
               "leaf files with paging (limit/offset) and a total count.",
     schema_search, handler_search, NULL },
+
+  /**
+   * contributors (Search tool):
+   *
+   * Find *people* by name — bands, solo artists, composers, actors, directors —
+   * not media. Answers "do we have anything with X" across the whole library
+   * and hands back the exact names to feed into `search`: names are the only
+   * follow-up handle (Kodi's person filters are name-only; no id-based filter
+   * exists), so rows carry no person ids. Each row's `in` lists the containers
+   * where that name yields hits — `albums`/`songs` for music people (`albums`
+   * only when the artist is an album artist), `movies`/`tvshows` for actors and
+   * directors — so the caller knows where to drill next without Kodi-specific
+   * knowledge. Hits from every source are merged case-insensitively into one
+   * row per person, sorted by name.
+   *
+   * Call:  AudioLibrary.GetArtists { filter: artist contains name, allroles,
+   *        albumartistsonly: false } for the music people (KODI-API 12.3.6 /
+   *        12.3.15), then Files.GetDirectory over the virtual people nodes
+   *        videodb://movies/actors/, videodb://movies/directors/ and
+   *        videodb://tvshows/actors/ (KODI-API 12.5.1) — those listings take no
+   *        filter, so they are paged and matched app-side.
+   *
+   * @param name (required): person name (substring, case-insensitive).
+   * @param limit|offset|count: paging and count-only controls over the merged
+   *        row set.
+   * @param instance (optional): the Kodi instance whose library to search;
+   *        omitted uses the configured default.
+   * @return `{ "total", "returned", "offset", "truncated", "rows": [ { "name",
+   *         "in": [ "albums"|"songs"|"movies"|"tvshows" ] } ] }`.
+   */
+  { "contributors", "Find contributors by name (bands, solo artists, "
+                    "composers, actors, directors): rows {name, in: "
+                    "[albums|songs|movies|tvshows]} say where each name yields "
+                    "hits — feed the exact name back into `search` to drill.",
+    schema_contributors, handler_contributors, NULL },
 
   /* ---- Playback tools — open content on a player. ---- */
 

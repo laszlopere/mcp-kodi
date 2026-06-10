@@ -76,7 +76,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             contains} filters (KODI-API 12.16.12/12.16.21, verified live);
             combinable with title?; result shape unchanged (leaf-file
             rows + total)
-        [ ] 11.6.4.3 contributors — find who contributed (bands, solo
+        [x] 11.6.4.3 contributors — find who contributed (bands, solo
             artists, composers, actors, directors), not media:
             rows {name, in: [containers]} + total instead of leaf files;
             the exact name IS the follow-up handle (search/11.6.4.2 take
@@ -88,13 +88,17 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             the caller knows where to drill next without Kodi-specific
             knowledge. Music
             artists/bands via AudioLibrary.GetArtists name filter
-            (KODI-API 12.3.6; allroles/role for composers etc., 12.3.15);
-            actors/directors have no Get* method, so enumerate the
+            (KODI-API 12.3.6; allroles folds in composers etc., 12.3.15);
+            actors/directors have no Get* method, so the
             videodb:// nodes (videodb://movies/actors|directors/,
-            videodb://tvshows/actors/) via Files.GetDirectory (KODI-API
-            12.5.1, verified live) — no server-side filter there, name
-            matching is app-side over paged labels; answers "do we have
+            videodb://tvshows/actors/) are enumerated via Files.GetDirectory
+            (KODI-API 12.5.1, verified live) — no server-side filter there,
+            name matching is app-side over paged labels (1000/page). Hits
+            from every source merge case-insensitively into one row per
+            person, sorted by name; limit/offset/count page the merged
+            set (default 50, max 500); answers "do we have
             anything with X" and feeds 11.6.4.2 with exact names
+            (tests/contributors.test)
     [x] 11.6.5 playfile — play one file via Player.Open {item:{file}}
         (KODI-API 12.10.9); any path, in-library or not; auto-selects the
         audio/video player; Kodi enriches a scanned file back to its

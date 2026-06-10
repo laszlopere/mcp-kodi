@@ -164,7 +164,7 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
     [ ] 12.4.2 favourites — Retrieve all favourites (Favourites.GetFavourites)
 
 [ ] 12.5 Files
-    [ ] 12.5.1 directory — Get the directories and files in the given directory (Files.GetDirectory)
+    [x] 12.5.1 directory — Get the directories and files in the given directory (Files.GetDirectory)
         Besides real paths it browses virtual library paths — the only way to
         ENUMERATE people (there is no VideoLibrary.GetActors method).
         Verified on local Kodi with media:"video":
