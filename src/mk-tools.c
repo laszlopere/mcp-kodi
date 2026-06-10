@@ -2619,6 +2619,61 @@ handler_getplaylist (MkTools *self, const MkToolDef *def, JsonObject *args,
   return json_builder_get_root (b);
 }
 
+/* ---- dropplaylists (§11.6.9) -----------------------------------------------
+ *
+ * Empty the queues: Playlist.Clear on each of Kodi's three fixed playlists so
+ * no queued items remain anywhere — the destructive counterpart of
+ * `getplaylist` (§11.6.8), and the whole-device sibling of `stop`'s single
+ * clear (§11.6.1.3).
+ */
+
+/**
+ * handler_dropplaylists:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments (optional `instance`), or NULL.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `dropplaylists` tool (§11.6.9): `Playlist.Clear` on each of
+ * Kodi's three fixed playlist ids (audio 0 / video 1 / picture 2 — the
+ * mk_playlist_types order), so no queued items remain. Plural by design: one
+ * call clears all three, with no way to pick — clearing a single, known
+ * playlist is `stop`'s narrower job (§11.6.1.3). Kodi's clear on the *active*
+ * playlist leaves the current item playing — only the queue behind it is
+ * emptied — so this never interrupts playback; the post-clear player_state()
+ * snapshot shows whatever is still playing, now with nothing queued after it.
+ *
+ * The clears run in fixed id order and the first failure aborts the rest: a
+ * box that refuses one clear would refuse them all the same way, and a
+ * partial-success tally would only blur the error.
+ *
+ * @return the post-clear player_state() snapshot, or NULL with @error set.
+ */
+static JsonNode *
+handler_dropplaylists (MkTools *self, const MkToolDef *def, JsonObject *args,
+                       GError **error)
+{
+  (void) def;
+  const char *instance = arg_instance (args);
+
+  for (gsize i = 0; mk_playlist_types[i] != NULL; i++)
+    {
+      g_autoptr (JsonBuilder) b = json_builder_new ();
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "playlistid");
+      json_builder_add_int_value (b, (gint64) i);
+      json_builder_end_object (b);
+      g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+      g_autoptr (JsonNode) cleared =
+        mk_kodi_call (self->kodi, instance, "Playlist.Clear", params, error);
+      if (cleared == NULL)
+        return NULL;
+    }
+
+  return player_state (self, instance, error);
+}
+
 /* ---- rpc (§11.6.6) --------------------------------------------------------
  *
  * The escape hatch: send any JSON-RPC method to a box and return Kodi's raw
@@ -3221,6 +3276,33 @@ static const MkToolDef mk_tool_defs[] = {
                    "video/picture), which always wins — plus the position of "
                    "the now-playing item. An empty queue is an empty list.",
     schema_getplaylist, handler_getplaylist, NULL },
+
+  /**
+   * dropplaylists (Playback tool):
+   *
+   * Empty the queues: clear all three of Kodi's fixed playlists (audio /
+   * video / picture) in one call, so no queued items remain anywhere
+   * (§11.6.9). Plural by design — there is no picking one; clearing only the
+   * playlist being played is what `stop` does (§11.6.1.3). Clearing the
+   * active playlist leaves the current item playing — only the queue behind
+   * it is emptied — so playback is never interrupted; to also stop what is
+   * playing, call `stop`. Read the queues first with `getplaylist` (§11.6.8)
+   * if their content matters: the drop is not undoable.
+   *
+   * Call:  Playlist.Clear { playlistid } for ids 0, 1 and 2, then
+   *        player_state() to report the (unchanged) playback.
+   * @param instance (optional): the Kodi instance to target; omitted uses the
+   *        configured default (§5.1).
+   * @return the player-state snapshot (player_state()) — whatever was playing
+   *         still is, now with nothing queued behind it; idle boxes report
+   *         `{ "state": "stopped" }`.
+   */
+  { "dropplaylists", "Empty all queues: clear the audio, video and picture "
+                     "playlists in one call. The current item keeps playing — "
+                     "only the queued items behind it are removed — so "
+                     "playback is never interrupted. Not undoable; inspect "
+                     "with getplaylist first if the content matters.",
+    schema_instance_only, handler_dropplaylists, NULL },
 
   /* ---- History tool — read back the local playback log; no Kodi call
    *      (§13.10). ---- */
