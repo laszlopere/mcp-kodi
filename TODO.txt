@@ -137,6 +137,18 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             both ways. Tool surface only: internal symbols (handler_/
             schema_search, search_music, unit case names) keep their
             names. tests/search.test → searchmedia.test
+        [x] 11.6.4.6 music needs artist OR title — album-title-only queries
+            ("play Mezzanine", artist unknown) used to be refused even
+            though movie/tv-show accept any single anchor; now a music
+            query without artist resolves the album title LIBRARY-WIDE to
+            one album (GetAlbums + server-side {album contains} rule,
+            verified live — exact match preferred, same single-container
+            resolve tv-show applies to its title) and drills its songs via
+            GetSongs {albumid}; resolved carries album/albumid instead of
+            artist/artistid; number still pins a track (app-side filter);
+            neither anchor remains a clean tool error naming both
+            (tests/searchmedia.test §3/§7, unit
+            search-music-{album-only,no-args})
     [x] 11.6.5 playfile — play one file via Player.Open {item:{file}}
         (KODI-API 12.10.9); any path, in-library or not; auto-selects the
         audio/video player; Kodi enriches a scanned file back to its

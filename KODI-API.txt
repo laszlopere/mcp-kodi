@@ -24,6 +24,11 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
     [ ] 12.3.2 export — Exports all items from the audio library (AudioLibrary.Export)
     [ ] 12.3.3 albumDetails — Retrieve details about a specific album (AudioLibrary.GetAlbumDetails)
     [x] 12.3.4 albums — Retrieve all albums from specified artist (and role) or that has songs of the specified genre (AudioLibrary.GetAlbums) — see chain in 12.3.6 (step 2): {"artistid": N} or {"genreid": N} filter.
+        Besides the special id filters, the standard List.Filter rule
+        {"field": "album", "operator": "contains", "value": "..."} matches
+        album titles LIBRARY-WIDE server-side (verified live on the local
+        test Kodi). Used by searchmedia's album-anchored music path (TODO
+        11.6.4.6) to resolve an album when no artist is given.
     [ ] 12.3.5 artistDetails — Retrieve details about a specific artist (AudioLibrary.GetArtistDetails)
         Takes the artistid from 12.3.6 plus properties (Audio.Fields.Artist:
         description, genre, formed/born, disbanded/died, yearsactive, type,
