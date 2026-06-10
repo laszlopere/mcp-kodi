@@ -47,6 +47,10 @@ struct _MkToolDef
    * "pause", "stop"); handler_mute() reads it as the SetMute value ("true" to
    * mute, "false" to unmute). */
   const char   *action;
+  /* Result-shape schema (MCP `outputSchema`, spec 2025-06-18), or NULL when
+   * the result has no fixed shape (`rpc`). A tool that declares one also gets
+   * its successful result mirrored as `structuredContent` (mk_tools_call()). */
+  MkToolSchema  out_schema;
 };
 
 /* ---- JSON Schema builders -------------------------------------------------
@@ -147,6 +151,47 @@ prop_enum (JsonBuilder *b, const char *name, const char *const *values,
       json_builder_set_member_name (b, "description");
       json_builder_add_string_value (b, desc);
     }
+  json_builder_end_object (b);
+}
+
+/**
+ * prop_array_obj:
+ * @b: the builder, positioned inside a `properties` object.
+ * @name: the property name.
+ * @item_desc: a description of the item objects' members, or NULL.
+ * @desc: a description of the array property itself, or NULL.
+ *
+ * Adds `"<name>": { "type": "array"[, "description": <desc>], "items":
+ * { "type": "object"[, "description": <item_desc>] } }` — an array of open
+ * objects whose members are documented in @item_desc rather than pinned as
+ * sub-properties. Used by the output schemas for row/entry arrays, whose
+ * members genuinely vary per media type (a movie row carries no artist; a
+ * playlist item's id key is the dynamic `<type>id`), so a fixed property
+ * list would misdescribe them.
+ */
+static void
+prop_array_obj (JsonBuilder *b, const char *name, const char *item_desc,
+                const char *desc)
+{
+  json_builder_set_member_name (b, name);
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "type");
+  json_builder_add_string_value (b, "array");
+  if (desc != NULL)
+    {
+      json_builder_set_member_name (b, "description");
+      json_builder_add_string_value (b, desc);
+    }
+  json_builder_set_member_name (b, "items");
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "type");
+  json_builder_add_string_value (b, "object");
+  if (item_desc != NULL)
+    {
+      json_builder_set_member_name (b, "description");
+      json_builder_add_string_value (b, item_desc);
+    }
+  json_builder_end_object (b);
   json_builder_end_object (b);
 }
 
@@ -4209,13 +4254,332 @@ handler_history (MkTools *self, const MkToolDef *def, JsonObject *args,
   return json_builder_get_root (b);
 }
 
+/* ---- Output schemas --------------------------------------------------------
+ *
+ * MCP `outputSchema` builders (spec revision 2025-06-18): one per distinct
+ * result shape, attached to a tool via MkToolDef.out_schema, emitted by
+ * mk_tools_list() and honoured by mk_tools_call(), which mirrors a declaring
+ * tool's successful result as `structuredContent`. Envelope members are typed
+ * precisely; row/entry objects stay open (prop_array_obj()) because their
+ * members vary per media type. Older protocol revisions simply ignore the
+ * extra member. `rpc` declares none: it returns Kodi's raw result verbatim,
+ * which need not even be an object.
+ */
+
+/**
+ * out_schema_snapshot:
+ * @self: the table (unused; the shape is fixed).
+ *
+ * Output schema of the player-state snapshot (player_state()) shared by every
+ * playback-affecting tool and `noop`. Only `state` is guaranteed: the rest
+ * appears when a player is active, the per-media fields only where they
+ * apply, and an empty field is omitted rather than emitted blank.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+out_schema_snapshot (MkTools *self)
+{
+  (void) self;
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  static const char *const states[] = { "playing", "paused", "stopped", NULL };
+  prop_enum (b, "state", states,
+             "Playback state; \"stopped\" means nothing is loaded.");
+  static const char *const players[] = { "audio", "video", "picture", NULL };
+  prop_enum (b, "type", players, "The active player kind.");
+  prop_typed (b, "media", "string",
+              "Real media type (song/episode/movie/musicvideo/…); \"unknown\" "
+              "for an off-library file.");
+  prop_typed (b, "id", "integer",
+              "Library id of the playing item; -1 when off-library.");
+  prop_typed (b, "file", "string", "Path of the playing item.");
+  prop_typed (b, "label", "string", "Kodi's display label for the item.");
+  prop_typed (b, "title", "string", "The item's title (may be empty).");
+  prop_typed (b, "showtitle", "string", "TV episode: the show's name.");
+  prop_typed (b, "season", "integer", "TV episode: season number.");
+  prop_typed (b, "episode", "integer", "TV episode: episode number.");
+  prop_typed (b, "album", "string", "Song: the album name.");
+  prop_typed (b, "artist", "array",
+              "Song: the performers, an array of strings.");
+  prop_typed (b, "track", "integer", "Song: track number on the album.");
+  prop_typed (b, "time", "object",
+              "Playback position { hours, minutes, seconds, milliseconds }.");
+  prop_typed (b, "totaltime", "object",
+              "The item's duration, same shape as time.");
+
+  static const char *const required[] = { "state", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * audio_out_schema:
+ * @with_bounds: also include the fixed `min`/`max` volume bounds (the
+ *               `volume` Knob's extension of the shared audio shape).
+ *
+ * Builds the audio-state output schema — `{ "muted", "volume" }`, optionally
+ * with `min`/`max` — the schema twin of audio_snapshot()'s @with_bounds.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+audio_out_schema (gboolean with_bounds)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_typed (b, "muted", "boolean", "Whether audio output is muted.");
+  prop_typed (b, "volume", "integer", "The application volume, 0-100.");
+  if (with_bounds)
+    {
+      prop_typed (b, "min", "integer", "Lower volume bound (always 0).");
+      prop_typed (b, "max", "integer", "Upper volume bound (always 100).");
+    }
+
+  static const char *const req[] = { "muted", "volume", NULL };
+  static const char *const req_bounds[] =
+    { "muted", "volume", "min", "max", NULL };
+  schema_end (b, with_bounds ? req_bounds : req);
+  return json_builder_get_root (b);
+}
+
+/**
+ * out_schema_audio:
+ * @self: the table (unused; the shape is fixed).
+ *
+ * Output schema of `mute`/`unmute`: the shared audio state without bounds.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+out_schema_audio (MkTools *self)
+{
+  (void) self;
+  return audio_out_schema (FALSE);
+}
+
+/**
+ * out_schema_volume:
+ * @self: the table (unused; the shape is fixed).
+ *
+ * Output schema of the `volume` Knob: the audio state plus the fixed scale
+ * bounds, so the schema also tells the caller the step arithmetic's range.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+out_schema_volume (MkTools *self)
+{
+  (void) self;
+  return audio_out_schema (TRUE);
+}
+
+/**
+ * out_schema_instances:
+ * @self: the table (unused; the shape is fixed).
+ *
+ * Output schema of the `instances` config tool: the shared response shape
+ * built by instances_list(), returned by all three actions.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+out_schema_instances (MkTools *self)
+{
+  (void) self;
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  /* `default` is string-or-null — beyond prop_typed's single type. */
+  json_builder_set_member_name (b, "default");
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "type");
+  json_builder_begin_array (b);
+  json_builder_add_string_value (b, "string");
+  json_builder_add_string_value (b, "null");
+  json_builder_end_array (b);
+  json_builder_set_member_name (b, "description");
+  json_builder_add_string_value (
+    b, "Key of the default instance, or null when none is configured.");
+  json_builder_end_object (b);
+
+  prop_array_obj (b, "instances",
+                  "{ \"key\", \"name\"?, \"host\", \"scheme\", \"insecure\", "
+                  "\"has_auth\", \"allow_rpc\" } — has_auth stands in for the "
+                  "write-only password; allow_rpc is read-only here.",
+                  "The configured instances, in sorted key order.");
+
+  static const char *const required[] = { "default", "instances", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * paging_out_props:
+ * @b: the builder, positioned inside a `properties` object.
+ *
+ * Adds the shared paged-envelope members — `total`, `returned`, `offset`,
+ * `truncated` — emitted identically by the searchmedia/contributors/history
+ * envelopes, so their output schemas describe them with one voice.
+ */
+static void
+paging_out_props (JsonBuilder *b)
+{
+  prop_typed (b, "total", "integer",
+              "Full match count, before any paging.");
+  prop_typed (b, "returned", "integer", "Rows in this page.");
+  prop_typed (b, "offset", "integer", "Rows skipped before this page.");
+  prop_typed (b, "truncated", "boolean",
+              "Whether matches remain beyond this page.");
+}
+
+/**
+ * out_schema_search:
+ * @self: the table (unused; the shape is fixed).
+ *
+ * Output schema of `searchmedia`: the paged envelope built by
+ * build_search_result(), with the leaf rows left open per media type.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+out_schema_search (MkTools *self)
+{
+  (void) self;
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  static const char *const types[] = { "music", "tv-show", "movie", NULL };
+  prop_enum (b, "type", types, "The searched media type, echoed back.");
+  paging_out_props (b);
+  prop_typed (b, "approximate", "boolean",
+              "Present (true) when total/paging are app-side estimates (a "
+              "substring title matched several albums).");
+  prop_typed (b, "resolved", "object",
+              "The container the query resolved to — { \"artist\"?|\"show\"?, "
+              "\"artistid\"|\"tvshowid\" } — when it drilled through one.");
+  prop_array_obj (b, "rows",
+                  "A playable leaf: { \"file\", \"<media>id\", \"label\", "
+                  "\"title\", … } plus per-media fields (artist/album/track, "
+                  "showtitle/season/episode, year). \"file\" is the playfile "
+                  "input.",
+                  "The matching leaf rows, paged.");
+
+  static const char *const required[] =
+    { "type", "total", "returned", "offset", "truncated", "rows", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * out_schema_contributors:
+ * @self: the table (unused; the shape is fixed).
+ *
+ * Output schema of `contributors`: the paged envelope built by
+ * build_contributors_result() over the merged person rows.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+out_schema_contributors (MkTools *self)
+{
+  (void) self;
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  paging_out_props (b);
+  prop_array_obj (b, "rows",
+                  "{ \"name\", \"in\": [\"albums\"|\"songs\"|\"movies\"|"
+                  "\"tvshows\"] } — the containers where the person yields "
+                  "hits; feed the exact name back into searchmedia.",
+                  "The matching people, merged and sorted by name.");
+
+  static const char *const required[] =
+    { "total", "returned", "offset", "truncated", "rows", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * out_schema_getplaylist:
+ * @self: the table (unused; the shape is fixed).
+ *
+ * Output schema of `getplaylist`: the queue listing, with `type` and
+ * `position` present only when resolvable (see handler_getplaylist()).
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+out_schema_getplaylist (MkTools *self)
+{
+  (void) self;
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  static const char *const types[] = { "audio", "video", "picture", NULL };
+  prop_enum (b, "type", types, "The playlist read, when one was resolved.");
+  prop_typed (b, "total", "integer", "Number of queued items.");
+  prop_typed (b, "position", "integer",
+              "Index of the now-playing item — present only when the "
+              "playlist read is the active player's own.");
+  prop_array_obj (b, "items",
+                  "{ \"<type>id\"?, \"file\"?, \"label\"?, \"type\" } — the id "
+                  "key is dynamic (songid/episodeid/…) and re-queueable "
+                  "as-is; file is playfile-ready.",
+                  "The queued items, in playback order.");
+
+  static const char *const required[] = { "total", "items", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * out_schema_history:
+ * @self: the table (unused; the shape is fixed).
+ *
+ * Output schema of the `history` tool: the paged envelope built by
+ * handler_history(), echoing the window/instance filters when given.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+out_schema_history (MkTools *self)
+{
+  (void) self;
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_typed (b, "instance", "string",
+              "The instance filter, echoed when one was given.");
+  prop_typed (b, "since", "string",
+              "The window's lower bound, echoed when one was given.");
+  prop_typed (b, "until", "string",
+              "The window's upper bound, echoed when one was given.");
+  paging_out_props (b);
+  prop_array_obj (b, "entries",
+                  "{ \"at\", \"last_seen\"?, \"instance\", \"name\"?, "
+                  "\"kind\", \"media\"?, \"id\"?, \"title\"?, \"file\"?, … } "
+                  "plus per-media fields (artist/album/track, showtitle/"
+                  "season/episode). at = first sighting (ISO-8601 UTC), "
+                  "last_seen appears once a play is re-observed.",
+                  "The matching history records.");
+
+  static const char *const required[] =
+    { "total", "returned", "offset", "truncated", "entries", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
 /* ---- The tool table -------------------------------------------------------
  *
  * Being rebuilt from the comprehensive Kodi JSON-RPC inventory (../KODI-API.txt)
  * grouped by tool kind — Buttons, Knobs, config, search, playback, history,
  * and the rpc escape hatch. Each tool is a
- * `{ name, description, schema, handler, action }` row; a NULL handler yields a
- * clean "not implemented" result.
+ * `{ name, description, schema, handler, action, out_schema }` row; a NULL
+ * handler yields a clean "not implemented" result, a NULL out_schema means
+ * the result has no fixed shape to declare (`rpc`).
  */
 static const MkToolDef mk_tool_defs[] = {
   /* ---- Buttons — argument-free remote keypresses via Input.ExecuteAction.
@@ -4242,8 +4606,10 @@ static const MkToolDef mk_tool_defs[] = {
    */
   { "play", "Press Play on the Kodi remote: resumes paused playback only — it "
             "cannot start new content (with nothing loaded it is a no-op); "
-            "use playfile to start something.",
-    schema_instance_only, handler_button, "play" },
+            "use playfile to start something. Returns the player-state "
+            "snapshot { \"state\", \"media\", \"id\", \"title\", \"artist\", "
+            "\"time\", \"totaltime\", … }.",
+    schema_instance_only, handler_button, "play", out_schema_snapshot },
 
   /**
    * pause (Button):
@@ -4260,8 +4626,10 @@ static const MkToolDef mk_tool_defs[] = {
    *         loaded the action is a no-op and the reply is `{ "state": "stopped" }`.
    */
   { "pause", "Press Pause on the Kodi remote: pause the active player on the "
-             "target instance.",
-    schema_instance_only, handler_button, "pause" },
+             "target instance. Returns the player-state snapshot { \"state\", "
+             "\"media\", \"id\", \"title\", \"artist\", \"time\", "
+             "\"totaltime\", … }.",
+    schema_instance_only, handler_button, "pause", out_schema_snapshot },
 
   /**
    * stop (Button):
@@ -4285,8 +4653,9 @@ static const MkToolDef mk_tool_defs[] = {
    */
   { "stop", "Press Stop on the Kodi remote: stop the active player on the "
             "target instance and clear the playlist it was playing, so no "
-            "queued items linger.",
-    schema_instance_only, handler_stop, "stop" },
+            "queued items linger. Returns the player-state snapshot — "
+            "{ \"state\": \"stopped\" } after a successful stop.",
+    schema_instance_only, handler_stop, "stop", out_schema_snapshot },
 
   /**
    * mute (Button):
@@ -4302,8 +4671,9 @@ static const MkToolDef mk_tool_defs[] = {
    * @return the resulting audio-state snapshot: `{ "muted": true, "volume": <int> }`
    *         (app_audio_state()).
    */
-  { "mute", "Mute the target instance's audio output.",
-    schema_instance_only, handler_mute, "true" },
+  { "mute", "Mute the target instance's audio output. Returns { \"muted\", "
+            "\"volume\" }.",
+    schema_instance_only, handler_mute, "true", out_schema_audio },
 
   /**
    * unmute (Button):
@@ -4319,8 +4689,9 @@ static const MkToolDef mk_tool_defs[] = {
    * @return the resulting audio-state snapshot: `{ "muted": false, "volume": <int> }`
    *         (app_audio_state()).
    */
-  { "unmute", "Unmute the target instance's audio output.",
-    schema_instance_only, handler_mute, "false" },
+  { "unmute", "Unmute the target instance's audio output. Returns "
+              "{ \"muted\", \"volume\" }.",
+    schema_instance_only, handler_mute, "false", out_schema_audio },
 
   /* ---- Knobs — adjust a scalar relative to its live value. ---- */
 
@@ -4345,8 +4716,8 @@ static const MkToolDef mk_tool_defs[] = {
    */
   { "volume", "Adjust the target instance's volume by a relative step (in "
               "percentage points); step 0 or omitted just reports the current "
-              "volume. Returns volume, mute state, and the min/max bounds.",
-    schema_volume, handler_volume, NULL },
+              "volume. Returns { \"muted\", \"volume\", \"min\", \"max\" }.",
+    schema_volume, handler_volume, NULL, out_schema_volume },
 
   /**
    * noop (Button):
@@ -4366,8 +4737,11 @@ static const MkToolDef mk_tool_defs[] = {
    *         unreachable and why.
    */
   { "noop", "Report the target instance's player state without changing "
-            "anything — a reachability and state probe.",
-    schema_instance_only, handler_noop, NULL },
+            "anything — a reachability and state probe. Returns the "
+            "player-state snapshot { \"state\", \"media\", \"id\", \"title\", "
+            "\"artist\", \"time\", \"totaltime\", … }; { \"state\": "
+            "\"stopped\" } when idle.",
+    schema_instance_only, handler_noop, NULL, out_schema_snapshot },
 
   /* ---- Config tools — read/write the server's own instance config.
    *      These make no Kodi call. ---- */
@@ -4395,8 +4769,10 @@ static const MkToolDef mk_tool_defs[] = {
    */
   { "instances", "Read or modify the configured Kodi instances "
                  "(action: get/set/remove). Manages the MCP server's own "
-                 "config, not a Kodi device.",
-    schema_instances, handler_instances, NULL },
+                 "config, not a Kodi device. Returns { \"default\", "
+                 "\"instances\": [ { \"key\", \"host\", \"scheme\", "
+                 "\"insecure\", \"has_auth\", \"allow_rpc\", … } ] }.",
+    schema_instances, handler_instances, NULL, out_schema_instances },
 
   /* ---- Search tools — resolve the library by name down to playable leaf
    *      files; no Kodi state change. ---- */
@@ -4449,8 +4825,11 @@ static const MkToolDef mk_tool_defs[] = {
                    "songs cannot be matched by their own title. Movie and "
                    "tv-show queries can also filter by actor/director. Finds "
                    "media items only — for people lookups (bands, artists, "
-                   "who is in the library) use `contributors`.",
-    schema_search, handler_search, NULL },
+                   "who is in the library) use `contributors`. Returns "
+                   "{ \"type\", \"total\", \"returned\", \"offset\", "
+                   "\"truncated\", \"rows\": [ { \"file\", \"<media>id\", "
+                   "\"label\", \"title\", … } ] }.",
+    schema_search, handler_search, NULL, out_schema_search },
 
   /**
    * contributors (Search tool):
@@ -4495,8 +4874,10 @@ static const MkToolDef mk_tool_defs[] = {
                     "optional type (band/composer/actor/director) — e.g. "
                     "{type: \"band\"} lists all bands. Rows {name, in: "
                     "[albums|songs|movies|tvshows]} say where each name yields "
-                    "hits — feed the exact name back into `searchmedia` to drill.",
-    schema_contributors, handler_contributors, NULL },
+                    "hits — feed the exact name back into `searchmedia` to "
+                    "drill. Returns { \"total\", \"returned\", \"offset\", "
+                    "\"truncated\", \"rows\" }.",
+    schema_contributors, handler_contributors, NULL, out_schema_contributors },
 
   /* ---- Playback tools — open content on a player. ---- */
 
@@ -4529,8 +4910,10 @@ static const MkToolDef mk_tool_defs[] = {
   { "playfile", "Play one file by path (e.g. a `searchmedia` result's `file`): "
                 "Player.Open auto-selects the audio/video player. Works for any "
                 "reachable path, in-library or not. A file missing from disk "
-                "(stale library entry) is reported as an error.",
-    schema_playfile, handler_playfile, NULL },
+                "(stale library entry) is reported as an error. Returns the "
+                "player-state snapshot { \"state\", \"media\", \"id\", "
+                "\"title\", \"artist\", \"time\", \"totaltime\", … }.",
+    schema_playfile, handler_playfile, NULL, out_schema_snapshot },
 
   /**
    * queue (Playback tool):
@@ -4567,8 +4950,10 @@ static const MkToolDef mk_tool_defs[] = {
              "playback: a `searchmedia` row's library id (type+id) or a file path; "
              "next:true plays it right after the current item. Something must "
              "already be playing (start with play/playfile). An item whose "
-             "file is missing from disk (stale library entry) is refused.",
-    schema_queue, handler_queue, NULL },
+             "file is missing from disk (stale library entry) is refused. "
+             "Returns the player-state snapshot, unchanged by the add — the "
+             "current item keeps playing.",
+    schema_queue, handler_queue, NULL, out_schema_snapshot },
 
   /**
    * getplaylist (Playback tool):
@@ -4597,8 +4982,10 @@ static const MkToolDef mk_tool_defs[] = {
   { "getplaylist", "Read the queue without changing it: the items of the "
                    "active player's playlist — or of a named one (audio/"
                    "video/picture), which always wins — plus the position of "
-                   "the now-playing item. An empty queue is an empty list.",
-    schema_getplaylist, handler_getplaylist, NULL },
+                   "the now-playing item. An empty queue is an empty list. "
+                   "Returns { \"type\"?, \"total\", \"position\"?, \"items\": "
+                   "[ { \"<type>id\", \"file\", \"label\", \"type\" } ] }.",
+    schema_getplaylist, handler_getplaylist, NULL, out_schema_getplaylist },
 
   /**
    * dropplaylists (Playback tool):
@@ -4624,8 +5011,10 @@ static const MkToolDef mk_tool_defs[] = {
                      "playlists in one call. The current item keeps playing — "
                      "only the queued items behind it are removed — so "
                      "playback is never interrupted. Not undoable; inspect "
-                     "with getplaylist first if the content matters.",
-    schema_instance_only, handler_dropplaylists, NULL },
+                     "with getplaylist first if the content matters. Returns "
+                     "the player-state snapshot — whatever was playing still "
+                     "is, with nothing queued behind it.",
+    schema_instance_only, handler_dropplaylists, NULL, out_schema_snapshot },
 
   /* ---- History tool — read back the local playback log; no Kodi call. ---- */
 
@@ -4663,8 +5052,11 @@ static const MkToolDef mk_tool_defs[] = {
                "free-text match or an exact id; page with limit/offset/order, "
                "or ask for a count only. An omitted instance returns all "
                "boxes. Reads only the local log — no Kodi call, so it works "
-               "even when no box is reachable.",
-    schema_history, handler_history, NULL },
+               "even when no box is reachable. Returns { \"total\", "
+               "\"returned\", \"offset\", \"truncated\", \"entries\": [ "
+               "{ \"at\", \"instance\", \"kind\", \"media\", \"title\", "
+               "\"artist\", … } ] }.",
+    schema_history, handler_history, NULL, out_schema_history },
 
   /* ---- Escape hatch — raw JSON-RPC passthrough, opt-in per instance
    *      (gated by `allow_rpc`). ---- */
@@ -4694,7 +5086,9 @@ static const MkToolDef mk_tool_defs[] = {
   { "rpc", "Escape hatch: send a raw JSON-RPC method to Kodi and return its "
            "reply unchanged. Disabled unless the target instance has opted in "
            "(allow_rpc in the server config, set by hand only).",
-    schema_rpc, handler_rpc, NULL },
+    /* No out_schema: the result is Kodi's raw reply, verbatim — there is no
+     * fixed shape to declare, and it need not even be an object. */
+    schema_rpc, handler_rpc, NULL, NULL },
 };
 
 /**
@@ -4835,15 +5229,24 @@ error_text (const char *message, const char *category, const char *hint)
 /**
  * make_result:
  * @text: the JSON text payload for the single text content block; borrowed.
+ * @structured: the same payload as a live node for `structuredContent`, or
+ *              NULL to omit the member; borrowed (referenced, not copied).
  * @is_error: whether this result reports a tool-level failure.
  *
  * Builds the `tools/call` result envelope
- * `{ "content": [ { "type": "text", "text": <text> } ], "isError": <bool> }`.
+ * `{ "content": [ { "type": "text", "text": <text> } ],
+ *    "structuredContent"?: <structured>, "isError": <bool> }`.
+ * The text block always carries the payload — the channel every client reads,
+ * whatever protocol revision it negotiated; @structured mirrors it for
+ * clients that consume or validate against the tool's declared outputSchema
+ * (spec 2025-06-18). It is the success-path twin of that declaration —
+ * mk_tools_call() passes it only for tools with an out_schema, and never on
+ * errors, whose `{ "error", … }` shape is documented by error_text() instead.
  *
  * @return a newly allocated result node; free with json_node_unref().
  */
 static JsonNode *
-make_result (const char *text, gboolean is_error)
+make_result (const char *text, JsonNode *structured, gboolean is_error)
 {
   g_autoptr (JsonBuilder) b = json_builder_new ();
   json_builder_begin_object (b);
@@ -4857,6 +5260,12 @@ make_result (const char *text, gboolean is_error)
   json_builder_add_string_value (b, text);
   json_builder_end_object (b);
   json_builder_end_array (b);
+
+  if (structured != NULL)
+    {
+      json_builder_set_member_name (b, "structuredContent");
+      json_builder_add_value (b, json_node_ref (structured));
+    }
 
   json_builder_set_member_name (b, "isError");
   json_builder_add_boolean_value (b, is_error);
@@ -4924,8 +5333,10 @@ mk_tools_count (MkTools *self)
  * mk_tools_list:
  * @self: the table.
  *
- * Renders every tool as `{ "name", "description", "inputSchema" }` for
- * `tools/list`. With no tools wired yet this is an empty array.
+ * Renders every tool as `{ "name", "description", "inputSchema",
+ * "outputSchema"? }` for `tools/list` — `outputSchema` only for tools that
+ * declare a result shape (all but `rpc`). With no tools wired yet this is an
+ * empty array.
  *
  * @return a newly allocated JSON array node; free with json_node_unref().
  */
@@ -4946,6 +5357,11 @@ mk_tools_list (MkTools *self)
       json_builder_add_string_value (b, def->description);
       json_builder_set_member_name (b, "inputSchema");
       json_builder_add_value (b, def->schema (self)); /* takes ownership */
+      if (def->out_schema != NULL)
+        {
+          json_builder_set_member_name (b, "outputSchema");
+          json_builder_add_value (b, def->out_schema (self)); /* ownership */
+        }
       json_builder_end_object (b);
     }
   json_builder_end_array (b);
@@ -4960,9 +5376,10 @@ mk_tools_list (MkTools *self)
  * @error: return location for a GError, or NULL.
  *
  * Dispatches a `tools/call`. For a known tool, returns the result
- * envelope: on success the handler's JSON as text with `isError: false`; on a
- * handler failure (or a not-yet-implemented tool) the detail as JSON text with
- * `isError: true` — see error_text() for the shape. A server↔player
+ * envelope: on success the handler's JSON as text with `isError: false` —
+ * mirrored as `structuredContent` when the tool declares an outputSchema; on
+ * a handler failure (or a not-yet-implemented tool) the detail as JSON text
+ * with `isError: true` — see error_text() for the shape. A server↔player
  * communication failure additionally carries a `category` and a setup `hint`
  * (kodi_comms_hint()) so the AI can help the user fix connectivity. Only an
  * unknown @name returns NULL, with @error set to MK_TOOLS_ERROR_UNKNOWN_TOOL so
@@ -4993,7 +5410,7 @@ mk_tools_call (MkTools     *self,
       g_autofree char *msg =
         g_strdup_printf ("tool \"%s\" is not implemented yet", name);
       g_autofree char *text = error_text (msg, NULL, NULL);
-      return make_result (text, TRUE);
+      return make_result (text, NULL, TRUE);
     }
 
   GError *local = NULL;
@@ -5005,9 +5422,11 @@ mk_tools_call (MkTools     *self,
       g_autofree char *text =
         error_text (local ? local->message : "tool failed", category, hint);
       g_clear_error (&local);
-      return make_result (text, TRUE);
+      return make_result (text, NULL, TRUE);
     }
 
+  /* Tools that declare an outputSchema mirror the payload as
+   * structuredContent, per the spec contract the declaration makes. */
   g_autofree char *text = node_to_string (result);
-  return make_result (text, FALSE);
+  return make_result (text, def->out_schema != NULL ? result : NULL, FALSE);
 }

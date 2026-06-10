@@ -427,10 +427,15 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     talking to a stale binary (live session today still served the
     pre-11.13 history schema).
 
-[ ] 11.16 Result shapes are invisible to the model: envelopes (total/
+[x] 11.16 Result shapes are invisible to the model: envelopes (total/
     returned/offset/truncated, approximate, resolved, has_auth, last_seen)
     live only in Doxygen/README. Adopt MCP outputSchema, or add a short
     shape clause to each description (volume already does this).
+    Done as both: every tool but rpc declares an outputSchema (out_schema
+    table member; structuredContent mirrors successful results), and every
+    description carries a "Returns {...}" shape clause — the only channel
+    guaranteed to reach the model (Claude Code does not surface
+    outputSchema in the model-visible tool definition).
 
 [ ] 11.17 Rename/alias noop — same discoverability argument as the
     11.6.4.5 search→searchmedia rename: an assistant hunting "what's

@@ -80,6 +80,14 @@ also adds the `min`/`max` bounds). The read tools (`searchmedia`,
 `contributors`, `getplaylist`, `history`) return their own paged result
 envelopes.
 
+Every tool except `rpc` declares these shapes as an MCP `outputSchema`
+(spec revision 2025-06-18) and mirrors each successful result as
+`structuredContent` alongside the JSON text block, so schema-aware clients
+can validate and consume results without parsing. Each description also
+states the result shape inline — the channel every client shows the model.
+`rpc` declares none: it returns Kodi's raw reply verbatim, which has no
+fixed shape.
+
 ### The `rpc` escape hatch
 
 `rpc` POSTs any JSON-RPC method you name to the target box and hands back Kodi's

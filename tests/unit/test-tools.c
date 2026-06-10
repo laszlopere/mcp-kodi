@@ -82,8 +82,11 @@ case_tools_list_shape (void)
   /* one entry per tool */
   MK_CHECK_INT_EQ (json_array_get_length (arr), count);
 
-  /* every entry is { name:string, description:string, inputSchema:object } */
+  /* every entry is { name:string, description:string, inputSchema:object };
+   * every tool but rpc also declares an outputSchema object, rpc none (its
+   * result is Kodi's raw reply, shapeless by design) */
   gboolean all_well_formed = TRUE;
+  gboolean out_schemas_ok = TRUE;
   gboolean saw_noop = FALSE;
   for (guint i = 0; i < json_array_get_length (arr); i++)
     {
@@ -100,8 +103,18 @@ case_tools_list_shape (void)
       const char *name = json_object_get_string_member (e, "name");
       if (name != NULL && strcmp (name, "noop") == 0)
         saw_noop = TRUE;
+      if (name != NULL && strcmp (name, "rpc") == 0)
+        {
+          if (json_object_has_member (e, "outputSchema"))
+            out_schemas_ok = FALSE;
+        }
+      else if (!json_object_has_member (e, "outputSchema")
+               || !JSON_NODE_HOLDS_OBJECT (
+                    json_object_get_member (e, "outputSchema")))
+        out_schemas_ok = FALSE;
     }
   MK_CHECK (all_well_formed);
+  MK_CHECK (out_schemas_ok);
   MK_CHECK (saw_noop);
 
   /* listing the table makes no Kodi call */
@@ -302,6 +315,19 @@ case_noop_routes_through_stub (void)
           MK_CHECK_STR_EQ (json_object_get_string_member (s, "state"),
                            "playing");
           MK_CHECK_STR_EQ (json_object_get_string_member (s, "type"), "audio");
+        }
+
+      /* noop declares an outputSchema, so the same payload also rides as
+       * structuredContent — the schema-validatable mirror of the text */
+      MK_CHECK (json_object_has_member (o, "structuredContent"));
+      if (json_object_has_member (o, "structuredContent"))
+        {
+          JsonObject *sc =
+            json_object_get_object_member (o, "structuredContent");
+          MK_CHECK (sc != NULL);
+          if (sc != NULL)
+            MK_CHECK_STR_EQ (json_object_get_string_member (sc, "state"),
+                             "playing");
         }
     }
 
