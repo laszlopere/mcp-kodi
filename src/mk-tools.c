@@ -2497,6 +2497,204 @@ handler_contributors (MkTools *self, const MkToolDef *def, JsonObject *args,
   return build_contributors_result (rows, offset, limit, count);
 }
 
+/* ---- missing-media detection (TODO 11.12) ----------------------------------
+ *
+ * Kodi disk-checks a plain path in Player.Open / Playlist.Add only when the
+ * path is NOT in the library: an unknown missing path is refused outright
+ * ("Invalid params"), but a path the library still lists — the file deleted or
+ * its share moved after the last scan — is accepted with "OK" and playback
+ * just silently never starts (a doomed open even stops whatever was playing).
+ * A library id is never disk-checked at all. Verified live on Kodi 19.4 and
+ * 20.5. So the playback tools verify the file on disk themselves before
+ * touching the player: Files.GetDirectory (KODI-API 12.5.1) is a true disk
+ * listing, so "is the file really there, as seen from the Kodi box?" is
+ * answerable in one call by listing the file's parent directory.
+ *
+ * One caveat shapes the verdict logic: Files.GetDirectory only lists paths
+ * inside the configured media sources — anywhere else it answers the same
+ * bare RPC error a truly nonexistent directory gets (verified live: an
+ * existing dir outside the sources errors, while an *empty* dir under a
+ * source lists fine as []). A refused listing is therefore meaningful only
+ * when the path sits under a media source (Files.GetSources); outside the
+ * sources the file is simply unverifiable and Kodi stays the authority — its
+ * own checks (it does disk-check non-library plain paths) and playfile's
+ * post-open backstop cover those.
+ */
+
+/**
+ * disk_checkable_path:
+ * @file: the path or URL a caller asked to play or queue.
+ *
+ * Says whether check_file_on_disk() can verify @file at all. Only
+ * filesystem-like paths are listable via Files.GetDirectory: absolute local
+ * paths and the smb://`/`nfs:// network shares libraries are scanned from.
+ * Anything else (http(s) streams, plugin:// and other virtual schemes) has no
+ * meaningful parent listing — a check would false-positive on perfectly
+ * playable URLs — so those are left for Kodi itself to accept or refuse.
+ *
+ * @return TRUE when @file is a listable filesystem path, FALSE to skip the
+ *         disk check.
+ */
+static gboolean
+disk_checkable_path (const char *file)
+{
+  return file[0] == '/'
+         || g_str_has_prefix (file, "smb://")
+         || g_str_has_prefix (file, "nfs://");
+}
+
+/**
+ * path_under_any_source:
+ * @self: the tool table.
+ * @instance: target instance name, or NULL for the configured default.
+ * @file: the path to test.
+ *
+ * Says whether @file sits under any configured media source (`Files.GetSources`,
+ * KODI-API 12.5.3, queried for both "music" and "video") — the area
+ * Files.GetDirectory is able to list, which decides whether a refused listing
+ * convicts the file as missing or merely means "outside the browsable area"
+ * (see check_file_on_disk()). Best-effort by design: a failing sources query —
+ * or an exotic source path (multipath:// et al.) that a plain prefix match
+ * cannot claim — reads as "not under a source", which only ever downgrades a
+ * would-be "missing" verdict to "unverifiable, let Kodi decide". Never fails
+ * the caller.
+ *
+ * @return TRUE when @file is prefix-covered by a music or video source.
+ */
+static gboolean
+path_under_any_source (MkTools *self, const char *instance, const char *file)
+{
+  static const char *const medias[] = { "music", "video", NULL };
+  for (gsize m = 0; medias[m] != NULL; m++)
+    {
+      g_autoptr (JsonBuilder) b = json_builder_new ();
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "media");
+      json_builder_add_string_value (b, medias[m]);
+      json_builder_end_object (b);
+      g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+      g_autoptr (GError) local = NULL;
+      g_autoptr (JsonNode) res = mk_kodi_call (self->kodi, instance,
+                                               "Files.GetSources", params,
+                                               &local);
+      if (res == NULL)
+        continue;
+
+      JsonObject *obj =
+        JSON_NODE_HOLDS_OBJECT (res) ? json_node_get_object (res) : NULL;
+      JsonNode *sn = obj != NULL ? json_object_get_member (obj, "sources") : NULL;
+      JsonArray *sources =
+        sn != NULL && JSON_NODE_HOLDS_ARRAY (sn) ? json_node_get_array (sn)
+                                                 : NULL;
+      for (guint i = 0;
+           sources != NULL && i < json_array_get_length (sources); i++)
+        {
+          JsonNode *en = json_array_get_element (sources, i);
+          if (!JSON_NODE_HOLDS_OBJECT (en))
+            continue;
+          const char *src = json_object_get_string_member_with_default (
+            json_node_get_object (en), "file", NULL);
+          if (src != NULL && src[0] != '\0' && g_str_has_prefix (file, src))
+            return TRUE;
+        }
+    }
+  return FALSE;
+}
+
+/**
+ * check_file_on_disk:
+ * @self: the tool table.
+ * @instance: target instance name, or NULL for the configured default.
+ * @file: the path to verify, as the Kodi box sees it.
+ * @why: out: on a "missing" verdict, a static human-readable reason; untouched
+ *       otherwise.
+ * @error: return location for a GError, or NULL.
+ *
+ * Verifies that @file exists on disk as seen from the target Kodi box, by
+ * listing the file's parent directory with `Files.GetDirectory { directory,
+ * media: "files" }` and looking for the exact path among the entries. `media`
+ * must be "files": the parameter is an extension filter and the schema default
+ * ("video") would hide every audio file, reading as "missing".
+ *
+ * A successful listing is authoritative: the file either is among the entries
+ * (present) or is not (verdict "missing" — an empty folder under a source
+ * lists fine as [], so absence really is absence). A listing Kodi refuses
+ * with an RPC error is ambiguous — a nonexistent directory and an existing
+ * one outside the configured media sources answer identically (see the
+ * section comment) — so the refusal convicts only a path that
+ * path_under_any_source() says Kodi should be able to list: there the folder
+ * (or its whole share) is really gone. Outside the sources the file is
+ * unverifiable and passes, like a non-filesystem path
+ * (disk_checkable_path() FALSE) or a path with no parent to list: Kodi
+ * remains the authority on what it can reach. Only a non-RPC failure
+ * (transport, auth, …) aborts — that says nothing about the file, so it
+ * propagates as the call failure it is.
+ *
+ * @return 0 when the file is present or unverifiable, 1 when it is verifiably
+ *         missing (*why says how it was determined), or -1 with @error set
+ *         when the probe itself failed.
+ */
+static int
+check_file_on_disk (MkTools *self, const char *instance, const char *file,
+                    const char **why, GError **error)
+{
+  if (!disk_checkable_path (file))
+    return 0;
+  const char *slash = g_strrstr (file, "/");
+  if (slash == NULL || slash[1] == '\0')
+    return 0; /* a directory or unparseable — let Kodi decide */
+  g_autofree char *dir = g_strndup (file, (gsize) (slash - file) + 1);
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "directory");
+  json_builder_add_string_value (b, dir);
+  json_builder_set_member_name (b, "media");
+  json_builder_add_string_value (b, "files");
+  json_builder_end_object (b);
+  g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+  g_autoptr (GError) local = NULL;
+  g_autoptr (JsonNode) listing = mk_kodi_call (self->kodi, instance,
+                                               "Files.GetDirectory", params,
+                                               &local);
+  if (listing == NULL)
+    {
+      if (!g_error_matches (local, MK_KODI_ERROR, MK_KODI_ERROR_RPC))
+        {
+          g_propagate_error (error, g_steal_pointer (&local));
+          return -1;
+        }
+      if (path_under_any_source (self, instance, file))
+        {
+          *why = "its folder sits inside a configured media source yet "
+                 "cannot be listed — the folder or its share is gone, "
+                 "renamed, or unmounted on the Kodi box";
+          return 1;
+        }
+      return 0; /* outside the media sources — unverifiable, let Kodi decide */
+    }
+
+  JsonObject *obj =
+    JSON_NODE_HOLDS_OBJECT (listing) ? json_node_get_object (listing) : NULL;
+  JsonNode *fn = obj != NULL ? json_object_get_member (obj, "files") : NULL;
+  JsonArray *entries =
+    fn != NULL && JSON_NODE_HOLDS_ARRAY (fn) ? json_node_get_array (fn) : NULL;
+  for (guint i = 0; entries != NULL && i < json_array_get_length (entries); i++)
+    {
+      JsonNode *en = json_array_get_element (entries, i);
+      if (!JSON_NODE_HOLDS_OBJECT (en))
+        continue;
+      const char *f = json_object_get_string_member_with_default (
+        json_node_get_object (en), "file", NULL);
+      if (g_strcmp0 (f, file) == 0)
+        return 0;
+    }
+  *why = "its folder lists fine but holds no such file";
+  return 1;
+}
+
 /* ---- playfile -------------------------------------------------------------
  *
  * Play one file by path. The natural partner to `search`: the caller
@@ -2551,8 +2749,21 @@ schema_playfile (MkTools *self)
  * — a brief settle delay before snapshotting makes the reported state reflect
  * the file that is now playing.
  *
+ * Missing media is reported as a proper tool error, never as success
+ * (TODO 11.12; see the missing-media section comment). Three layers:
+ *
+ *   1. A verifiably missing file (check_file_on_disk()) is refused *before*
+ *      Player.Open — a doomed open is not just useless, it stops whatever is
+ *      playing now.
+ *   2. A path Kodi itself refuses ("Invalid params" for an unknown missing
+ *      path) is reshaped into an error naming the file and the likely cause,
+ *      instead of surfacing Kodi's cryptic refusal verbatim.
+ *   3. If Kodi answered "OK" but the post-settle snapshot shows no active
+ *      player, the open silently died (the in-library missing-file case) —
+ *      that snapshot is discarded and the failure reported.
+ *
  * @return the post-open player-state object, or NULL with @error set (missing
- *         `file` or a call failure).
+ *         `file`, a missing/unplayable file, or a call failure).
  */
 static JsonNode *
 handler_playfile (MkTools *self, const MkToolDef *def, JsonObject *args,
@@ -2568,6 +2779,22 @@ handler_playfile (MkTools *self, const MkToolDef *def, JsonObject *args,
       return NULL;
     }
 
+  /* Layer 1: refuse a verifiably missing file before the open. */
+  {
+    const char *why = NULL;
+    int missing = check_file_on_disk (self, instance, file, &why, error);
+    if (missing < 0)
+      return NULL;
+    if (missing > 0)
+      {
+        g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                     "playfile: \"%s\" is missing from disk — %s; a library "
+                     "item pointing at it is stale (the library needs a "
+                     "clean/re-scan)", file, why);
+        return NULL;
+      }
+  }
+
   g_autoptr (JsonBuilder) b = json_builder_new ();
   json_builder_begin_object (b);
   json_builder_set_member_name (b, "item");
@@ -2578,13 +2805,42 @@ handler_playfile (MkTools *self, const MkToolDef *def, JsonObject *args,
   json_builder_end_object (b);
   g_autoptr (JsonNode) params = json_builder_get_root (b);
 
+  /* Layer 2: a refusal from Kodi itself (an unknown missing path is "Invalid
+   * params") gets reshaped to name the file and the likely cause. */
+  g_autoptr (GError) local = NULL;
   g_autoptr (JsonNode) opened = mk_kodi_call (self->kodi, instance, "Player.Open",
-                                              params, error);
+                                              params, &local);
   if (opened == NULL)
-    return NULL;
+    {
+      if (g_error_matches (local, MK_KODI_ERROR, MK_KODI_ERROR_RPC))
+        g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                     "playfile: Kodi refused to open \"%s\" (%s) — the path "
+                     "does not exist or is not reachable from the Kodi box",
+                     file, local->message);
+      else
+        g_propagate_error (error, g_steal_pointer (&local));
+      return NULL;
+    }
 
   g_usleep (MK_PLAYFILE_SETTLE_US);
-  return player_state (self, instance, error);
+  JsonNode *state = player_state (self, instance, error);
+  if (state == NULL)
+    return NULL;
+
+  /* Layer 3: "OK" with no active player after the settle means the open
+   * silently died — report the failure instead of a "stopped" success. */
+  if (g_strcmp0 (json_object_get_string_member_with_default (
+                   json_node_get_object (state), "state", ""),
+                 "stopped") == 0)
+    {
+      json_node_unref (state);
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "playfile: Kodi accepted \"%s\" but playback never started "
+                   "— the file is missing or unreadable on the Kodi box "
+                   "(a stale library entry?)", file);
+      return NULL;
+    }
+  return state;
 }
 
 /* ---- queue ----------------------------------------------------------------
@@ -2598,6 +2854,87 @@ handler_playfile (MkTools *self, const MkToolDef *def, JsonObject *args,
 /* The library id kinds `queue` accepts for its `type`/`id` pair — one per
  * `search` media type, each mapping to Kodi's `<type>id` item key. */
 static const char *const mk_queue_types[] = { "song", "episode", "movie", NULL };
+
+/**
+ * library_item_file:
+ * @self: the tool table.
+ * @instance: target instance name, or NULL for the configured default.
+ * @type: the item kind, one of mk_queue_types ("song"/"episode"/"movie").
+ * @id: the library id of that kind.
+ * @error: return location for a GError, or NULL.
+ *
+ * Resolves a library id to the file path its library entry points at, via the
+ * kind's details method (`AudioLibrary.GetSongDetails` /
+ * `VideoLibrary.GetEpisodeDetails` / `VideoLibrary.GetMovieDetails`, KODI-API
+ * 12.3 / 12.16) requesting just the `file` property — the input
+ * check_file_on_disk() needs to verify a queued library item (TODO 11.12;
+ * Playlist.Add never disk-checks an id). As a side effect an id that is not in
+ * the library at all gets a proper "no such item" error here, where Kodi's own
+ * reply would be a bare "Invalid params".
+ *
+ * @return the entry's file path as a newly allocated string — empty ("") when
+ *         the details carry no file, i.e. nothing to verify — or NULL with
+ *         @error set (an unknown id, or a call failure).
+ */
+static char *
+library_item_file (MkTools *self, const char *instance, const char *type,
+                   gint64 id, GError **error)
+{
+  const char *method, *idkey, *detkey;
+  if (g_str_equal (type, "song"))
+    {
+      method = "AudioLibrary.GetSongDetails";
+      idkey = "songid";
+      detkey = "songdetails";
+    }
+  else if (g_str_equal (type, "episode"))
+    {
+      method = "VideoLibrary.GetEpisodeDetails";
+      idkey = "episodeid";
+      detkey = "episodedetails";
+    }
+  else
+    {
+      method = "VideoLibrary.GetMovieDetails";
+      idkey = "movieid";
+      detkey = "moviedetails";
+    }
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, idkey);
+  json_builder_add_int_value (b, id);
+  json_builder_set_member_name (b, "properties");
+  json_builder_begin_array (b);
+  json_builder_add_string_value (b, "file");
+  json_builder_end_array (b);
+  json_builder_end_object (b);
+  g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+  g_autoptr (GError) local = NULL;
+  g_autoptr (JsonNode) res =
+    mk_kodi_call (self->kodi, instance, method, params, &local);
+  if (res == NULL)
+    {
+      if (g_error_matches (local, MK_KODI_ERROR, MK_KODI_ERROR_RPC))
+        g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                     "queue: no %s with id %" G_GINT64_FORMAT
+                     " in the library", type, id);
+      else
+        g_propagate_error (error, g_steal_pointer (&local));
+      return NULL;
+    }
+
+  JsonObject *obj =
+    JSON_NODE_HOLDS_OBJECT (res) ? json_node_get_object (res) : NULL;
+  JsonNode *dn = obj != NULL ? json_object_get_member (obj, detkey) : NULL;
+  JsonObject *det =
+    dn != NULL && JSON_NODE_HOLDS_OBJECT (dn) ? json_node_get_object (dn) : NULL;
+  return g_strdup (det != NULL
+                     ? json_object_get_string_member_with_default (det, "file",
+                                                                   "")
+                     : "");
+}
 
 /**
  * schema_queue:
@@ -2665,6 +3002,11 @@ schema_queue (MkTools *self)
  * type (song ↔ audio, episode/movie ↔ video) is refused before the add —
  * Kodi would accept the foreign item silently — while a `file`'s media type
  * is unknowable up front, so for files matching stays the caller's job.
+ * An item whose file is verifiably missing from disk is refused too
+ * (TODO 11.12; see the missing-media section comment): Kodi accepts such an
+ * item with "OK" and the failure would surface only when playback reaches it,
+ * so the path — given directly, or resolved from a library id via
+ * library_item_file() — is checked with check_file_on_disk() before the add.
  * Playback itself is untouched, so the returned player_state() snapshot
  * shows the still-playing current item — a same-item duplicate the history
  * dedup drops — and no settle delay is needed.
@@ -2766,6 +3108,35 @@ handler_queue (MkTools *self, const MkToolDef *def, JsonObject *args,
         }
     }
 
+  /* Missing media (TODO 11.12): Playlist.Add, like Player.Open, answers "OK"
+   * for a library item whose file has vanished from disk — the failure would
+   * surface only when playback reaches the item, long after this call claimed
+   * success. The path is resolvable up front for every item kind (an id
+   * through its library details), so verify it now and fail the add loudly
+   * instead. */
+  {
+    g_autofree char *path =
+      have_file ? g_strdup (file)
+                : library_item_file (self, instance, type, id, error);
+    if (path == NULL)
+      return NULL;
+    if (path[0] != '\0')
+      {
+        const char *why = NULL;
+        int missing = check_file_on_disk (self, instance, path, &why, error);
+        if (missing < 0)
+          return NULL;
+        if (missing > 0)
+          {
+            g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                         "queue: \"%s\" is missing from disk — %s; a library "
+                         "item pointing at it is stale (the library needs a "
+                         "clean/re-scan)", path, why);
+            return NULL;
+          }
+      }
+  }
+
   /* Step 3: append, or insert right after the current item. */
   gboolean next = arg_bool (args, "next");
   g_autoptr (JsonBuilder) b = json_builder_new ();
@@ -2794,11 +3165,28 @@ handler_queue (MkTools *self, const MkToolDef *def, JsonObject *args,
   json_builder_end_object (b);
   g_autoptr (JsonNode) params = json_builder_get_root (b);
 
+  /* Kodi disk-checks a plain non-library path right here (see the
+   * missing-media section comment) — reshape its bare "Invalid params" into
+   * an error naming the item and the likely cause. */
+  g_autoptr (GError) local = NULL;
   g_autoptr (JsonNode) added =
     mk_kodi_call (self->kodi, instance, next ? "Playlist.Insert" : "Playlist.Add",
-                  params, error);
+                  params, &local);
   if (added == NULL)
-    return NULL;
+    {
+      if (!g_error_matches (local, MK_KODI_ERROR, MK_KODI_ERROR_RPC))
+        g_propagate_error (error, g_steal_pointer (&local));
+      else if (have_file)
+        g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                     "queue: Kodi refused to add \"%s\" (%s) — the path does "
+                     "not exist or is not reachable from the Kodi box",
+                     file, local->message);
+      else
+        g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                     "queue: Kodi refused to add %s %" G_GINT64_FORMAT " (%s)",
+                     type, id, local->message);
+      return NULL;
+    }
 
   return player_state (self, instance, error);
 }
@@ -3619,20 +4007,26 @@ static const MkToolDef mk_tool_defs[] = {
    * matches a scanned library item, enriches the now-playing state back to its
    * library id. Plays a single file; for a multi-leaf `search` result the caller
    * picks which row to play. Works for any path Kodi can reach, in-library or
-   * not.
+   * not. A file missing from disk is a proper tool error, never a false
+   * success: it is refused before the open when verifiable on disk, and an
+   * open that Kodi accepted but that silently never started (a stale library
+   * entry) is detected from the post-settle snapshot (TODO 11.12).
    *
-   * Call:  Player.Open { "item": { "file": <file> } }, then player_state() to
-   *        report what is now loaded/playing.
+   * Call:  Files.GetDirectory (existence pre-check) → Player.Open { "item":
+   *        { "file": <file> } }, then player_state() to report what is now
+   *        loaded/playing.
    * @param file (required): path of the file to play.
    * @param instance (optional): name of the Kodi instance to target; omitted
    *        uses the configured default.
    * @return the resulting player-state snapshot (player_state()): `{ "state":
-   *         "playing"|"paused"|"stopped", "type", "file", "label", "title",
-   *         "time", "totaltime" }` (fields present when a player is active).
+   *         "playing"|"paused", "type", "file", "label", "title", "time",
+   *         "totaltime" }` — a missing or never-starting file is an error,
+   *         not a "stopped" snapshot.
    */
   { "playfile", "Play one file by path (e.g. a `search` result's `file`): "
                 "Player.Open auto-selects the audio/video player. Works for any "
-                "reachable path, in-library or not.",
+                "reachable path, in-library or not. A file missing from disk "
+                "(stale library entry) is reported as an error.",
     schema_playfile, handler_playfile, NULL },
 
   /**
@@ -3648,11 +4042,15 @@ static const MkToolDef mk_tool_defs[] = {
    * A library id whose kind does not match the playing queue (song ↔ audio,
    * episode/movie ↔ video) is refused — Kodi would accept the foreign item
    * silently; a `file`'s type is unknowable, so for files matching stays the
-   * caller's job.
+   * caller's job. An item whose file is verifiably missing from disk is
+   * refused as well (TODO 11.12) — Kodi would accept it and the failure would
+   * only surface when playback reaches it.
    *
    * Call:  Player.GetActivePlayers → Player.GetProperties (playlistid,
-   *        position) → Playlist.Add, or Playlist.Insert at position+1 for
-   *        `next` — then player_state() (playback unchanged).
+   *        position) → existence pre-check (a library id resolved via its
+   *        Get<Kind>Details, then Files.GetDirectory) → Playlist.Add, or
+   *        Playlist.Insert at position+1 for `next` — then player_state()
+   *        (playback unchanged).
    * @param type: "song" | "episode" | "movie"; required with `id`.
    * @param id: library id of the item to queue (give `id` or `file`).
    * @param file: path of the file to queue (give `id` or `file`).
@@ -3665,7 +4063,8 @@ static const MkToolDef mk_tool_defs[] = {
   { "queue", "Queue an item behind the one now playing, for continuous "
              "playback: a `search` row's library id (type+id) or a file path; "
              "next:true plays it right after the current item. Something must "
-             "already be playing (start with play/playfile).",
+             "already be playing (start with play/playfile). An item whose "
+             "file is missing from disk (stale library entry) is refused.",
     schema_queue, handler_queue, NULL },
 
   /**
