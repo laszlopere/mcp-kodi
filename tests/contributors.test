@@ -4,8 +4,9 @@
 # Drives the real mcp-kodi binary over its MCP stdio transport against a live
 # Kodi, exercising `contributors` across its three sources (music artists via
 # AudioLibrary.GetArtists; movie actors/directors and TV actors via the
-# videodb:// people nodes) plus paging, count, case-insensitivity and the
-# error and no-match paths.
+# videodb:// people nodes) plus the `type` filters (band/composer/actor/
+# director — TODO 11.6.4.4), no-argument enumeration, paging, count,
+# case-insensitivity and the error and no-match paths.
 #
 # Library-agnostic: it discovers a real artist, movie actor, movie director and
 # TV actor from the target Kodi and asserts against those values, so it passes
@@ -245,15 +246,23 @@ fi
 
 # ===========================================================================
 # 6. Error + edge paths. A bad request is a clean tool error (isError:true),
-#    never a crash; a no-match is a normal empty result.
+#    never a crash; a no-match is a normal empty result; no arguments at all
+#    is a full enumeration of the merged people set, not an error.
 # ===========================================================================
 echo "-- errors / edges"
 
-b=$(contributors '{}')
-eq "missing name -> tool error" true "$(res_err "$b")"
+b=$(contributors '{"count":true}')
+eq "no-args is not an error" false "$(res_err "$b")"
+if [ "$wide_total" -ge 1 ] 2>/dev/null; then
+  is_true "no-args enumerates at least the wide-query set" \
+       "$(j "$(res_body "$b")" ".total >= $wide_total")"
+fi
+
+b=$(contributors '{"type":"presenter"}')
+eq "unknown type -> tool error" true "$(res_err "$b")"
 case "$(g "$(res_body "$b")" '.error')" in
-  *name*) ok "missing-name error names \"name\"";;
-  *)      no "missing-name error names \"name\"";;
+  *type*) ok "unknown-type error names \"type\"";;
+  *)      no "unknown-type error names \"type\"";;
 esac
 
 b=$(contributors "$(jargs '{name:"zzqq-no-such-person-zzqq"}')")
@@ -265,7 +274,84 @@ eq "no-match rows are empty" 0     "$(g "$nb" '.rows|length')"
 eq "no-match not truncated"  false "$(g "$nb" '.truncated')"
 
 # ===========================================================================
-# 7. People report — a human-readable peek at who is in the target library,
+# 7. Type filters (TODO 11.6.4.4) — band is the synthesized headline kind:
+#    {type:"band"} lists Kodi's album artists; composer rides the server-side
+#    role filter; actor/director narrow to their videodb:// nodes; name and
+#    type combine.
+# ===========================================================================
+echo "-- types"
+
+# The expected band set straight from Kodi: album artists only.
+band_total=$(kodi_rpc AudioLibrary.GetArtists \
+    '{"albumartistsonly":true,"limits":{"start":0,"end":1}}' \
+  | jq -r '.result.limits.total // 0')
+first_band=$(kodi_rpc AudioLibrary.GetArtists \
+    '{"albumartistsonly":true,"sort":{"method":"artist","order":"ascending"},"limits":{"start":0,"end":1}}' \
+  | jq -r '.result.artists[0].artist // empty')
+
+if [ "$band_total" -ge 1 ] 2>/dev/null && [ -n "$first_band" ]; then
+  echo "   (bands: $band_total · first: $first_band)"
+  b=$(res_body "$(contributors '{"type":"band"}')")
+  check_invariants "$b" 0 "band"
+  # The merge dedupes case-insensitively, so the tool's total can only be at
+  # or below Kodi's raw album-artist count.
+  is_true "band total matches Kodi's album artists" \
+       "$(j "$b" ".total >= 1 and .total <= $band_total")"
+  is_true "band rows all drill to albums" \
+       "$(j "$b" 'all(.rows[]; .in | index("albums"))')"
+  is_true "first album artist is listed as a band" \
+       "$(has_row_in "$b" "$first_band" albums)"
+
+  # name narrows the band listing.
+  b=$(res_body "$(contributors "$(jargs --arg n "$first_band" '{type:"band",name:$n}')")")
+  is_true "band+name finds the band" "$(has_row_in "$b" "$first_band" albums)"
+
+  # A song-only artist must NOT list as a band (the synthesized kind is
+  # exactly the album-level artists). Only checkable when the full band set
+  # fits one page.
+  songonly=$(kodi_rpc AudioLibrary.GetArtists \
+      '{"albumartistsonly":false,"properties":["isalbumartist"],"limits":{"start":0,"end":50}}' \
+    | jq -r '[.result.artists[] | select(.isalbumartist == false)][0].artist // empty')
+  if [ -n "$songonly" ] && [ "$band_total" -le 500 ]; then
+    echo "   (song-only artist: $songonly)"
+    full=$(res_body "$(contributors '{"type":"band","limit":500}')")
+    is_true "song-only artist absent from bands" \
+         "$(printf '%s' "$full" | jq --arg n "$songonly" \
+            '[.rows[].name | ascii_downcase] | index($n | ascii_downcase) | not')"
+  fi
+else
+  echo "   (no album artists in library — band assertions skipped)"
+fi
+
+# Composer: discover one through the same role filter the tool composes.
+composer=$(kodi_rpc AudioLibrary.GetArtists \
+    '{"allroles":true,"filter":{"field":"role","operator":"is","value":"Composer"},"limits":{"start":0,"end":1}}' \
+  | jq -r '.result.artists[0].artist // empty')
+if [ -n "$composer" ]; then
+  echo "   (composer: $composer)"
+  b=$(res_body "$(contributors "$(jargs --arg n "$composer" '{type:"composer",name:$n}')")")
+  check_invariants "$b" 0 "composer"
+  is_true "composer found via the role filter" "$(has_row_in "$b" "$composer" songs)"
+else
+  echo "   (no composers in library — composer assertions skipped)"
+fi
+
+# Actor/director types find the same people their untyped queries did.
+if [ -n "$mactor" ]; then
+  b=$(res_body "$(contributors "$(jargs --arg n "$mactor" '{type:"actor",name:$n}')")")
+  is_true "type actor finds the movie actor" "$(has_row_in "$b" "$mactor" movies)"
+fi
+if [ -n "$mdirector" ]; then
+  b=$(res_body "$(contributors "$(jargs --arg n "$mdirector" '{type:"director",name:$n}')")")
+  is_true "type director finds the movie director" "$(has_row_in "$b" "$mdirector" movies)"
+fi
+if [ -n "$tvactor" ]; then
+  b=$(res_body "$(contributors "$(jargs --arg n "$tvactor" '{type:"actor",name:$n}')")")
+  is_true "type actor finds the tv actor" "$(has_row_in "$b" "$tvactor" tvshows)"
+fi
+
+# ===========================================================================
+# 8. People report — a human-readable peek at who is in the target library,
 #    stressing the wide merged-listing path.
 # ===========================================================================
 echo "-- people report"

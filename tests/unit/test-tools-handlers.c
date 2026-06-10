@@ -663,14 +663,212 @@ case_contributors_paging (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* No arguments at all is a full enumeration of the merged people set (TODO
+ * 11.6.4.4), not an error: every fixture person comes back, and the music call
+ * carries no filter. */
 static void
-case_contributors_missing_name (void)
+case_contributors_enumerate_all (void)
 {
   MkConfig *cfg;
   MkKodi *kodi;
   MkTools *tools = make_tools (&cfg, &kodi);
 
+  contrib_fixtures ();
+
   g_autoptr (JsonNode) an = args_node ("{}");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "contributors", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      /* All four fixture people: Harrison Ford no longer filtered away. */
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 4);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "returned"), 4);
+    }
+
+  /* Every source still consulted, but with no name rule sent to Kodi. */
+  MK_CHECK_INT_EQ (call_count ("AudioLibrary.GetArtists"), 1);
+  MK_CHECK_INT_EQ (call_count ("Files.GetDirectory"), 3);
+  MK_CHECK (!params_carry ("AudioLibrary.GetArtists", "\"filter\""));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* type "band" is one albumartistsonly:true GetArtists call and nothing else:
+ * no node walks, and the synthesized kind rides Kodi's server-side filter. */
+static void
+case_contributors_band (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  /* Mimic the server-side albumartistsonly filter: only the album artist
+   * comes back (the stub cannot filter, so the canned reply pre-applies it). */
+  stub_kodi_set_response (
+    "AudioLibrary.GetArtists",
+    "{ \"artists\": ["
+    "    { \"artistid\": 5, \"artist\": \"Scott Walker\","
+    "      \"label\": \"Scott Walker\", \"isalbumartist\": true } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 1, \"total\": 1 } }");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"type\": \"band\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "contributors", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 1);
+      JsonArray *rows = json_object_get_array_member (p, "rows");
+      if (json_array_get_length (rows) == 1)
+        {
+          static const char *const walker[] = { "albums", "songs" };
+          check_contrib_row (json_array_get_object_element (rows, 0),
+                             "Scott Walker", walker, 2);
+        }
+    }
+
+  MK_CHECK_INT_EQ (call_count ("AudioLibrary.GetArtists"), 1);
+  MK_CHECK (params_carry ("AudioLibrary.GetArtists",
+                          "\"albumartistsonly\":true"));
+  MK_CHECK (!params_carry ("AudioLibrary.GetArtists", "\"filter\""));
+  MK_CHECK (!called ("Files.GetDirectory"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* type "composer" sends the server-side role rule, and-combined with the name
+ * rule when both apply, and skips the video nodes. */
+static void
+case_contributors_composer (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  contrib_fixtures ();
+
+  g_autoptr (JsonNode) an =
+    args_node ("{ \"type\": \"composer\", \"name\": \"scott\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "contributors", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    MK_CHECK_INT_EQ (
+      json_object_get_int_member (json_node_get_object (payload), "total"), 2);
+
+  /* The composite {"and":[ role is Composer, artist contains scott ]} filter
+   * with allroles, exactly as verified live (KODI-API 12.3.15). */
+  MK_CHECK (params_carry ("AudioLibrary.GetArtists", "\"and\":["));
+  MK_CHECK (params_carry ("AudioLibrary.GetArtists",
+                          "\"field\":\"role\",\"operator\":\"is\","
+                          "\"value\":\"Composer\""));
+  MK_CHECK (params_carry ("AudioLibrary.GetArtists",
+                          "\"field\":\"artist\",\"operator\":\"contains\","
+                          "\"value\":\"scott\""));
+  MK_CHECK (params_carry ("AudioLibrary.GetArtists", "\"allroles\":true"));
+  MK_CHECK (!called ("Files.GetDirectory"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* type "actor" walks exactly the two cast nodes — no music call, no directors
+ * node — and type "director" only videodb://movies/directors/. */
+static void
+case_contributors_actor_director (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  contrib_fixtures ();
+
+  g_autoptr (JsonNode) an =
+    args_node ("{ \"type\": \"actor\", \"name\": \"scott\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "contributors", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      /* Ridley + Tony Scott; both nodes answer the same canned listing, so
+       * each spans movies and tvshows. Harrison Ford fails the name. */
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 2);
+      JsonArray *rows = json_object_get_array_member (p, "rows");
+      if (json_array_get_length (rows) == 2)
+        {
+          static const char *const both[] = { "movies", "tvshows" };
+          check_contrib_row (json_array_get_object_element (rows, 0),
+                             "Ridley Scott", both, 2);
+          check_contrib_row (json_array_get_object_element (rows, 1),
+                             "Tony Scott", both, 2);
+        }
+    }
+
+  MK_CHECK (!called ("AudioLibrary.GetArtists"));
+  MK_CHECK_INT_EQ (call_count ("Files.GetDirectory"), 2);
+  MK_CHECK (params_carry ("Files.GetDirectory", "videodb://movies/actors/"));
+
+  /* director: one node walk only. */
+  stub_kodi_reset ();
+  contrib_fixtures ();
+  g_autoptr (JsonNode) an2 = args_node ("{ \"type\": \"director\" }");
+  g_autoptr (JsonNode) res2 =
+    mk_tools_call (tools, "contributors", json_node_get_object (an2), &error);
+
+  MK_CHECK (error == NULL);
+  is_error = TRUE;
+  g_autoptr (JsonNode) payload2 = envelope_payload (res2, &is_error);
+  MK_CHECK (!is_error);
+  if (payload2 != NULL && JSON_NODE_HOLDS_OBJECT (payload2))
+    /* No name: all three canned labels list as directors. */
+    MK_CHECK_INT_EQ (
+      json_object_get_int_member (json_node_get_object (payload2), "total"),
+      3);
+
+  MK_CHECK (!called ("AudioLibrary.GetArtists"));
+  MK_CHECK_INT_EQ (call_count ("Files.GetDirectory"), 1);
+  MK_CHECK (params_carry ("Files.GetDirectory",
+                          "videodb://movies/directors/"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* An unknown type is a clean tool error before any Kodi call. */
+static void
+case_contributors_bad_type (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  g_autoptr (JsonNode) an = args_node ("{ \"type\": \"presenter\" }");
   GError *error = NULL;
   g_autoptr (JsonNode) res =
     mk_tools_call (tools, "contributors", json_node_get_object (an), &error);
@@ -684,7 +882,8 @@ case_contributors_missing_name (void)
     {
       const char *msg = json_object_get_string_member (
         json_node_get_object (payload), "error");
-      MK_CHECK (msg != NULL && strstr (msg, "\"name\" is required") != NULL);
+      MK_CHECK (msg != NULL && strstr (msg, "unknown type") != NULL);
+      MK_CHECK (msg != NULL && strstr (msg, "presenter") != NULL);
     }
 
   /* rejected before any Kodi call. */
@@ -2121,7 +2320,11 @@ main (int argc, char **argv)
     { "search-tv-person-season-error", case_search_tv_person_season_error },
     { "contributors-merge",      case_contributors_merge },
     { "contributors-paging",     case_contributors_paging },
-    { "contributors-no-name",    case_contributors_missing_name },
+    { "contributors-enumerate-all", case_contributors_enumerate_all },
+    { "contributors-band",       case_contributors_band },
+    { "contributors-composer",   case_contributors_composer },
+    { "contributors-actor-director", case_contributors_actor_director },
+    { "contributors-bad-type",   case_contributors_bad_type },
     { "playfile",                case_playfile },
     { "playfile-missing-file",   case_playfile_missing_file },
     { "playfile-unlistable-dir", case_playfile_unlistable_dir },
