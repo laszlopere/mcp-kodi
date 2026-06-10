@@ -25,11 +25,30 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
     [ ] 12.3.3 albumDetails — Retrieve details about a specific album (AudioLibrary.GetAlbumDetails)
     [x] 12.3.4 albums — Retrieve all albums from specified artist (and role) or that has songs of the specified genre (AudioLibrary.GetAlbums) — see chain in 12.3.6 (step 2): {"artistid": N} or {"genreid": N} filter.
     [ ] 12.3.5 artistDetails — Retrieve details about a specific artist (AudioLibrary.GetArtistDetails)
+        Takes the artistid from 12.3.6 plus properties (Audio.Fields.Artist:
+        description, genre, formed/born, disbanded/died, yearsactive, type,
+        gender, roles, isalbumartist, art, …). Verified on local Kodi
+        (artistid 194 → Pink Floyd): works, but most biography fields come
+        back empty unless an artist-info scraper has run — only artist/
+        artistid/isalbumartist/roles were populated. Don't promise rich
+        artist bios from an unscraped library.
     [x] 12.3.6 artists — Retrieve all artists. For backward compatibility by default this implicitly does not include those that only contribute other roles, however absolutely all artists can be returned using allroles=true (AudioLibrary.GetArtists)
         Music is a 3-level hierarchy and needs up to three calls to reach a
         playable file: artist → album → song. Same filter/sort/limits/
         properties shape as the video Get* methods. The chain below drills from
         an artist name down to the song file.
+
+        This is THE music person-search: bands and solo artists are both just
+        artists. Filter fields (List.Filter.Fields.Artists): artist, genre,
+        moods, styles, instruments, biography, artisttype, gender,
+        disambiguation, born, bandformed, disbanded, died, role, path,
+        dateadded, … Operators: contains/is/startswith/endswith/
+        doesnotcontain/isnot/greaterthan/lessthan/between/… Extra params:
+        albumartistsonly (default = GUI setting; true hides song-only
+        artists), allroles (true also returns composers/conductors/lyricists,
+        see 12.3.15). Verified on local Kodi:
+        {"filter":{"field":"artist","operator":"contains","value":"pink"}}
+        → artistid 194 "Pink Floyd", isalbumartist:true.
 
         Step 1 — find the artist (AudioLibrary.GetArtists):
         {
@@ -127,6 +146,11 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
     [ ] 12.3.13 recentlyPlayedAlbums — Retrieve recently played albums (AudioLibrary.GetRecentlyPlayedAlbums)
     [ ] 12.3.14 recentlyPlayedSongs — Retrieve recently played songs (AudioLibrary.GetRecentlyPlayedSongs)
     [ ] 12.3.15 roles — Retrieve all contributor roles (AudioLibrary.GetRoles)
+        Enumerates the contribution kinds usable as the {"field":"role"}
+        filter in GetArtists/GetSongs (with allroles:true). Verified on local
+        Kodi: roleid 1 Artist, 2 Composer, 3 Conductor, 4 Lyricist. So
+        "songs composed by X" = GetSongs filter role is "Composer" + artist
+        contains X, allroles:true.
     [ ] 12.3.16 songDetails — Retrieve details about a specific song (AudioLibrary.GetSongDetails)
     [x] 12.3.17 songs — Retrieve all songs from specified album, artist or genre (AudioLibrary.GetSongs) — see chain in 12.3.6 (step 3): {"albumid": N}/{"artistid": N}/{"genreid": N} filter; file = playable path, songid = Player.Open handle.
     [ ] 12.3.18 sources — Get all music sources, including unique ID (AudioLibrary.GetSources)
@@ -141,6 +165,18 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
 
 [ ] 12.5 Files
     [ ] 12.5.1 directory — Get the directories and files in the given directory (Files.GetDirectory)
+        Besides real paths it browses virtual library paths — the only way to
+        ENUMERATE people (there is no VideoLibrary.GetActors method).
+        Verified on local Kodi with media:"video":
+          videodb://movies/actors/    → all movie actors (label + node path)
+          videodb://movies/directors/ → all movie directors
+          videodb://tvshows/actors/   → all TV actors (5492 entries here)
+        Drilling into a node lists that person's items with library ids:
+        videodb://movies/actors/1060/ → [{label:"Alien", type:"movie", id:1,
+        file:<playable path>}]. sort + limits work (sort by "label" + paging
+        verified); there is NO filter param — name lookup must go through the
+        actor/director filter on the Get* methods (12.16.12/12.16.21) or be
+        paged client-side.
     [ ] 12.5.2 fileDetails — Get details for a specific file (Files.GetFileDetails)
     [ ] 12.5.3 sources — Get the sources of the media windows (Files.GetSources)
     [ ] 12.5.4 prepareDownload — Provides a way to download a given file (e.g. providing an URL to the real file location) (Files.PrepareDownload)
@@ -352,8 +388,18 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
         }
         Notes: no filter → all movies. Empty movies:[]/total:0 when nothing
         matches (or not yet scraped). Field name is title (not name).
+
+        Person search — actor and director are filter fields
+        (List.Filter.Fields.Movies; also writers, studio, …). Verified on
+        local Kodi: {"field":"actor","operator":"contains","value":"weaver"}
+        and {"field":"director","operator":"contains","value":"scott"} both
+        → Alien (1979). director is also a returnable property (array of
+        names); the full cast comes from the cast property (Video.Cast:
+        [{name, role, order, thumbnail}]) — flagged by Kodi as slow, so
+        request it per-item via GetMovieDetails (verified: movieid 1 →
+        Skerritt/Dallas, Weaver/Ripley, …), not across the whole list.
     [ ] 12.16.13 musicVideoDetails — Retrieve details about a specific music video (VideoLibrary.GetMusicVideoDetails)
-    [ ] 12.16.14 musicVideos — Retrieve all music videos (VideoLibrary.GetMusicVideos)
+    [ ] 12.16.14 musicVideos — Retrieve all music videos (VideoLibrary.GetMusicVideos) — person filter fields: artist and director (List.Filter.Fields.MusicVideos); bridges the music-artist world into video.
     [ ] 12.16.15 recentlyAddedEpisodes — Retrieve all recently added tv episodes (VideoLibrary.GetRecentlyAddedEpisodes)
     [ ] 12.16.16 recentlyAddedMovies — Retrieve all recently added movies (VideoLibrary.GetRecentlyAddedMovies)
     [ ] 12.16.17 recentlyAddedMusicVideos — Retrieve all recently added music videos (VideoLibrary.GetRecentlyAddedMusicVideos)
@@ -395,6 +441,14 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
         }
         Notes: no filter → all shows. Empty tvshows:[] with total:0 when nothing
         matches (or not yet scraped). Field name is title (not name).
+
+        Person search — actor and director are filter fields here too
+        (List.Filter.Fields.TVShows). Verified on local Kodi:
+        {"field":"actor","operator":"contains","value":"mulgrew"} →
+        Star Trek: Voyager. cast is a property (same Video.Cast shape as
+        movies, slow — fetch via GetTVShowDetails). Episodes (12.16.6) also
+        filter by actor/director — episode-level cast includes guest stars,
+        so "episodes with guest X" works there.
 
         Follow-up — request one specific episode of a found show. Take the
         tvshowid from the reply above (Earth 2 = 94) and call

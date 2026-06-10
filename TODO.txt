@@ -65,7 +65,36 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             rows {file, <id>, label}; descends to album/season only when
             named, so wide queries are one Kodi call; always reports total;
             substring title hitting several containers makes total a sum
-            and offset best-effort
+            and offset best-effort. Person matching is music-only: artist
+            feeds AudioLibrary.GetArtists; movie/tv-show filter on title
+            alone, so finding video by actor/director is NOT implemented
+            here — that is 11.6.4.2
+        [ ] 11.6.4.2 search by person — extend search so movie/tv-show
+            queries can name a person: optional actor? and director?
+            args mapped onto the same VideoLibrary.GetMovies/GetTVShows/
+            GetEpisodes calls as {field: actor|director, operator:
+            contains} filters (KODI-API 12.16.12/12.16.21, verified live);
+            combinable with title?; result shape unchanged (leaf-file
+            rows + total)
+        [ ] 11.6.4.3 contributors — find who contributed (bands, solo
+            artists, composers, actors, directors), not media:
+            rows {name, in: [containers]} + total instead of leaf files;
+            the exact name IS the follow-up handle (search/11.6.4.2 take
+            names, and Kodi's actor/director filters are name-only — no
+            id-based filter exists), so rows carry no person ids until
+            some tool can consume them; in lists where the name yields
+            hits (albums/songs for artists — albums only when
+            isalbumartist; movies/tvshows for actors and directors), so
+            the caller knows where to drill next without Kodi-specific
+            knowledge. Music
+            artists/bands via AudioLibrary.GetArtists name filter
+            (KODI-API 12.3.6; allroles/role for composers etc., 12.3.15);
+            actors/directors have no Get* method, so enumerate the
+            videodb:// nodes (videodb://movies/actors|directors/,
+            videodb://tvshows/actors/) via Files.GetDirectory (KODI-API
+            12.5.1, verified live) — no server-side filter there, name
+            matching is app-side over paged labels; answers "do we have
+            anything with X" and feeds 11.6.4.2 with exact names
     [x] 11.6.5 playfile — play one file via Player.Open {item:{file}}
         (KODI-API 12.10.9); any path, in-library or not; auto-selects the
         audio/video player; Kodi enriches a scanned file back to its
