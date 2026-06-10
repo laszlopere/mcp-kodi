@@ -364,6 +364,19 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
     [ ] 12.16.4 availableArtTypes — Retrieve a list of potential art types for a media item (VideoLibrary.GetAvailableArtTypes)
     [ ] 12.16.5 episodeDetails — Retrieve details about a specific tv show episode (VideoLibrary.GetEpisodeDetails)
     [ ] 12.16.6 episodes — Retrieve all tv show episodes (VideoLibrary.GetEpisodes)
+        Person search at the episode level (verified live, Kodi 20.5, used by
+        the search tool §11.6.4.2):
+        - actor/director are filter fields. Episode cast is the show regulars
+          PLUS guest stars (a lead matches every episode: Voyager, actor
+          contains "mulgrew" → 169/169), so the episode level answers both
+          "show with X" and "episodes with guest X".
+        - tvshowid is OPTIONAL: omitting it filters across the whole library
+          in one call (fast, ~80 ms over thousands of episodes). Pair with
+          the showtitle property so each row names its show, and sort
+          {method:"tvshowtitle"} to group hits by show.
+        - Show-level director (12.16.21 filter) is empty in practice —
+          per-episode director is the populated data, so direct director
+          queries belong here, not on GetTVShows.
     [ ] 12.16.7 genres — Retrieve all genres (VideoLibrary.GetGenres)
     [ ] 12.16.8 inProgressTVShows — Retrieve all in progress tvshows (VideoLibrary.GetInProgressTVShows)
     [ ] 12.16.9 movieDetails — Retrieve details about a specific movie (VideoLibrary.GetMovieDetails)
@@ -425,6 +438,10 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
         [{name, role, order, thumbnail}]) — flagged by Kodi as slow, so
         request it per-item via GetMovieDetails (verified: movieid 1 →
         Skerritt/Dallas, Weaver/Ripley, …), not across the whole list.
+        Rules combine: a composite {"and": [rule, rule, …]} filter is
+        accepted wherever a bare rule is (verified live: title contains
+        "alien" AND actor contains "weaver" → Alien); same form works on
+        GetTVShows and GetEpisodes. Used by the search tool §11.6.4.2.
     [ ] 12.16.13 musicVideoDetails — Retrieve details about a specific music video (VideoLibrary.GetMusicVideoDetails)
     [ ] 12.16.14 musicVideos — Retrieve all music videos (VideoLibrary.GetMusicVideos) — person filter fields: artist and director (List.Filter.Fields.MusicVideos); bridges the music-artist world into video.
     [ ] 12.16.15 recentlyAddedEpisodes — Retrieve all recently added tv episodes (VideoLibrary.GetRecentlyAddedEpisodes)
@@ -475,7 +492,10 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
         Star Trek: Voyager. cast is a property (same Video.Cast shape as
         movies, slow — fetch via GetTVShowDetails). Episodes (12.16.6) also
         filter by actor/director — episode-level cast includes guest stars,
-        so "episodes with guest X" works there.
+        so "episodes with guest X" works there. Caveat: the show-level
+        director filter is accepted but matches nothing in practice (the
+        whole library yields 0 for director contains "a") — director data
+        lives per-episode, so filter directors via GetEpisodes (12.16.6).
 
         Follow-up — request one specific episode of a found show. Take the
         tvshowid from the reply above (Earth 2 = 94) and call

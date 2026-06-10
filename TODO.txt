@@ -65,17 +65,26 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             rows {file, <id>, label}; descends to album/season only when
             named, so wide queries are one Kodi call; always reports total;
             substring title hitting several containers makes total a sum
-            and offset best-effort. Person matching is music-only: artist
-            feeds AudioLibrary.GetArtists; movie/tv-show filter on title
-            alone, so finding video by actor/director is NOT implemented
-            here — that is 11.6.4.2
-        [ ] 11.6.4.2 search by person — extend search so movie/tv-show
-            queries can name a person: optional actor? and director?
-            args mapped onto the same VideoLibrary.GetMovies/GetTVShows/
-            GetEpisodes calls as {field: actor|director, operator:
-            contains} filters (KODI-API 12.16.12/12.16.21, verified live);
-            combinable with title?; result shape unchanged (leaf-file
-            rows + total)
+            and offset best-effort. Person matching: artist feeds
+            AudioLibrary.GetArtists (music); movie/tv-show take actor?/
+            director? — see 11.6.4.2
+        [x] 11.6.4.2 search by person — movie/tv-show queries can name a
+            person: optional actor? and director? args become server-side
+            {field, operator: contains} rules, and-combined with title?
+            via the composite {"and": [...]} filter (KODI-API 12.16.12/
+            12.16.21/12.16.6, all verified live); result shape unchanged
+            (leaf-file rows + total). movie: rules ride the one GetMovies
+            call. tv-show: person rules ride GetEpisodes, NOT the show
+            resolve — episode cast holds regulars AND guest stars (a lead
+            matches every episode) and show-level director data is empty
+            in practice, so the episode level answers both "show with X"
+            and "episodes with guest X"; title still resolves the show
+            first. Person-only tv queries (no title) skip the resolve and
+            filter GetEpisodes library-wide in one call, sorted by show;
+            those rows carry showtitle instead of a resolved container,
+            and season/number are rejected there (they narrow a show).
+            tv-show now requires title OR actor OR director
+            (tests/search.test §6, unit search-{movie,tv}-person*)
         [x] 11.6.4.3 contributors — find who contributed (bands, solo
             artists, composers, actors, directors), not media:
             rows {name, in: [containers]} + total instead of leaf files;
