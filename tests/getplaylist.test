@@ -47,6 +47,15 @@ KODI_AUTH=${KODI_AUTH:-kodi:kodi}
 KODI_SCHEME=${KODI_SCHEME:-http}
 export KODI_HOST KODI_AUTH KODI_SCHEME
 
+# Keep any playback this test triggers OUT of the user's real history log:
+# history.json lives under XDG_STATE_HOME, so redirect it to a throwaway dir for
+# the run. Otherwise every `make check` appends real entries — and (before the
+# config fix) attributes them to the configured default box, not this test Kodi.
+# (The EXIT cleanup is folded into the volume guard's trap, set below.)
+STATE_DIR=$(mktemp -d) || { echo "SKIP: cannot mktemp"; exit 77; }
+export XDG_STATE_HOME="$STATE_DIR"
+trap 'rm -rf "$STATE_DIR"' EXIT
+
 SKIP=77
 
 skip () { echo "SKIP: $*"; exit $SKIP; }
@@ -90,7 +99,7 @@ vol0=$(kodi_rpc Application.GetProperties '{"properties":["volume"]}' \
 restore_volume () {
   [ -n "$vol0" ] && kodi_rpc Application.SetVolume "{\"volume\":$vol0}" >/dev/null 2>&1
 }
-trap restore_volume EXIT
+trap 'restore_volume; rm -rf "$STATE_DIR"' EXIT
 [ -n "$vol0" ] && kodi_rpc Application.SetVolume '{"volume":2}' >/dev/null 2>&1
 
 # ---- talking to the server under test (MCP over stdio) --------------------
