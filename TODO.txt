@@ -306,3 +306,74 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         scanned from sources) is unverifiable at add time and still
         fails only when playback reaches it — a post-advance check would
         need player monitoring (see 11.9.5).
+
+[ ] 11.13 History tool — optional filters for a more flexible query. Today
+    `history` takes only instance/since/until/limit (mk-tools.c
+    schema_history / handler_history; the match itself is mk_history_read
+    in mk-history.c). It reads only the local history.json and makes no
+    Kodi call, so every filter is an app-side predicate over the stored
+    entries — cheap to add and composable. Plan to add, all OPTIONAL and
+    AND-combined with each other and the existing window:
+      - media/kind: restrict by the entry's `media`
+        (song/episode/movie/musicvideo/picture/channel) and/or `kind`
+        (audio/video) — "what music did I play", "movies only".
+      - artist/band: a substring (case-insensitive) over the performer —
+        a primary, high-value filter ("everything Pink Floyd I played",
+        "how much Metallica this week"). It is the music analogue of the
+        searchmedia `artist` / contributors band lookup, fed by the same
+        names. BLOCKED ON 11.13.1: the entry's `artist` is empty for
+        poorly-tagged songs today, so an artist filter is only as good as
+        what monitoring captured — fix the capture first.
+      - text match: a substring (case-insensitive) over the other human
+        fields an entry carries — `title`/`album`/`showtitle`/`label` —
+        so a partial title/album narrows the log without the caller
+        knowing ids. Decide one combined `match`/`q` across all the text
+        fields (artist included) vs. per-field args (artist=/album=/
+        title=); lean toward a single substring for simplicity, mirroring
+        how searchmedia/contributors already take a loose name — but keep
+        a dedicated artist arg if music-by-performer is the common query.
+      - id: exact library-id match for "every time THIS item played",
+        paired with media (ids are per-type), feeding back a searchmedia
+        or getplaylist row's id.
+      - count: count-only mode (total, zero entries) like searchmedia's
+        `count`, for "how many times / how much did X play" without
+        hauling the rows.
+      - offset: page older matches beyond `limit` (history has limit but
+        no offset yet); keep newest-first.
+      - order (maybe): newest-first default vs oldest-first, for replaying
+        a session in the order it happened.
+    Keep the searchmedia-style envelope (total/returned/offset/truncated)
+    so the shape the assistant already knows extends cleanly. Unit cases
+    over a seeded log per filter + combination; no Kodi needed. Note this
+    only filters what monitoring captured — it is not a Kodi library
+    query. Spec the exact arg set before coding (single `match` vs
+    per-field is the main open choice).
+
+    [ ] 11.13.1 Capture a usable artist for songs (prerequisite for the
+        artist filter above). Investigated 2026-06-10: artist is NOT
+        broadly missing — it is captured fine for properly-tagged music
+        (Abba, Iron Maiden, Metallica all present in history.json) — but
+        it lands empty for poorly-tagged files. Two causes:
+          1. player_state() (mk-tools.c ~476) requests only the song-level
+             `artist` property from Player.GetItem. For untagged / bootleg
+             rips (the "TRACK 01" LP rips) the song-artist TAG is blank, so
+             Kodi returns artist:[""] even when it has an `albumartist`
+             and/or computed `displayartist` (derived from the album /
+             folder / scraper). We never request those, so we miss the
+             fallback. Fix: for audio items also request `albumartist` and
+             `displayartist`, and record the best non-empty one (prefer the
+             song `artist`, fall back to `albumartist` / `displayartist`) —
+             matches the user's "use albumartist for songs" intuition.
+          2. copy_member_nonempty() (mk-tools.c ~326) drops ""/[]/-1
+             sentinels but NOT a non-empty array of empty strings: artist
+             [""] has length 1, so it is copied verbatim and stored as
+             noisy-but-empty. Fix: also drop an array whose elements are
+             all empty, so a blank artist is omitted (its absence then
+             honestly means "unknown") rather than stored as [""].
+        With both fixed, history carries an artist whenever Kodi knows one,
+        and the 11.13 artist filter becomes meaningful. Note: the artist
+        also rides on the live snapshot returned by play/playfile/etc.,
+        so this improves those replies too, not just history. Unit cases:
+        a song snapshot with empty `artist` but populated `albumartist` /
+        `displayartist` records the fallback; an all-empty artist array is
+        omitted.
