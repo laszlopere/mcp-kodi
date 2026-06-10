@@ -187,16 +187,48 @@ through Caddy.
 
 ## Part 3 — Point mcp-kodi at your server
 
-mcp-kodi reads its connection details from `~/.config/kodi/cli.conf`. Create that
-file with your values:
+mcp-kodi reads its connection details from `~/.config/mcp-kodi/config.json`.
+Create that file with your values:
+
+```json
+{
+  "version": 2,
+  "default": "livingroom",
+  "instances": {
+    "livingroom": {
+      "host": "kodi.example.local:8443",
+      "auth": "kodi:YOURPASSWORD",
+      "scheme": "https",
+      "insecure": true
+    }
+  }
+}
+```
+
+- **`host`** — your hostname/IP and the Caddy port from Part 2.
+- **`auth`** — the username and password you set in Kodi in Part 1, as
+  `user:password`.
+- **`scheme`** — `https`, because you connect through Caddy. (This is also the
+  default if omitted.)
+- **`insecure: true`** — accept Caddy's self-signed certificate. This is the
+  `tls internal` trade-off from Part 2, and it is per instance — it doesn't
+  loosen certificate checking for any other host.
+
+The file contains your password, so keep it private:
 
 ```bash
-# kodi connection — used by mcp-kodi
-KODI_HOST="kodi.example.local:8443"   # your hostname/IP : Caddy port
-KODI_AUTH="kodi:YOURPASSWORD"         # username:password from Part 1
-KODI_SCHEME="https"
-KODI_CURL_OPTS="-sk"                  # -k accepts the self-signed cert
+chmod 700 ~/.config/mcp-kodi
+chmod 600 ~/.config/mcp-kodi/config.json
 ```
+
+You can list several Kodi boxes under `instances` — each tool call can pick one
+by name via its `instance` argument, and `default` names the one used when no
+instance is given. An optional `"name"` member gives an instance a friendlier
+display label.
+
+For quick experiments, environment variables override the default instance
+without editing the file: `KODI_HOST`, `KODI_AUTH`, `KODI_SCHEME`, and a `-k`
+anywhere in `KODI_CURL_OPTS` switches on `insecure`.
 
 That's the whole setup. mcp-kodi will now reach Kodi over encrypted HTTPS.
 
@@ -207,8 +239,8 @@ That's the whole setup. mcp-kodi will now reach Kodi over encrypted HTTPS.
 | Symptom                                   | Likely cause / fix                                                                 |
 | ----------------------------------------- | ---------------------------------------------------------------------------------- |
 | `pong` on 8080 but proxy times out        | Caddy isn't running, or the Caddyfile hostname/port don't match. `systemctl status caddy`, check `/etc/caddy/Caddyfile`. |
-| `401 Unauthorized`                        | Username/password mismatch between Kodi's settings and your `KODI_AUTH`.            |
-| `certificate ... not trusted` errors      | Expected with `tls internal`. Make sure your client uses `-k` / skips verification (mcp-kodi's `KODI_CURL_OPTS="-sk"`). |
+| `401 Unauthorized`                        | Username/password mismatch between Kodi's settings and the `auth` member in your config.json. |
+| `certificate ... not trusted` errors      | Expected with `tls internal`. Make sure your client skips verification (`-k` for curl, `"insecure": true` in mcp-kodi's config.json). |
 | WebSocket calls fail but HTTP works        | The two "Allow remote control from applications…" toggles (Part 1, step 4) are off, so port 9090 isn't accepting connections. |
 | Works locally, not from other machines     | A firewall is blocking port 8443. Allow it, e.g. `sudo ufw allow 8443/tcp`.        |
 | Caddy won't start after editing            | Syntax error in the Caddyfile. Run `caddy validate --config /etc/caddy/Caddyfile` to see the line. |
