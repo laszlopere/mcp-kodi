@@ -4452,9 +4452,11 @@ static const MkToolDef mk_tool_defs[] = {
    *        box.
    * @param limit (optional): newest-in-window cap (default 50, max 1000).
    * @return `{ "instance"?, "since"?, "until"?, "total", "returned",
-   *         "truncated", "entries": [ { "at", "instance", "name"?, "kind",
-   *         "media"?, "id"?, "title"?, … } ] }` — each entry a history record,
-   *         newest first; `total` counts matches before the limit.
+   *         "truncated", "entries": [ { "at", "last_seen"?, "instance",
+   *         "name"?, "kind", "media"?, "id"?, "title"?, … } ] }` — each entry
+   *         a history record, newest first (`at` = earliest sighting,
+   *         `last_seen` = latest, present once re-observed); `total` counts
+   *         matches before the limit.
    */
   { "history", "List recently played items from the local playback log. Pass an "
                "optional ISO-8601 window (since/until) and a limit; an omitted "

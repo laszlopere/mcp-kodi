@@ -21,6 +21,19 @@
 #define MK_HISTORY_MAX          10000 /* keep newest this many entries */
 #define MK_HISTORY_MAX_AGE_DAYS 180   /* drop entries older than this  */
 
+/* How close (in either direction) an observation must land to an entry's
+ * [at, last_seen] coverage to merge into it when that entry is NOT the
+ * instance's newest — i.e. when something else played after it. Such a merge
+ * is only right for a late or out-of-order sighting of the *same* play by
+ * another process (11.9.5: several pollers, flock-serialized, observing the
+ * same boxes), and those arrive seconds late, not hours — while a genuine
+ * replay of an item after something else must stay a distinct play. Ten
+ * minutes absorbs lock contention, clock skew and a few missed ~2-minute
+ * polls with room to spare. The instance's *newest* entry keeps matching
+ * with no window at all, preserving the call-driven semantics: a snapshot of
+ * the same continuous playback hours later is still the same play. */
+#define MK_HISTORY_MERGE_WINDOW (10 * G_TIME_SPAN_MINUTE)
+
 struct _MkHistory
 {
   char *path; /* resolved path to the one global history.json (owned) */
@@ -224,27 +237,73 @@ compose_entry (JsonObject *snap, const char *instance, const char *name,
 }
 
 /**
- * is_duplicate:
- * @existing: the current entries, newest-first, or NULL.
- * @instance: the instance whose most recent entry we compare against.
+ * same_item:
+ * @e: an existing history entry.
  * @file: the snapshot's file path, or NULL.
  * @have_id: whether the snapshot carries a library id.
  * @id: that library id (valid only when @have_id).
  *
- * Implements the "new item" dedup test: find @instance's most recent entry
- * (the first one for it in the newest-first array) and report whether it is the
- * same thing just re-observed — same `file`, or same `id` when neither carries
- * a file. Only the most recent entry per instance matters; an older repeat is
- * still a distinct play.
+ * The item-identity test shared by all merge matching: same `file` when both
+ * sides carry one, else same `id`.
  *
- * @return TRUE if the snapshot duplicates that entry (caller should skip).
+ * @return TRUE if @e describes the same item the snapshot does.
  */
 static gboolean
-is_duplicate (JsonArray *existing, const char *instance, const char *file,
-              gboolean have_id, gint64 id)
+same_item (JsonObject *e, const char *file, gboolean have_id, gint64 id)
+{
+  const char *efile =
+    json_object_get_string_member_with_default (e, "file", NULL);
+  if (file != NULL && efile != NULL)
+    return g_strcmp0 (efile, file) == 0;
+  return have_id && json_object_has_member (e, "id")
+         && json_object_get_int_member_with_default (e, "id", -2) == id;
+}
+
+/**
+ * entry_time:
+ * @e: a history entry object.
+ * @name: the member holding an ISO-8601 stamp ("at" or "last_seen").
+ *
+ * Parses @e[@name] as a timestamp.
+ *
+ * @return a new GDateTime, or NULL when the member is absent or unparseable;
+ *         free with g_date_time_unref().
+ */
+static GDateTime *
+entry_time (JsonObject *e, const char *name)
+{
+  const char *s = json_object_get_string_member_with_default (e, name, NULL);
+  return s != NULL ? g_date_time_new_from_iso8601 (s, NULL) : NULL;
+}
+
+/**
+ * find_merge_match:
+ * @existing: the current entries, newest-first by `at`, or NULL.
+ * @instance: the observing instance's config key.
+ * @file: the snapshot's file path, or NULL.
+ * @have_id: whether the snapshot carries a library id.
+ * @id: that library id (valid only when @have_id).
+ * @at: the observation timestamp.
+ *
+ * Finds the entry an observation of (@instance, item, @at) merges into.
+ * The instance's newest entry matches on item identity alone — re-observing
+ * the same continuous playback, however much later, is the same play (the
+ * pre-11.9.4 dedup rule, kept). Older entries of the instance match only when
+ * @at also falls within MK_HISTORY_MERGE_WINDOW of their [at, last_seen]
+ * coverage: that is another process's late or out-of-order sighting of a play
+ * already logged (X arriving after X-then-Y must not spawn a second X), while
+ * a repeat beyond the window stays a genuinely distinct play. An older entry
+ * whose `at` is unparseable can't be placed in time and never window-matches.
+ *
+ * @return the index of the entry to merge into, or -1 to append a new entry.
+ */
+static gint
+find_merge_match (JsonArray *existing, const char *instance, const char *file,
+                  gboolean have_id, gint64 id, GDateTime *at)
 {
   if (existing == NULL)
-    return FALSE;
+    return -1;
+  gboolean newest = TRUE; /* the next entry of @instance is its newest */
   guint n = json_array_get_length (existing);
   for (guint i = 0; i < n; i++)
     {
@@ -256,15 +315,87 @@ is_duplicate (JsonArray *existing, const char *instance, const char *file,
                      instance)
           != 0)
         continue;
-      /* most recent entry for this instance */
-      const char *efile =
-        json_object_get_string_member_with_default (e, "file", NULL);
-      if (file != NULL && efile != NULL)
-        return g_strcmp0 (efile, file) == 0;
-      return have_id && json_object_has_member (e, "id")
-             && json_object_get_int_member_with_default (e, "id", -2) == id;
+      gboolean is_newest = newest;
+      newest = FALSE;
+      if (!same_item (e, file, have_id, id))
+        continue;
+      if (is_newest)
+        return (gint) i;
+      /* an older entry: merge only a near-in-time re-sighting */
+      g_autoptr (GDateTime) eat = entry_time (e, "at");
+      if (eat == NULL)
+        continue;
+      g_autoptr (GDateTime) eseen = entry_time (e, "last_seen");
+      GDateTime *upper = eseen != NULL ? eseen : eat;
+      if (g_date_time_difference (eat, at) <= MK_HISTORY_MERGE_WINDOW
+          && g_date_time_difference (at, upper) <= MK_HISTORY_MERGE_WINDOW)
+        return (gint) i;
     }
-  return FALSE; /* nothing logged for this instance yet */
+  return -1;
+}
+
+/**
+ * merge_entry:
+ * @oldnode: the matched existing entry's node (borrowed; not modified).
+ * @at: the incoming observation timestamp, ISO-8601.
+ * @at_dt: the same, parsed.
+ * @sort_key: out; a new ref on the merged entry's effective `at` for sorted
+ *            re-insertion, or NULL when the old `at` is unparseable (the
+ *            entry then keeps its current position).
+ * @changed: out; FALSE when the merge altered nothing (a same-second
+ *           re-sighting, or @at already inside the entry's coverage) and the
+ *           file need not be rewritten.
+ *
+ * Folds a re-sighting into the entry it matched: `at` keeps the *earliest*
+ * sighting and `last_seen` the latest, so concurrent writers converge on one
+ * entry no matter the arrival order. `last_seen` is written only once it
+ * differs from `at` — absent means "seen once". All other fields stay as
+ * first recorded (the sighting is of the same item, so they agree).
+ *
+ * @return a newly allocated merged entry node; free with json_node_unref().
+ */
+static JsonNode *
+merge_entry (JsonNode *oldnode, const char *at, GDateTime *at_dt,
+             GDateTime **sort_key, gboolean *changed)
+{
+  JsonNode *node = json_node_copy (oldnode);
+  JsonObject *o = json_node_get_object (node);
+
+  const char *old_at =
+    json_object_get_string_member_with_default (o, "at", NULL);
+  const char *old_seen =
+    json_object_get_string_member_with_default (o, "last_seen", NULL);
+  g_autoptr (GDateTime) old_at_dt = entry_time (o, "at");
+  g_autoptr (GDateTime) old_seen_dt = entry_time (o, "last_seen");
+
+  /* the earliest sighting wins `at` */
+  g_autofree char *new_at = NULL; /* NULL = keep the entry's `at` */
+  if (old_at_dt != NULL && g_date_time_compare (at_dt, old_at_dt) < 0)
+    new_at = g_strdup (at);
+
+  /* the latest sighting wins `last_seen`; record it only when it adds
+   * information (differs from the final `at` and from what is stored) */
+  GDateTime *upper_dt = old_seen_dt != NULL ? old_seen_dt : old_at_dt;
+  const char *upper = old_seen != NULL ? old_seen : old_at;
+  const char *latest =
+    (upper_dt == NULL || g_date_time_compare (at_dt, upper_dt) > 0) ? at
+                                                                    : upper;
+  const char *final_at = new_at != NULL ? new_at : old_at;
+  g_autofree char *new_seen = NULL; /* NULL = keep the entry's `last_seen` */
+  if (g_strcmp0 (latest, final_at) != 0 && g_strcmp0 (latest, old_seen) != 0)
+    new_seen = g_strdup (latest);
+
+  *changed = new_at != NULL || new_seen != NULL;
+  if (new_at != NULL)
+    json_object_set_string_member (o, "at", new_at);
+  if (new_seen != NULL)
+    json_object_set_string_member (o, "last_seen", new_seen);
+
+  if (new_at != NULL)
+    *sort_key = g_date_time_ref (at_dt);
+  else
+    *sort_key = old_at_dt != NULL ? g_date_time_ref (old_at_dt) : NULL;
+  return node;
 }
 
 /**
@@ -322,20 +453,27 @@ atomic_write (const char *path, const char *data, GError **error)
  * @snap: the now-playing snapshot, already known to be loaded.
  * @instance: the instance config key.
  * @name: the instance display label, or NULL.
+ * @at: the observation timestamp, ISO-8601 UTC, captured pre-lock.
+ * @at_dt: the same, parsed.
  * @error: return location for a GError.
  *
  * The critical section of mk_history_record(), run under the exclusive
- * lock: read the current array → dedup → compose/prepend the new
- * entry → trim by count and age → atomic rewrite. A parse/shape error
- * on the existing file aborts **without** clobbering it (better to keep the
- * user's log than overwrite data we failed to understand).
+ * lock: read the current array → match the observation against the
+ * instance's recent entries (find_merge_match) → merge into the matched
+ * entry or compose a new one → re-emit the array ordered by `at`
+ * (newest-first), the entry inserted at its observation time rather than
+ * blindly prepended → trim by count and age → atomic rewrite. A parse/shape
+ * error on the existing file aborts **without** clobbering it (better to keep
+ * the user's log than overwrite data we failed to understand).
  *
- * @return TRUE if an entry was written; FALSE with @error unset when the play
- *         is a duplicate to skip, or FALSE with @error set on failure.
+ * @return TRUE if a new entry was written; FALSE with @error unset when the
+ *         observation merged into an existing entry (or changed nothing), or
+ *         FALSE with @error set on failure.
  */
 static gboolean
 record_locked (MkHistory *self, JsonObject *snap, const char *instance,
-               const char *name, GError **error)
+               const char *name, const char *at, GDateTime *at_dt,
+               GError **error)
 {
   /* Read the existing newest-first array. A missing or empty file means no
    * entries; a present-but-unparseable/ill-shaped file aborts the write. */
@@ -373,20 +511,33 @@ record_locked (MkHistory *self, JsonObject *snap, const char *instance,
   if (file == NULL && !have_id)
     return FALSE; /* nothing identifies this item — can't dedup, don't log */
 
-  if (is_duplicate (existing, instance, file, have_id, id))
-    return FALSE; /* same thing re-observed: skip, no error */
+  /* Merge or append? */
+  gint match = find_merge_match (existing, instance, file, have_id, id, at_dt);
+  g_autoptr (JsonNode) entry = NULL;
+  g_autoptr (GDateTime) entry_at = NULL; /* sort key; NULL = keep position */
+  if (match < 0)
+    {
+      entry = compose_entry (snap, instance, name, at);
+      entry_at = g_date_time_ref (at_dt);
+    }
+  else
+    {
+      gboolean changed = FALSE;
+      entry = merge_entry (json_array_get_element (existing, (guint) match),
+                           at, at_dt, &entry_at, &changed);
+      if (!changed)
+        return FALSE; /* the sighting added nothing: leave the file alone */
+    }
 
-  /* Compose the new entry and the new newest-first array, trimmed. */
-  g_autoptr (GDateTime) now = g_date_time_new_now_utc ();
+  /* Re-emit the array with the entry at its `at`-sorted position (an entry
+   * with an unparseable stamp doesn't anchor the scan — the insertion point
+   * is the first *datable* entry no newer), trimmed by count and age. */
   g_autoptr (GDateTime) cutoff =
-    g_date_time_add_days (now, -MK_HISTORY_MAX_AGE_DAYS);
-  g_autofree char *at = g_date_time_format_iso8601 (now); /* UTC …Z */
-  g_autoptr (JsonNode) entry = compose_entry (snap, instance, name, at);
-
+    g_date_time_add_days (at_dt, -MK_HISTORY_MAX_AGE_DAYS);
   g_autoptr (JsonBuilder) b = json_builder_new ();
   json_builder_begin_array (b);
-  json_builder_add_value (b, json_node_ref (entry)); /* newest first */
-  guint kept = 1;
+  gboolean inserted = FALSE;
+  guint kept = 0;
   if (existing != NULL)
     {
       guint n = json_array_get_length (existing);
@@ -395,21 +546,39 @@ record_locked (MkHistory *self, JsonObject *snap, const char *instance,
           JsonObject *e = json_array_get_object_element (existing, i);
           if (e == NULL)
             continue;
+          if ((gint) i == match)
+            {
+              /* the merged original — superseded by @entry, which a merge
+               * with an unparseable `at` re-emits right here, in place */
+              if (!inserted && entry_at == NULL)
+                {
+                  json_builder_add_value (b, json_node_ref (entry));
+                  inserted = TRUE;
+                  kept++;
+                }
+              continue;
+            }
+          g_autoptr (GDateTime) edt = entry_time (e, "at");
+          if (!inserted && entry_at != NULL
+              && edt != NULL && g_date_time_compare (edt, entry_at) <= 0)
+            {
+              json_builder_add_value (b, json_node_ref (entry));
+              inserted = TRUE;
+              kept++;
+              if (kept >= MK_HISTORY_MAX)
+                break;
+            }
           /* Age trim: drop anything older than the cutoff. A stamp we
            * can't parse is kept rather than silently dropped. */
-          const char *eat =
-            json_object_get_string_member_with_default (e, "at", NULL);
-          if (eat != NULL)
-            {
-              g_autoptr (GDateTime) edt = g_date_time_new_from_iso8601 (eat, NULL);
-              if (edt != NULL && g_date_time_compare (edt, cutoff) < 0)
-                continue;
-            }
+          if (edt != NULL && g_date_time_compare (edt, cutoff) < 0)
+            continue;
           json_builder_add_value (b,
                                   json_node_copy (json_array_get_element (existing, i)));
           kept++;
         }
     }
+  if (!inserted) /* newest of all, older than everything kept, or empty log */
+    json_builder_add_value (b, json_node_ref (entry));
   json_builder_end_array (b);
   g_autoptr (JsonNode) outroot = json_builder_get_root (b);
 
@@ -419,7 +588,9 @@ record_locked (MkHistory *self, JsonObject *snap, const char *instance,
   json_generator_set_root (gen, outroot);
   g_autofree char *data = json_generator_to_data (gen, NULL);
 
-  return atomic_write (self->path, data, error);
+  if (!atomic_write (self->path, data, error))
+    return FALSE;
+  return match < 0; /* TRUE only when a NEW entry was appended */
 }
 
 /**
@@ -430,13 +601,18 @@ record_locked (MkHistory *self, JsonObject *snap, const char *instance,
  * @snapshot: the canonical player_state() now-playing object.
  *
  * The write path. See the header for the contract. Does the cheap
- * pre-lock checks ("is anything loaded"), then serialises the whole
+ * pre-lock checks ("is anything loaded") and stamps the observation time
+ * **before** taking the lock — a writer delayed by contention still records
+ * when it actually observed the play, and record_locked() inserts by that
+ * stamp, so concurrent flock-serialized writers converge on the same
+ * time-ordered log whatever order they land in. Then serialises the whole
  * read-modify-write under an exclusive flock on a sidecar lock file so
  * concurrent servers can't lose each other's appends. Best-effort:
  * every failure path warns to stderr and returns FALSE rather than propagating,
  * so a logging hiccup never fails the originating tool call.
  *
- * @return TRUE if a new entry was written; FALSE if skipped or on error.
+ * @return TRUE if a new entry was written; FALSE if it merged into an
+ *         existing one, was skipped, or on error.
  */
 gboolean
 mk_history_record (MkHistory *self, const char *instance, const char *name,
@@ -453,6 +629,10 @@ mk_history_record (MkHistory *self, const char *instance, const char *name,
                  "stopped")
       == 0)
     return FALSE;
+
+  /* The observation timestamp, fixed before any waiting on the lock. */
+  g_autoptr (GDateTime) at_dt = g_date_time_new_now_utc ();
+  g_autofree char *at = g_date_time_format_iso8601 (at_dt); /* UTC …Z */
 
   g_autofree char *dir = g_path_get_dirname (self->path);
   if (g_mkdir_with_parents (dir, 0700) != 0)
@@ -479,7 +659,8 @@ mk_history_record (MkHistory *self, const char *instance, const char *name,
     }
 
   GError *error = NULL;
-  gboolean appended = record_locked (self, snap, instance, name, &error);
+  gboolean appended =
+    record_locked (self, snap, instance, name, at, at_dt, &error);
   if (error != NULL)
     {
       g_warning ("mcp-kodi: history: %s", error->message);

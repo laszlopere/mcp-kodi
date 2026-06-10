@@ -41,7 +41,12 @@
  *               changes. It is the sort key, the filter for "last week /
  *               yesterday / last month" queries, and what drives
  *               the age-based trim. Records the *start*, not completion or
- *               duration.
+ *               duration. When several writers observe the same play, `at`
+ *               converges on the **earliest** sighting.
+ *   - `last_seen` — the latest sighting of the same play, same ISO-8601
+ *               form; written only once a play is re-observed (a repeat
+ *               snapshot, or another process's sighting merging in), so its
+ *               absence means "seen once". `at` stays the sort key.
  *   - `kind`  — the player kind: `audio` or `video`, the snapshot's
  *               existing `type` from Player.GetActivePlayers. Tells music from
  *               video but not movie from episode from music video.
@@ -116,18 +121,27 @@ const char *mk_history_path (MkHistory *self);
 /* Record what is playing in @snapshot to the log. @snapshot is the
  * canonical player_state() now-playing object; @instance is its
  * config key and @name the human display label (@name may be NULL). Runs the
- * full locked read-modify-write: it appends nothing unless something is loaded
- * and it is a *new* item for @instance, else it composes one entry, prepends
- * it newest-first, trims by count and age and atomically rewrites the file
- * under an exclusive lock.
+ * full locked read-modify-write: nothing is written unless something is
+ * loaded. The observation is matched against @instance's recent entries —
+ * its newest entry on item identity alone, older ones only within a short
+ * time window of their [at, last_seen] coverage. A match **merges**: `at`
+ * keeps the earliest sighting, `last_seen` the latest, and the file is
+ * rewritten only when that changed something — so recording is idempotent
+ * under concurrent flock-serialized writers, and a late or out-of-order
+ * sighting of an already-logged play never spawns a duplicate. No match
+ * composes a new entry, inserted by its `at` (the array stays newest-first
+ * by observation time, not arrival). Either way the array is trimmed by
+ * count and age and atomically rewritten under an exclusive lock.
  *
  * Best-effort: a logging failure must never fail the originating tool
- * call, so this reports no GError — it warns to stderr and returns. The boolean
- * says only whether an entry was appended (FALSE = nothing loaded, a duplicate
- * of the instance's last entry, or a swallowed write error); callers ignore it,
- * but it lets tests assert the dedup/skip behaviour.
+ * call, so this reports no GError — it warns to stderr and returns. The
+ * boolean says only whether a *new* entry was appended (FALSE = nothing
+ * loaded, the observation merged into an existing entry, or a swallowed write
+ * error); callers ignore it, but it lets tests assert the merge/skip
+ * behaviour.
  *
- * @return TRUE if a new entry was written; FALSE if skipped or on error. */
+ * @return TRUE if a new entry was written; FALSE if merged/skipped or on
+ *         error. */
 gboolean mk_history_record (MkHistory  *self,
                             const char *instance,
                             const char *name,
