@@ -18,7 +18,12 @@
  *   - cross-instance: NULL reads every box, a key filters to one;
  *   - a missing file reads as zero entries (not an error);
  *   - limit caps the result while total reports the full match count;
- *   - since/until window filtering, plus a malformed bound as a hard error.
+ *   - since/until window filtering, plus a malformed bound as a hard error;
+ *   - merge (11.9.4): a re-sighting of the instance's newest entry merges
+ *     (earliest `at` kept, `last_seen` added) however old it is; an
+ *     out-of-order sighting of a non-newest entry merges within the window
+ *     but is a distinct play beyond it; a new entry is inserted by its
+ *     observation `at`, not blindly prepended.
  */
 
 #define MK_TEST_IMPL
@@ -94,6 +99,25 @@ arr_obj (JsonNode *node, guint i)
   if (i >= json_array_get_length (a))
     return NULL;
   return json_array_get_object_element (a, i);
+}
+
+/* ISO-8601 UTC stamp @offset_secs from now; caller frees. */
+static char *
+stamp (gint offset_secs)
+{
+  g_autoptr (GDateTime) now = g_date_time_new_now_utc ();
+  g_autoptr (GDateTime) dt = g_date_time_add_seconds (now, offset_secs);
+  return g_date_time_format_iso8601 (dt);
+}
+
+/* Seed @path with a pre-built newest-first log (a JSON array literal), as a
+ * prior writer would have left it. */
+static void
+seed (const char *path, const char *json)
+{
+  GError *err = NULL;
+  MK_CHECK (g_file_set_contents (path, json, -1, &err));
+  g_clear_error (&err);
 }
 
 static void
@@ -368,6 +392,158 @@ case_window_filtering (void)
   cleanup (dir, path);
 }
 
+static void
+case_merge_newest_sets_last_seen (void)
+{
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+
+  /* The instance's NEWEST entry matches on item identity alone, however old:
+   * a later snapshot of the same continuous playback is the same play. */
+  g_autofree char *old_at = stamp (-3600);
+  g_autofree char *json = g_strdup_printf (
+    "[ { \"at\": \"%s\", \"instance\": \"box\", \"kind\": \"audio\","
+    "    \"id\": 1, \"file\": \"/x\", \"title\": \"X\" } ]",
+    old_at);
+  seed (path, json);
+
+  g_autoptr (JsonNode) s = snap (
+    "{ \"state\": \"playing\", \"type\": \"audio\", \"id\": 1,"
+    " \"file\": \"/x\", \"title\": \"X\" }");
+  /* merged into the existing entry, not appended */
+  MK_CHECK (!mk_history_record (h, "box", "Box", s));
+
+  g_autoptr (JsonNode) out =
+    mk_history_read (h, NULL, NULL, NULL, 0, NULL, NULL);
+  MK_CHECK_INT_EQ (arr_len (out), 1);
+  JsonObject *e = arr_obj (out, 0);
+  MK_CHECK (e != NULL);
+  if (e != NULL)
+    {
+      /* `at` keeps the earliest sighting; `last_seen` records the latest */
+      MK_CHECK_STR_EQ (json_object_get_string_member (e, "at"), old_at);
+      MK_CHECK (json_object_has_member (e, "last_seen"));
+      MK_CHECK (g_strcmp0 (json_object_get_string_member_with_default (
+                             e, "last_seen", ""),
+                           old_at)
+                > 0);
+    }
+
+  cleanup (dir, path);
+}
+
+static void
+case_out_of_order_sighting_merges (void)
+{
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+
+  /* Another writer already logged X then Y; our sighting of X arrives late.
+   * X is no longer the newest entry, but it is within the merge window — the
+   * sighting must fold into it, not spawn a second X (the 11.9.4 scenario). */
+  g_autofree char *y_at = stamp (-30);
+  g_autofree char *x_at = stamp (-120);
+  g_autofree char *json = g_strdup_printf (
+    "[ { \"at\": \"%s\", \"instance\": \"box\", \"kind\": \"audio\","
+    "    \"id\": 2, \"file\": \"/y\", \"title\": \"Y\" },"
+    "  { \"at\": \"%s\", \"instance\": \"box\", \"kind\": \"audio\","
+    "    \"id\": 1, \"file\": \"/x\", \"title\": \"X\" } ]",
+    y_at, x_at);
+  seed (path, json);
+
+  g_autoptr (JsonNode) s = snap (
+    "{ \"state\": \"playing\", \"type\": \"audio\", \"id\": 1,"
+    " \"file\": \"/x\", \"title\": \"X\" }");
+  MK_CHECK (!mk_history_record (h, "box", "Box", s));
+
+  gint64 total = -1;
+  g_autoptr (JsonNode) out =
+    mk_history_read (h, NULL, NULL, NULL, 0, &total, NULL);
+  MK_CHECK_INT_EQ (arr_len (out), 2); /* no spurious second X */
+  MK_CHECK_INT_EQ (total, 2);
+  JsonObject *x = arr_obj (out, 1);
+  MK_CHECK (x != NULL);
+  if (x != NULL)
+    {
+      /* X stayed below Y (ordered by `at`), kept its first-sighting stamp,
+       * and the late sighting shows up as `last_seen` */
+      MK_CHECK_STR_EQ (json_object_get_string_member (x, "file"), "/x");
+      MK_CHECK_STR_EQ (json_object_get_string_member (x, "at"), x_at);
+      MK_CHECK (json_object_has_member (x, "last_seen"));
+    }
+
+  cleanup (dir, path);
+}
+
+static void
+case_replay_beyond_window_is_new (void)
+{
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+
+  /* X played two hours ago, then Y. Playing X again now is a genuinely
+   * distinct play: a non-newest entry beyond the merge window must NOT
+   * absorb it. */
+  g_autofree char *y_at = stamp (-60);
+  g_autofree char *x_at = stamp (-7200);
+  g_autofree char *json = g_strdup_printf (
+    "[ { \"at\": \"%s\", \"instance\": \"box\", \"kind\": \"audio\","
+    "    \"id\": 2, \"file\": \"/y\", \"title\": \"Y\" },"
+    "  { \"at\": \"%s\", \"instance\": \"box\", \"kind\": \"audio\","
+    "    \"id\": 1, \"file\": \"/x\", \"title\": \"X\" } ]",
+    y_at, x_at);
+  seed (path, json);
+
+  g_autoptr (JsonNode) s = snap (
+    "{ \"state\": \"playing\", \"type\": \"audio\", \"id\": 1,"
+    " \"file\": \"/x\", \"title\": \"X\" }");
+  MK_CHECK (mk_history_record (h, "box", "Box", s)); /* a NEW entry */
+
+  g_autoptr (JsonNode) out =
+    mk_history_read (h, NULL, NULL, NULL, 0, NULL, NULL);
+  MK_CHECK_INT_EQ (arr_len (out), 3);
+  /* the fresh play lands on top; the old X keeps its own entry */
+  MK_CHECK_STR_EQ (json_object_get_string_member (arr_obj (out, 0), "file"),
+                   "/x");
+  MK_CHECK (!json_object_has_member (arr_obj (out, 0), "last_seen"));
+  MK_CHECK_STR_EQ (json_object_get_string_member (arr_obj (out, 2), "at"),
+                   x_at);
+
+  cleanup (dir, path);
+}
+
+static void
+case_insert_by_observation_time (void)
+{
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+
+  /* An entry stamped later than our observation (another writer's newer
+   * sighting already landed): the new entry must be inserted by its `at`,
+   * below it — not blindly prepended on top. */
+  g_autofree char *z_at = stamp (3600);
+  g_autofree char *json = g_strdup_printf (
+    "[ { \"at\": \"%s\", \"instance\": \"box\", \"kind\": \"audio\","
+    "    \"id\": 9, \"file\": \"/z\", \"title\": \"Z\" } ]",
+    z_at);
+  seed (path, json);
+
+  g_autoptr (JsonNode) s = snap (
+    "{ \"state\": \"playing\", \"type\": \"audio\", \"id\": 1,"
+    " \"file\": \"/x\", \"title\": \"X\" }");
+  MK_CHECK (mk_history_record (h, "box", "Box", s));
+
+  g_autoptr (JsonNode) out =
+    mk_history_read (h, NULL, NULL, NULL, 0, NULL, NULL);
+  MK_CHECK_INT_EQ (arr_len (out), 2);
+  MK_CHECK_STR_EQ (json_object_get_string_member (arr_obj (out, 0), "file"),
+                   "/z");
+  MK_CHECK_STR_EQ (json_object_get_string_member (arr_obj (out, 1), "file"),
+                   "/x");
+
+  cleanup (dir, path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -380,6 +556,10 @@ main (int argc, char **argv)
     { "missing-file-empty",   case_missing_file_is_empty },
     { "limit-and-total",      case_limit_and_total },
     { "window-filtering",     case_window_filtering },
+    { "merge-newest-last-seen",   case_merge_newest_sets_last_seen },
+    { "merge-out-of-order",       case_out_of_order_sighting_merges },
+    { "replay-beyond-window-new", case_replay_beyond_window_is_new },
+    { "insert-by-at",             case_insert_by_observation_time },
   };
   return mk_test_run (argc, argv, cases, G_N_ELEMENTS (cases));
 }

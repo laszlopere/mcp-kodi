@@ -48,12 +48,13 @@ cat > "$WORK/cfg/mcp-kodi/config.json" <<'EOF'
 EOF
 
 # Four entries, newest-first as the writer stores them: two boxes, a
-# spread of dates, and one with an unparseable timestamp that must be KEPT
-# (the reader keeps what it can't parse).
+# spread of dates, one with an unparseable timestamp that must be KEPT
+# (the reader keeps what it can't parse), and one carrying the merge's
+# last_seen stamp, which must ride through the read path verbatim.
 HIST="$WORK/state/mcp-kodi/history.json"
 cat > "$HIST" <<'EOF'
 [
-  {"at":"2026-06-09T10:00:00Z","instance":"living","name":"Living Room","kind":"audio","media":"song","id":11,"title":"Newest","album":"A","artist":["Abba"]},
+  {"at":"2026-06-09T10:00:00Z","last_seen":"2026-06-09T11:30:00Z","instance":"living","name":"Living Room","kind":"audio","media":"song","id":11,"title":"Newest","album":"A","artist":["Abba"]},
   {"at":"2026-06-05T20:00:00Z","instance":"bedroom","name":"Bedroom","kind":"video","media":"episode","id":42,"title":"Mid","showtitle":"Show","season":1,"episode":3},
   {"at":"2026-05-01T08:00:00Z","instance":"living","name":"Living Room","kind":"video","media":"movie","id":7,"title":"Oldest"},
   {"at":"not-a-date","instance":"living","name":"Living Room","kind":"audio","media":"song","id":99,"title":"Undated"}
@@ -107,6 +108,7 @@ eq "total counts every entry"      4     "$(g "$pb" '.total')"
 eq "returned all of them"          4     "$(g "$pb" '.returned')"
 eq "not truncated"                 false "$(g "$pb" '.truncated')"
 eq "newest entry first"            "Newest" "$(g "$pb" '.entries[0].title')"
+eq "last_seen rides along verbatim" "2026-06-09T11:30:00Z" "$(g "$pb" '.entries[0].last_seen')"
 eq "oldest parseable entry last-ish" "Undated" "$(g "$pb" '.entries[3].title')"
 is_true "spans both instances" \
   "$(j "$pb" '[.entries[].instance] | (index("living") != null) and (index("bedroom") != null)')"
