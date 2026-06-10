@@ -2417,6 +2417,208 @@ handler_queue (MkTools *self, const MkToolDef *def, JsonObject *args,
   return player_state (self, instance, error);
 }
 
+/* ---- getplaylist (§11.6.8) -------------------------------------------------
+ *
+ * Read the current queue: the rows of a playlist plus where playback sits in
+ * it, changing nothing — the inspection partner of `queue` (§11.6.7) and the
+ * audit step before `dropplaylists` (§11.6.9) empties everything.
+ */
+
+/* The playlist kinds `getplaylist` accepts for `type`, indexed by Kodi's three
+ * fixed playlist ids (audio 0 / video 1 / picture 2, §11.6.9). */
+static const char *const mk_playlist_types[] = { "audio", "video", "picture",
+                                                 NULL };
+
+/**
+ * schema_getplaylist:
+ * @self: the table (used to name the configured instances).
+ *
+ * Schema for the `getplaylist` tool (§11.6.8): the optional `instance` and the
+ * optional `type` selecting which playlist to read. `type` always wins when
+ * provided — it reads that playlist even while another plays, the only way to
+ * inspect an inactive queue before `dropplaylists` (§11.6.9) destroys it;
+ * omitted, the active player's playlist is read.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_getplaylist (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_instance (b, self, FALSE);
+  prop_enum (b, "type", mk_playlist_types,
+             "Which playlist to read. Always wins when provided — reads that "
+             "playlist even while another plays, the only way to inspect an "
+             "inactive queue. Omitted reads the active player's playlist.");
+
+  schema_end (b, NULL);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_getplaylist:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments; optional `type` and `instance`.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `getplaylist` tool (§11.6.8): reports what is queued and
+ * where playback sits, read-only. The playlist to read is the `type` argument
+ * when provided — it always wins, mapping to Kodi's fixed playlist ids
+ * (audio 0 / video 1 / picture 2) — else the one behind the active player,
+ * resolved as `queue` does (§11.6.7):
+ *
+ *   1. `Player.GetActivePlayers` → the active playerid (if any).
+ *   2. `Player.GetProperties { playerid, ["playlistid","position"] }` — which
+ *      playlist the player is consuming and where it sits in it.
+ *   3. `Playlist.GetItems { playlistid, properties: ["file"] }` on the
+ *      resolved playlist (skipped when there is nothing to resolve).
+ *
+ * Each queued row carries the item's library id under its `<type>id` key —
+ * the same identifier `queue` takes, so a row can be re-queued as-is — and/or
+ * its `file` (a `playfile`-ready path), plus `label` and `type`. `position` is
+ * reported only when the playlist read is the one the active player is
+ * consuming: a cursor into someone else's playlist would be meaningless. An
+ * empty playlist — or no `type` with nothing playing (no active player, or
+ * non-playlist playback, §11.6.7) — yields an empty `items` list, not an
+ * error.
+ *
+ * @return `{ "type"?, "total", "position"?, "items": [ { "<type>id"?,
+ *         "file"?, "label"?, "type" } ] }`, or NULL with @error set (bad
+ *         arguments or a call failure).
+ */
+static JsonNode *
+handler_getplaylist (MkTools *self, const MkToolDef *def, JsonObject *args,
+                     GError **error)
+{
+  (void) def;
+  const char *instance = arg_instance (args);
+  const char *type = arg_str (args, "type", NULL);
+
+  /* The requested playlist: `type` maps to Kodi's fixed playlist ids by its
+   * index in mk_playlist_types; -1 means "the active player's". */
+  gint64 want = -1;
+  if (type != NULL)
+    {
+      for (gsize i = 0; mk_playlist_types[i] != NULL; i++)
+        if (g_str_equal (type, mk_playlist_types[i]))
+          want = (gint64) i;
+      if (want < 0)
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "getplaylist: \"type\" must name a playlist "
+                       "(audio/video/picture)");
+          return NULL;
+        }
+    }
+
+  /* Steps 1–2: the active player's playlist and position — the default read
+   * target, and the test deciding whether `position` applies below. */
+  g_autoptr (JsonNode) active =
+    mk_kodi_call (self->kodi, instance, "Player.GetActivePlayers", NULL, error);
+  if (active == NULL)
+    return NULL;
+  JsonArray *players =
+    JSON_NODE_HOLDS_ARRAY (active) ? json_node_get_array (active) : NULL;
+  gint64 activelist = -1, position = -1;
+  if (players != NULL && json_array_get_length (players) > 0)
+    {
+      JsonObject *p0 = json_array_get_object_element (players, 0);
+      gint64 playerid =
+        json_object_get_int_member_with_default (p0, "playerid", 0);
+      static const char *const fields[] = { "playlistid", "position", NULL };
+      g_autoptr (JsonNode) pparams = player_props (playerid, fields);
+      g_autoptr (JsonNode) pres = mk_kodi_call (self->kodi, instance,
+                                                "Player.GetProperties", pparams,
+                                                error);
+      if (pres == NULL)
+        return NULL;
+      JsonObject *props = json_node_get_object (pres);
+      activelist =
+        json_object_get_int_member_with_default (props, "playlistid", -1);
+      position =
+        json_object_get_int_member_with_default (props, "position", -1);
+    }
+
+  gint64 playlistid = want >= 0 ? want : activelist;
+
+  /* Step 3: list the resolved playlist. No playlist to resolve (no `type` and
+   * nothing playing) reads as an empty queue, not an error. */
+  g_autoptr (JsonNode) ires = NULL;
+  JsonArray *rows = NULL;
+  if (playlistid >= 0)
+    {
+      g_autoptr (JsonBuilder) pb = json_builder_new ();
+      json_builder_begin_object (pb);
+      json_builder_set_member_name (pb, "playlistid");
+      json_builder_add_int_value (pb, playlistid);
+      json_builder_set_member_name (pb, "properties");
+      json_builder_begin_array (pb);
+      json_builder_add_string_value (pb, "file");
+      json_builder_end_array (pb);
+      json_builder_end_object (pb);
+      g_autoptr (JsonNode) iparams = json_builder_get_root (pb);
+
+      ires = mk_kodi_call (self->kodi, instance, "Playlist.GetItems", iparams,
+                           error);
+      if (ires == NULL)
+        return NULL;
+      /* An empty playlist's reply carries no `items` member at all. */
+      JsonObject *io =
+        JSON_NODE_HOLDS_OBJECT (ires) ? json_node_get_object (ires) : NULL;
+      if (io != NULL && json_object_has_member (io, "items"))
+        rows = json_object_get_array_member (io, "items");
+    }
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  if (playlistid >= 0 && playlistid < 3)
+    {
+      json_builder_set_member_name (b, "type");
+      json_builder_add_string_value (b, mk_playlist_types[playlistid]);
+    }
+  json_builder_set_member_name (b, "total");
+  json_builder_add_int_value (b, rows != NULL ? json_array_get_length (rows)
+                                              : 0);
+  /* `position` only when the playlist read is the active player's own. */
+  if (playlistid >= 0 && playlistid == activelist && position >= 0)
+    {
+      json_builder_set_member_name (b, "position");
+      json_builder_add_int_value (b, position);
+    }
+  json_builder_set_member_name (b, "items");
+  json_builder_begin_array (b);
+  for (guint i = 0; rows != NULL && i < json_array_get_length (rows); i++)
+    {
+      JsonObject *it = json_array_get_object_element (rows, i);
+      const char *itype =
+        json_object_get_string_member_with_default (it, "type", "unknown");
+      gint64 iid = json_object_get_int_member_with_default (it, "id", -1);
+
+      json_builder_begin_object (b);
+      /* The library id under its `<type>id` key — the identifier `queue`
+       * takes, so the row re-queues as-is. Off-library rows have none: Kodi
+       * reports them as type "unknown" with id -1 (§13.4.1.1), leaving their
+       * `file` as the row's identity. */
+      if (iid >= 0 && !g_str_equal (itype, "unknown"))
+        {
+          g_autofree char *idkey = g_strdup_printf ("%sid", itype);
+          json_builder_set_member_name (b, idkey);
+          json_builder_add_int_value (b, iid);
+        }
+      copy_member_nonempty (b, it, "file");
+      copy_member_nonempty (b, it, "label");
+      json_builder_set_member_name (b, "type");
+      json_builder_add_string_value (b, itype);
+      json_builder_end_object (b);
+    }
+  json_builder_end_array (b);
+  json_builder_end_object (b);
+  return json_builder_get_root (b);
+}
+
 /* ---- rpc (§11.6.6) --------------------------------------------------------
  *
  * The escape hatch: send any JSON-RPC method to a box and return Kodi's raw
@@ -2989,6 +3191,36 @@ static const MkToolDef mk_tool_defs[] = {
              "next:true plays it right after the current item. Something must "
              "already be playing (start with play/playfile).",
     schema_queue, handler_queue, NULL },
+
+  /**
+   * getplaylist (Playback tool):
+   *
+   * Read the queue without changing anything (§11.6.8) — the inspection
+   * partner of `queue` and the audit step before `dropplaylists` (§11.6.9).
+   * With no `type`, reads the playlist behind the active player (resolved
+   * like `queue`, §11.6.7); a given `type` (audio/video/picture) always wins,
+   * reading that playlist even while another plays — the only way to see an
+   * inactive queue. Each row carries the item's library id under its
+   * `<type>id` key (re-queueable as-is) and/or its `file` (playfile-ready),
+   * plus `label` and `type`. `position` — where the now-playing item sits —
+   * is reported only when the playlist read is the active player's own. An
+   * empty playlist, or nothing playing with no `type`, is an empty list, not
+   * an error.
+   *
+   * Call:  Player.GetActivePlayers → Player.GetProperties (playlistid,
+   *        position) → Playlist.GetItems on the resolved playlist.
+   * @param type: "audio" | "video" | "picture" — the playlist to read;
+   *        omitted reads the active player's.
+   * @param instance (optional): the Kodi instance to target; omitted uses the
+   *        configured default (§5.1).
+   * @return `{ "type"?, "total", "position"?, "items": [ { "<type>id"?,
+   *         "file"?, "label"?, "type" } ] }` — read-only, playback untouched.
+   */
+  { "getplaylist", "Read the queue without changing it: the items of the "
+                   "active player's playlist — or of a named one (audio/"
+                   "video/picture), which always wins — plus the position of "
+                   "the now-playing item. An empty queue is an empty list.",
+    schema_getplaylist, handler_getplaylist, NULL },
 
   /* ---- History tool — read back the local playback log; no Kodi call
    *      (§13.10). ---- */

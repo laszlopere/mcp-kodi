@@ -579,13 +579,17 @@ Everything below this section is original design for *this* project.
          Returns the player_state() snapshot (playback unchanged).
       Other table actions (remove/clear/list, line 145) deferred. Baseline test:
       tests/functional/scenarios/queue-next-episode.txt.
-    [ ] 11.6.8 getplaylist — read the current queue. Resolves the active player's
+    [x] 11.6.8 getplaylist — read the current queue. Resolves the active player's
     playlist (like queue, §11.6.7), then `Playlist.GetItems {playlistid,
     properties:[…]}`; reports the queued rows (`{<type>id|file, label, type}`)
     plus the `position` of the now-playing item (Player.GetProperties), so the
     caller sees what is queued and where playback sits. `{instance?, type?}` —
-    `type` (audio/video/picture) reads a specific playlist when nothing is
-    playing; otherwise the active one. Empty/none → empty list, not an error.
+    `type` (audio/video/picture) always wins when provided, reading that
+    playlist even while another plays (the only way to inspect an inactive
+    queue before dropplaylists §11.6.9 destroys it); omitted, the active one;
+    `position` reported only when the read playlist is the active one.
+    Empty/none → empty list, not an error. Functional test:
+    tests/getplaylist.test.
     [ ] 11.6.9 dropplaylists — empty the queues. `{instance?}`. `Playlist.Clear`
     on each playlist id (audio 0 / video 1 / picture 2) so no queued items
     remain; plural — clears all three in one call. Clear on the *active* playlist
@@ -877,7 +881,7 @@ Everything below this section is original design for *this* project.
   [ ] 12.11 Playlist
     [x] 12.11.1 add — Add item(s) to playlist (`Playlist.Add`) — the `queue` tool's append (§11.6.7)
     [x] 12.11.2 clear — Clear playlist (`Playlist.Clear`) — the stop Button's auto-clear (§11.6.1.3); dropplaylists (§11.6.9) will reuse it
-    [ ] 12.11.3 items — Get all items from playlist (`Playlist.GetItems`)
+    [x] 12.11.3 items — Get all items from playlist (`Playlist.GetItems`) — the `getplaylist` tool's read (§11.6.8)
     [ ] 12.11.4 playlists — Returns all existing playlists (`Playlist.GetPlaylists`)
     [ ] 12.11.5 properties — Retrieves the values of the given properties (`Playlist.GetProperties`)
     [x] 12.11.6 insert — Insert item(s) into playlist. Does not work for picture playlists (aka slideshows). (`Playlist.Insert`) — the `queue` tool's `next: true` (§11.6.7)
