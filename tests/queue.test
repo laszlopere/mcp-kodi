@@ -15,7 +15,10 @@
 # Caller mistakes are exercised thoroughly: every malformed argument set, the
 # nothing-playing refusal, an unconfigured instance, and a nonexistent library
 # id must each return a tool error whose message names the mistake and the
-# accepted usage.
+# accepted usage. One caller mistake is deliberately NOT caught: queueing an
+# item whose media type does not match the playing playlist is the caller's
+# job to avoid (§11.6.7), and the test documents that Kodi silently accepts
+# the foreign item rather than erroring.
 #
 # Since real playback may be audible on a real device, the test reads the
 # volume at startup, lowers it to 2% for the run, and restores the original on
@@ -281,7 +284,42 @@ eq "the appended item stays last" \
    "$file2" "$(printf '%s' "$items" | jq -r '.result.items[-1].file')"
 
 # ===========================================================================
-# 6. Cleanup — stop playback and clear the playlist the test grew, leaving
+# 6. Cross-type queueing: an item whose media type does NOT match the playing
+#    playlist (a movie onto the audio queue, or a song onto the video queue).
+#    The spec makes matching the caller's job (§11.6.7 step 3) and Kodi 19.4
+#    *silently accepts* the foreign item — confirmed live — so this documents
+#    that no error comes back and the item really lands in the queue: the
+#    caller gets no safety net, only `getplaylist` would reveal the mix-up.
+#    Needs one leaf of the other type; a single-type library skips it.
+# ===========================================================================
+if [ "$kind" = movie ]; then
+  othertype=song
+  otherid=$(kodi_rpc AudioLibrary.GetSongs '{"limits":{"start":0,"end":1}}' \
+             | jq -r '.result.songs[0].songid // empty')
+else
+  othertype=movie
+  otherid=$(kodi_rpc VideoLibrary.GetMovies '{"limits":{"start":0,"end":1}}' \
+             | jq -r '.result.movies[0].movieid // empty')
+fi
+
+if [ -n "$otherid" ]; then
+  echo "-- cross-type queueing ($othertype onto the $kind queue)"
+  b=$(queue "$(jargs --arg t "$othertype" --argjson i "$otherid" '{type:$t,id:$i}')")
+  eq "mismatched type is NOT refused (caller's job to match)" \
+     false "$(res_err "$b")"
+  eq "snapshot still plays the FIRST leaf" "$file1" "$(g "$(res_body "$b")" '.file')"
+  items=$(kodi_rpc Playlist.GetItems \
+          "{\"playlistid\":$plid,\"properties\":[\"file\"]}")
+  eq "the foreign item really joined the queue" 4 \
+     "$(printf '%s' "$items" | jq -r '.result.items | length')"
+  eq "queue tail is the foreign item's type" "$othertype" \
+     "$(printf '%s' "$items" | jq -r '.result.items[-1].type')"
+else
+  echo "   (library holds no $othertype — cross-type assertions skipped)"
+fi
+
+# ===========================================================================
+# 7. Cleanup — stop playback and clear the playlist the test grew, leaving
 #    the player in the safe neutral state. The volume guard's EXIT trap then
 #    restores the original volume.
 # ===========================================================================
