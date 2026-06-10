@@ -1,0 +1,19 @@
+# transport: start a video, then pause / play / stop it.
+# Pause/play/stop use Input.ExecuteAction — the current §11.6.1 button behaviour.
+# Format: '# title', then a raw JSON-RPC request line, then '[state] observation'.
+
+# start a video
+{"jsonrpc":"2.0","id":1,"method":"Player.Open","params":{"item":{"movieid":1}}}
+[playing] Alien starts playing fullscreen
+
+# press pause
+{"jsonrpc":"2.0","id":2,"method":"Input.ExecuteAction","params":{"action":"pause"}}
+[paused] playback freezes; the OSD shows the pause indicator
+
+# press play
+{"jsonrpc":"2.0","id":3,"method":"Input.ExecuteAction","params":{"action":"play"}}
+[playing] playback resumes from where it was paused
+
+# press stop
+{"jsonrpc":"2.0","id":4,"method":"Input.ExecuteAction","params":{"action":"stop"}}
+[stopped] video stops; Kodi returns to the menu/home

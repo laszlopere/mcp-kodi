@@ -1,0 +1,29 @@
+# transport via playlist: build a one-item video playlist, then play / pause /
+# continue / stop it. Same transport as transport-playeropen.txt, but the video
+# is started from the video playlist (id 1) rather than opened directly.
+# The single item is one video file: a Family Guy episode.
+# Format: '# title', then a raw JSON-RPC request line, then '[state] observation'.
+
+# clear the video playlist
+{"jsonrpc":"2.0","id":1,"method":"Playlist.Clear","params":{"playlistid":1}}
+[stopped] nothing playing yet; the video playlist is emptied
+
+# add one Family Guy episode (a single video file) to the playlist
+{"jsonrpc":"2.0","id":2,"method":"Playlist.Add","params":{"playlistid":1,"item":{"file":"/home/pipas/net/storage03/Serials/Family Guy/Family Guy Blue Harvest 2007 DVDRip [A Release-Lounge H264].mp4"}}}
+[stopped] still nothing playing; the episode is now queued in the playlist
+
+# start the playlist
+{"jsonrpc":"2.0","id":3,"method":"Player.Open","params":{"item":{"playlistid":1}}}
+[playing] Family Guy (Blue Harvest) starts playing fullscreen
+
+# press pause
+{"jsonrpc":"2.0","id":4,"method":"Input.ExecuteAction","params":{"action":"pause"}}
+[paused] playback freezes; the OSD shows the pause indicator
+
+# press play (continue)
+{"jsonrpc":"2.0","id":5,"method":"Input.ExecuteAction","params":{"action":"play"}}
+[playing] playback resumes from where it was paused
+
+# press stop
+{"jsonrpc":"2.0","id":6,"method":"Input.ExecuteAction","params":{"action":"stop"}}
+[stopped] video stops; Kodi returns to the menu/home

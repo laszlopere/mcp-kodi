@@ -1,0 +1,36 @@
+# playlist auto-advance: build a TWO-item video playlist (two South Park
+# episodes), start it, seek episode 1 to the very end, watch it finish and
+# episode 2 start automatically, then stop.
+#
+# Tip: drive the "watch the auto-advance" step with a longer settle so the probe
+# lands after the hand-off, e.g.  run-scenario.sh -s 6 -w 25 <this file>
+#
+# Format: '# title', then a raw JSON-RPC request line, then '[state] observation'.
+
+# clear the video playlist
+{"jsonrpc":"2.0","id":1,"method":"Playlist.Clear","params":{"playlistid":1}}
+[stopped] nothing playing yet; the video playlist is emptied
+
+# add South Park S24E01 (episode 1) to the playlist
+{"jsonrpc":"2.0","id":2,"method":"Playlist.Add","params":{"playlistid":1,"item":{"file":"/home/pipas/net/storage03/Serials/South Park/Season 24/South Park - S24E01 - WEBDL.2160p.mkv"}}}
+[stopped] still nothing playing; episode 1 is queued
+
+# add South Park S24E02 (episode 2) to the playlist
+{"jsonrpc":"2.0","id":3,"method":"Playlist.Add","params":{"playlistid":1,"item":{"file":"/home/pipas/net/storage03/Serials/South Park/Season 24/South Park - S24E02 - WEBDL.2160p.mkv"}}}
+[stopped] still nothing playing; episode 2 is queued behind episode 1
+
+# start the playlist
+{"jsonrpc":"2.0","id":4,"method":"Player.Open","params":{"item":{"playlistid":1}}}
+[playing] episode 1 ("The Pandemic Special") starts playing fullscreen
+
+# seek episode 1 to the very end
+{"jsonrpc":"2.0","id":5,"method":"Player.Seek","params":{"playerid":1,"value":{"percentage":99.5}}}
+[playing] episode 1 jumps to its final seconds; the progress bar is near the end
+
+# watch the auto-advance to episode 2 (drive this step with -w 25)
+{"jsonrpc":"2.0","id":6,"method":"JSONRPC.Ping"}
+[playing] episode 1 ends and episode 2 ("South ParQ Vaccination Special") starts automatically
+
+# press stop
+{"jsonrpc":"2.0","id":7,"method":"Input.ExecuteAction","params":{"action":"stop"}}
+[stopped] video stops; Kodi returns to the menu/home
