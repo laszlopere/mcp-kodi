@@ -4,9 +4,9 @@
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
  * Companion to test-tools.c. Where that suite covers tools/list, the unknown
- * tool, and noop, this one exercises the OTHER handlers — search, playfile, the
- * transport Buttons, mute/unmute, the rpc escape hatch and its gate, plus a
- * handler failure path — all driven against the *programmable* stub
+ * tool, and noop, this one exercises the OTHER handlers — search, contributors,
+ * playfile, the transport Buttons, mute/unmute, the rpc escape hatch and its
+ * gate, plus a handler failure path — all driven against the *programmable* stub
  * (stub-kodi-prog.c): each handler's Kodi calls are answered with realistic
  * canned `result`s the case sets up first, so there is ZERO network or file I/O.
  * The history write path is stubbed too (stub-history.c, no disk). The stubs
@@ -206,6 +206,220 @@ case_search_music (void)
   /* music: resolve the artist, then fetch songs — two distinct RPCs. */
   MK_CHECK (called ("AudioLibrary.GetArtists"));
   MK_CHECK (called ("AudioLibrary.GetSongs"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* ---- contributors ----------------------------------------------------------
+ *
+ * The stub keys canned responses by METHOD, so all three videodb:// people
+ * nodes (movies/actors, movies/directors, tvshows/actors) answer with the SAME
+ * Files.GetDirectory listing — which is exactly what exercises the
+ * case-insensitive cross-source merge: a video label is "seen" as movie actor,
+ * movie director and TV actor at once, and a music artist sharing a name with a
+ * video label must collapse into one row with the container bits OR-ed.
+ */
+
+/* Number of times the stub recorded a call to METHOD. */
+static guint
+call_count (const char *method)
+{
+  guint n = 0;
+  if (stub_kodi_methods == NULL)
+    return 0;
+  for (guint i = 0; i < stub_kodi_methods->len; i++)
+    if (strcmp (g_ptr_array_index (stub_kodi_methods, i), method) == 0)
+      n++;
+  return n;
+}
+
+/* Check one contributors row: NAME plus the exact `in` list. */
+static void
+check_contrib_row (JsonObject *row, const char *name,
+                   const char *const *in, guint n_in)
+{
+  MK_CHECK_STR_EQ (json_object_get_string_member (row, "name"), name);
+  JsonArray *arr = json_object_get_array_member (row, "in");
+  MK_CHECK_INT_EQ (json_array_get_length (arr), n_in);
+  for (guint i = 0; i < n_in && i < json_array_get_length (arr); i++)
+    MK_CHECK_STR_EQ (json_array_get_string_element (arr, i), in[i]);
+}
+
+/* Program the shared music + video people fixtures: two music artists (one an
+ * album artist) and a three-label video node listing, two of which match
+ * "scott". "Tony Scott" exists on both sides, so it must merge. */
+static void
+contrib_fixtures (void)
+{
+  stub_kodi_set_response (
+    "AudioLibrary.GetArtists",
+    "{ \"artists\": ["
+    "    { \"artistid\": 5, \"artist\": \"Scott Walker\","
+    "      \"label\": \"Scott Walker\", \"isalbumartist\": true },"
+    "    { \"artistid\": 9, \"artist\": \"Tony Scott\","
+    "      \"label\": \"Tony Scott\", \"isalbumartist\": false } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 2, \"total\": 2 } }");
+  stub_kodi_set_response (
+    "Files.GetDirectory",
+    "{ \"files\": ["
+    "    { \"file\": \"videodb://movies/actors/1/\", \"id\": 1,"
+    "      \"filetype\": \"directory\", \"label\": \"Ridley Scott\","
+    "      \"type\": \"unknown\" },"
+    "    { \"file\": \"videodb://movies/actors/2/\", \"id\": 2,"
+    "      \"filetype\": \"directory\", \"label\": \"Tony Scott\","
+    "      \"type\": \"unknown\" },"
+    "    { \"file\": \"videodb://movies/actors/3/\", \"id\": 3,"
+    "      \"filetype\": \"directory\", \"label\": \"Harrison Ford\","
+    "      \"type\": \"unknown\" } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 3, \"total\": 3 } }");
+}
+
+static void
+case_contributors_merge (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  contrib_fixtures ();
+
+  g_autoptr (JsonNode) an = args_node ("{ \"name\": \"scott\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "contributors", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  MK_CHECK (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload));
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      /* "Harrison Ford" must not match; the rest dedupe to three people. */
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 3);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "returned"), 3);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "offset"), 0);
+      MK_CHECK (!json_object_get_boolean_member (p, "truncated"));
+
+      JsonArray *rows = json_object_get_array_member (p, "rows");
+      MK_CHECK_INT_EQ (json_array_get_length (rows), 3);
+      if (json_array_get_length (rows) == 3)
+        {
+          /* Sorted by name. Ridley Scott: video-only, every node answered the
+           * same listing, so movies (actor+director) and tvshows merged. */
+          static const char *const ridley[] = { "movies", "tvshows" };
+          check_contrib_row (json_array_get_object_element (rows, 0),
+                             "Ridley Scott", ridley, 2);
+          /* Scott Walker: music album artist → albums as well as songs. */
+          static const char *const walker[] = { "albums", "songs" };
+          check_contrib_row (json_array_get_object_element (rows, 1),
+                             "Scott Walker", walker, 2);
+          /* Tony Scott: song-only artist (no albums) merged with his video
+           * appearances — one row spanning both libraries. */
+          static const char *const tony[] = { "songs", "movies", "tvshows" };
+          check_contrib_row (json_array_get_object_element (rows, 2),
+                             "Tony Scott", tony, 3);
+        }
+    }
+
+  /* One music call plus one page for each of the three people nodes. */
+  MK_CHECK_INT_EQ (call_count ("AudioLibrary.GetArtists"), 1);
+  MK_CHECK_INT_EQ (call_count ("Files.GetDirectory"), 3);
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+static void
+case_contributors_paging (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  contrib_fixtures ();
+
+  /* A one-row window into the middle of the merged set. */
+  g_autoptr (JsonNode) an =
+    args_node ("{ \"name\": \"scott\", \"limit\": 1, \"offset\": 1 }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "contributors", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 3);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "returned"), 1);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "offset"), 1);
+      MK_CHECK (json_object_get_boolean_member (p, "truncated"));
+      JsonArray *rows = json_object_get_array_member (p, "rows");
+      MK_CHECK_INT_EQ (json_array_get_length (rows), 1);
+      if (json_array_get_length (rows) == 1)
+        MK_CHECK_STR_EQ (
+          json_object_get_string_member (
+            json_array_get_object_element (rows, 0), "name"),
+          "Scott Walker");
+    }
+
+  /* count: the full total with zero rows. */
+  g_autoptr (JsonNode) an2 =
+    args_node ("{ \"name\": \"scott\", \"count\": true }");
+  g_autoptr (JsonNode) res2 =
+    mk_tools_call (tools, "contributors", json_node_get_object (an2), &error);
+
+  MK_CHECK (error == NULL);
+  is_error = TRUE;
+  g_autoptr (JsonNode) payload2 = envelope_payload (res2, &is_error);
+  MK_CHECK (!is_error);
+  if (payload2 != NULL && JSON_NODE_HOLDS_OBJECT (payload2))
+    {
+      JsonObject *p = json_node_get_object (payload2);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 3);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "returned"), 0);
+      MK_CHECK (json_object_get_boolean_member (p, "truncated"));
+      MK_CHECK_INT_EQ (
+        json_array_get_length (json_object_get_array_member (p, "rows")), 0);
+    }
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+static void
+case_contributors_missing_name (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  g_autoptr (JsonNode) an = args_node ("{}");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "contributors", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL); /* tool error, not a protocol error */
+
+  gboolean is_error = FALSE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      const char *msg = json_object_get_string_member (
+        json_node_get_object (payload), "error");
+      MK_CHECK (msg != NULL && strstr (msg, "\"name\" is required") != NULL);
+    }
+
+  /* rejected before any Kodi call. */
+  MK_CHECK (!called ("AudioLibrary.GetArtists"));
+  MK_CHECK (!called ("Files.GetDirectory"));
 
   g_clear_error (&error);
   free_tools (tools, cfg, kodi);
@@ -1284,6 +1498,9 @@ main (int argc, char **argv)
   static const MkTestCase cases[] = {
     { "search-movie",            case_search_movie },
     { "search-music",            case_search_music },
+    { "contributors-merge",      case_contributors_merge },
+    { "contributors-paging",     case_contributors_paging },
+    { "contributors-no-name",    case_contributors_missing_name },
     { "playfile",                case_playfile },
     { "queue-append",            case_queue_append },
     { "queue-next-inserts",      case_queue_next_inserts },

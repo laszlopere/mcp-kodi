@@ -1,0 +1,281 @@
+#!/bin/sh
+# Functional test for the `contributors` tool.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi, exercising `contributors` across its three sources (music artists via
+# AudioLibrary.GetArtists; movie actors/directors and TV actors via the
+# videodb:// people nodes) plus paging, count, case-insensitivity and the
+# error and no-match paths.
+#
+# Library-agnostic: it discovers a real artist, movie actor, movie director and
+# TV actor from the target Kodi and asserts against those values, so it passes
+# against any *populated* library rather than assuming particular names.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+KODI_HOST=${KODI_HOST:-127.0.0.1:8080}
+KODI_AUTH=${KODI_AUTH:-kodi:kodi}
+KODI_SCHEME=${KODI_SCHEME:-http}
+export KODI_HOST KODI_AUTH KODI_SCHEME
+
+SKIP=77
+
+skip () { echo "SKIP: $*"; exit $SKIP; }
+
+# ---- dependencies ---------------------------------------------------------
+
+command -v jq   >/dev/null 2>&1 || skip "jq not found"
+command -v curl >/dev/null 2>&1 || skip "curl not found"
+
+# Locate the mcp-kodi binary: the automake build tree first ($top_builddir is
+# exported by `make check`), then fallbacks for running the script by hand.
+find_binary () {
+  for c in \
+    "${top_builddir:-}/src/mcp-kodi" \
+    "$(dirname "$0")/../src/mcp-kodi" \
+    "./src/mcp-kodi" \
+    "src/mcp-kodi"
+  do
+    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# ---- talking to Kodi directly (for discovery + the liveness gate) ---------
+
+kodi_rpc () { # method params-json  ->  raw JSON-RPC response
+  curl -s -m 20 -u "$KODI_AUTH" -H 'Content-Type: application/json' \
+    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" \
+    "$KODI_SCHEME://$KODI_HOST/jsonrpc"
+}
+
+pong=$(kodi_rpc JSONRPC.Ping '{}' | jq -r '.result // empty' 2>/dev/null)
+[ "$pong" = "pong" ] || skip "Kodi not reachable at $KODI_SCHEME://$KODI_HOST"
+
+# ---- talking to the server under test (MCP over stdio) --------------------
+
+# Feed `initialize` + one `tools/call`, echo back the tool result object for
+# request id 2 (`{ content:[{type,text}], isError }`). The server reads
+# newline-delimited JSON and exits on EOF, so one invocation per call keeps
+# every assertion isolated.
+mcp_tool () { # name arguments-json  ->  tool result object
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
+    | "$MCP" 2>/dev/null \
+    | jq -c 'select(.id==2) | .result'
+}
+
+contributors () { mcp_tool contributors "$1"; } # arguments-json -> result object
+res_err  () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
+res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
+jargs    () { jq -cn "$@"; }                   # build an arguments object safely
+g        () { printf '%s' "$1" | jq -r "$2"; } # body, filter -> scalar
+j        () { printf '%s' "$1" | jq    "$2"; } # body, filter -> json/bool
+
+# ---- assertions -----------------------------------------------------------
+
+PASS=0
+FAIL=0
+ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
+
+eq () { # desc expected actual
+  if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi
+}
+is_true () { # desc jq-bool-string
+  if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi
+}
+
+# Invariants every successful contributors result must hold (response shape):
+# the paging fields agree, every row is {name, in} with only known containers,
+# and the merge left no case-duplicates.
+check_invariants () { # body expected-offset label
+  b=$1; off=$2; p=$3
+  eq   "$p — offset echoed"         "$off" "$(g "$b" '.offset')"
+  eq   "$p — returned == rows len"  "$(g "$b" '.returned')" "$(g "$b" '.rows|length')"
+  is_true "$p — total >= returned"  "$(j "$b" '.total >= .returned')"
+  # truncated is exactly "more rows lie beyond this page".
+  eq   "$p — truncated flag consistent" \
+       "$(j "$b" '(.offset + .returned) < .total')" "$(g "$b" '.truncated')"
+  is_true "$p — rows are {name, in}" \
+       "$(j "$b" 'all(.rows[]; (.name|length>0) and (.in|length>0))')"
+  is_true "$p — in only names known containers" \
+       "$(j "$b" '[.rows[].in[]] | all(. == "albums" or . == "songs" or . == "movies" or . == "tvshows")')"
+  is_true "$p — no case-duplicate names" \
+       "$(j "$b" '[.rows[].name | ascii_downcase] | length == (unique | length)')"
+}
+
+# True when some row's name equals NAME (case-insensitively) and its `in`
+# contains CONTAINER.
+has_row_in () { # body name container
+  printf '%s' "$1" | jq --arg n "$2" --arg c "$3" \
+    'any(.rows[]; (.name | ascii_downcase) == ($n | ascii_downcase) and any(.in[]; . == $c))'
+}
+
+echo "contributors functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ===========================================================================
+# 1. Reachability + noop.
+# ===========================================================================
+echo "-- reachability / noop"
+noop=$(mcp_tool noop '{}')
+eq "noop is not an error" false "$(res_err "$noop")"
+
+# ===========================================================================
+# 2. Discover real library people to assert against — one per source.
+# ===========================================================================
+artist_row=$(kodi_rpc AudioLibrary.GetArtists \
+         '{"albumartistsonly":false,"properties":["isalbumartist"],"limits":{"start":0,"end":1}}' \
+        | jq -c '.result.artists[0] // empty')
+artist=""; isalbumartist="false"
+if [ -n "$artist_row" ]; then
+  artist=$(g "$artist_row" '.artist // .label // ""')
+  isalbumartist=$(g "$artist_row" '.isalbumartist // false')
+fi
+
+node_first () { # videodb-path -> first label (empty when the node is empty)
+  kodi_rpc Files.GetDirectory \
+    "{\"directory\":\"$1\",\"media\":\"video\",\"sort\":{\"method\":\"label\",\"order\":\"ascending\"},\"limits\":{\"start\":0,\"end\":1}}" \
+    | jq -r '.result.files[0].label // empty'
+}
+mactor=$(node_first "videodb://movies/actors/")
+mdirector=$(node_first "videodb://movies/directors/")
+tvactor=$(node_first "videodb://tvshows/actors/")
+
+# ===========================================================================
+# 3. Music people — the artist resolves with `songs` (+ `albums` when an
+#    album artist), and `count` agrees with the listed total.
+# ===========================================================================
+echo "-- music people"
+if [ -n "$artist" ]; then
+  echo "   (artist: $artist · isalbumartist: $isalbumartist)"
+
+  b=$(res_body "$(contributors "$(jargs --arg n "$artist" '{name:$n}')")")
+  check_invariants "$b" 0 "music"
+  is_true "music finds the artist"      "$(j "$b" '.total >= 1')"
+  is_true "artist row drills to songs"  "$(has_row_in "$b" "$artist" songs)"
+  if [ "$isalbumartist" = "true" ]; then
+    is_true "album artist row drills to albums" "$(has_row_in "$b" "$artist" albums)"
+  fi
+  total=$(g "$b" '.total')
+
+  c=$(res_body "$(contributors "$(jargs --arg n "$artist" '{name:$n,count:true}')")")
+  eq "music/count returns zero rows"     0        "$(g "$c" '.returned')"
+  eq "music/count total matches listing" "$total" "$(g "$c" '.total')"
+else
+  echo "   (no artists in library — music assertions skipped)"
+fi
+
+# ===========================================================================
+# 4. Video people — each discovered name comes back pointing at its container.
+# ===========================================================================
+echo "-- video people"
+if [ -n "$mactor" ]; then
+  echo "   (movie actor: $mactor)"
+  b=$(res_body "$(contributors "$(jargs --arg n "$mactor" '{name:$n}')")")
+  check_invariants "$b" 0 "movie-actor"
+  is_true "movie actor drills to movies" "$(has_row_in "$b" "$mactor" movies)"
+else
+  echo "   (no movie actors in library — skipped)"
+fi
+
+if [ -n "$mdirector" ]; then
+  echo "   (movie director: $mdirector)"
+  b=$(res_body "$(contributors "$(jargs --arg n "$mdirector" '{name:$n}')")")
+  check_invariants "$b" 0 "movie-director"
+  is_true "movie director drills to movies" "$(has_row_in "$b" "$mdirector" movies)"
+else
+  echo "   (no movie directors in library — skipped)"
+fi
+
+if [ -n "$tvactor" ]; then
+  echo "   (tv actor: $tvactor)"
+  b=$(res_body "$(contributors "$(jargs --arg n "$tvactor" '{name:$n}')")")
+  check_invariants "$b" 0 "tv-actor"
+  is_true "tv actor drills to tvshows" "$(has_row_in "$b" "$tvactor" tvshows)"
+
+  # Case-insensitivity: the same name uppercased finds the same person.
+  up=$(printf '%s' "$tvactor" | tr '[:lower:]' '[:upper:]')
+  b=$(res_body "$(contributors "$(jargs --arg n "$up" '{name:$n}')")")
+  is_true "uppercased query still matches" "$(has_row_in "$b" "$tvactor" tvshows)"
+else
+  echo "   (no tv actors in library — skipped)"
+fi
+
+# ===========================================================================
+# 5. Paging — a wide one-letter query pages deterministically: pages are
+#    offset-disjoint and cover the same merged, sorted set.
+# ===========================================================================
+echo "-- paging"
+w=$(res_body "$(contributors '{"name":"a","count":true}')")
+wide_total=$(g "$w" '.total')
+if [ "$wide_total" -ge 2 ] 2>/dev/null; then
+  p1=$(res_body "$(contributors '{"name":"a","limit":1}')")
+  check_invariants "$p1" 0 "page-1"
+  eq "page 1 returns one row"   1    "$(g "$p1" '.returned')"
+  eq "page 1 is truncated"      true "$(g "$p1" '.truncated')"
+  p2=$(res_body "$(contributors '{"name":"a","limit":1,"offset":1}')")
+  check_invariants "$p2" 1 "page-2"
+  first=$(g "$p1" '.rows[0].name')
+  second=$(g "$p2" '.rows[0].name')
+  if [ "x$first" != "x$second" ]; then
+    ok "pages are offset-disjoint"
+  else
+    no "pages are offset-disjoint" "both pages returned [$first]"
+  fi
+  # Paging past the end is a clean empty page, not an error.
+  pe=$(res_body "$(contributors "$(jargs --argjson o "$wide_total" '{name:"a",offset:$o}')")")
+  check_invariants "$pe" "$wide_total" "page-past-end"
+  eq "past-the-end page is empty" 0 "$(g "$pe" '.returned')"
+else
+  echo "   (fewer than 2 people match \"a\" — paging assertions skipped)"
+fi
+
+# ===========================================================================
+# 6. Error + edge paths. A bad request is a clean tool error (isError:true),
+#    never a crash; a no-match is a normal empty result.
+# ===========================================================================
+echo "-- errors / edges"
+
+b=$(contributors '{}')
+eq "missing name -> tool error" true "$(res_err "$b")"
+case "$(g "$(res_body "$b")" '.error')" in
+  *name*) ok "missing-name error names \"name\"";;
+  *)      no "missing-name error names \"name\"";;
+esac
+
+b=$(contributors "$(jargs '{name:"zzqq-no-such-person-zzqq"}')")
+eq "no-match is not an error" false "$(res_err "$b")"
+nb=$(res_body "$b")
+eq "no-match total is 0"     0     "$(g "$nb" '.total')"
+eq "no-match returned is 0"  0     "$(g "$nb" '.returned')"
+eq "no-match rows are empty" 0     "$(g "$nb" '.rows|length')"
+eq "no-match not truncated"  false "$(g "$nb" '.truncated')"
+
+# ===========================================================================
+# 7. People report — a human-readable peek at who is in the target library,
+#    stressing the wide merged-listing path.
+# ===========================================================================
+echo "-- people report"
+b=$(res_body "$(contributors '{"name":"an","limit":15}')")
+check_invariants "$b" 0 "report"
+printf '   %s of %s people matching "an":\n' "$(g "$b" '.returned')" "$(g "$b" '.total')"
+printf '%s' "$b" | jq -r '.rows[] | "     \(.name)  ·  in: \(.in | join(", "))"'
+
+# ---- tally ----------------------------------------------------------------
+echo "------------------------------------------------------------"
+printf 'contributors functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+exit 0
