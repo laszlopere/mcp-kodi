@@ -10,16 +10,18 @@
  * deliberately do **not** share storage, so a history append can never race a
  * state write.
  *
- * Capture is **call-driven only**: the module never polls Kodi and never
- * subscribes to its WebSocket push. The only moments we learn what is playing
- * are the moments a tool call runs and produces a now-playing snapshot — so the
- * log records *what the assistant caused or observed*, not a complete audit of
- * the box. Known, accepted blind spots: playback started from the physical
- * remote / Kodi UI is invisible unless a later call happens to snapshot it, and
- * we capture only the item playing at the moment of the call — the first item
- * when a play starts — not the tracks Kodi advances to on its own (no
- * playlist/queue tracking yet). Honest about its gaps; good enough for "what
- * did we play".
+ * Capture has two feeders, both arriving as player_state() snapshots — this
+ * module itself never talks to Kodi, and never subscribes to its WebSocket
+ * push. (1) **Call-driven**: every playback-affecting tool call ends in a
+ * snapshot, so the log records what the assistant caused or observed. (2)
+ * **Live monitoring** (mk_tools_poll_history, on a ~2-minute timer in main):
+ * every configured box is snapshotted each round, so playback started outside
+ * the server — the TV remote, the Kodi UI — and the tracks Kodi advances to
+ * on its own are captured too, within a round of starting. The remaining,
+ * accepted blind spot is deliberate: nothing is observed while no mcp-kodi
+ * process runs, so this is session-lifetime coverage ("what played while the
+ * assistant was up"), not a daemon's complete audit of the box. Honest about
+ * its gaps; good enough for "what did we play".
  *
  * The raw material is free: every playback-affecting tool already ends by
  * building the canonical now-playing snapshot (player_state() — state, type,

@@ -181,11 +181,12 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     atomic; seeds resume / next-episode / handoff; missing file = empty
     state.
 
-[ ] 11.9 Playback history, global append-only log (mk-history). One
+[x] 11.9 Playback history, global append-only log (mk-history). One
     cross-instance log at ~/.local/state/mcp-kodi/history.json; capture
-    is call-driven today, so it records what the assistant caused or
-    observed — 11.9.5 adds a polling loop to also catch playback started
-    outside the MCP server. (tests/history.test)
+    is call-driven (what the assistant caused or observed) plus the
+    11.9.5 polling loop, which also catches playback started outside
+    the MCP server while a server runs. (tests/history.test,
+    tests/monitor.test)
     [x] 11.9.1 mk_history_record — write path: flock-serialized
         read-modify-write (never bare last-write-wins), dedup (append only
         a newly observed item, so pause/volume churn is ignored), trim by
@@ -219,7 +220,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         within a 10-minute window of their [at, last_seen] coverage;
         the observation stamp is taken before the flock; a merge that
         changes nothing skips the rewrite.
-    [ ] 11.9.5 Live monitoring — poll the Kodi instances so the history
+    [x] 11.9.5 Live monitoring — poll the Kodi instances so the history
         also captures playback not initiated through the MCP server
         (e.g. started from the TV remote). Poll every ~2 minutes by
         timer (websocket notifications may or may not be available, so
@@ -229,7 +230,19 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         An unreachable box is normal (powered off) and must be skipped
         silently. This is the feature 11.9.4's merge hardening prepares
         for — with several mcp-kodi processes polling the same boxes,
-        the merge must stay idempotent.
+        the merge must stay idempotent. Landed:
+        mk_tools_poll_history() snapshots every configured instance via
+        player_state() — the same path every tool call takes, history
+        feed included — dropping errors without a warning; an idle box
+        costs one RPC and never touches the log. main() arms the
+        recurring timer on the stdio main loop: 120s default,
+        MCP_KODI_POLL_SECONDS overrides (0 disables; tests use 1s).
+        Coverage is deliberately session-lifetime — the log records
+        what played while a server was up, not a daemon's audit. Unit
+        cases (test-tools-handlers.c) + tests/monitor.test, which
+        starts playback behind the server's back over raw JSON-RPC and
+        asserts the poller logged it once (merged across rounds) while
+        skipping a dead box silently.
 
 [ ] 11.10 Build clean, test against live Kodi, write README
 
