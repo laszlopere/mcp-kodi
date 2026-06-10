@@ -177,8 +177,25 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
         verified); there is NO filter param — name lookup must go through the
         actor/director filter on the Get* methods (12.16.12/12.16.21) or be
         paged client-side.
-    [ ] 12.5.2 fileDetails — Get details for a specific file (Files.GetFileDetails)
-    [ ] 12.5.3 sources — Get the sources of the media windows (Files.GetSources)
+        Real-path listing (verified live, 19.4 + 20.5, for 11.12): it is a
+        TRUE disk listing, but ONLY inside the configured media sources —
+        any directory outside them answers the same bare -32602 a truly
+        nonexistent one gets (an existing /tmp errors; an EMPTY dir under a
+        source lists fine as []), so a refused listing is meaningful only
+        for paths under a 12.5.3 source. `media` is an extension FILTER,
+        not a hint: media:"video" on a music folder returns [] (hiding
+        every mp3); use media:"files" to list everything.
+    [x] 12.5.2 fileDetails — Get details for a specific file (Files.GetFileDetails)
+        NOT a disk check (verified live, 20.5): errors -32602 for ANY file
+        absent from the library DB — including files that exist on disk —
+        and succeeds for library entries. It answers "is this path in the
+        library?", never "is this file on disk?" (11.12 needed the latter;
+        use a 12.5.1 parent-dir listing instead).
+    [x] 12.5.3 sources — Get the sources of the media windows (Files.GetSources)
+        { media: "music"|"video"|... } → { sources: [{file, label}] }.
+        Defines the area 12.5.1 can browse (see above). Source paths are
+        plain prefixes of their content's paths (multipath:// composites
+        exist; a plain prefix match just won't claim those).
     [ ] 12.5.4 prepareDownload — Provides a way to download a given file (e.g. providing an URL to the real file location) (Files.PrepareDownload)
     [ ] 12.5.5 setFileDetails — Update the given specific file with the given details (Files.SetFileDetails)
 
@@ -281,6 +298,16 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
         Notes: result is just "OK", not the item — confirm via GetItem/noop.
         Opening replaces current playback (it interrupted a paused video here).
         options (2nd param) can set resume, playername, etc.
+        Missing files (verified live for 11.12, 19.4 + 20.5): a plain path
+        NOT in the library is disk-checked up front — missing → bare -32602
+        "Invalid params". But an IN-LIBRARY path whose file vanished after
+        the scan, or any library-id item, is accepted with "OK" and playback
+        just silently never starts — GetActivePlayers stays [] — and the
+        doomed open still STOPS whatever was playing. Same split for
+        Playlist.Add (12.11.1): non-library missing path refused, stale
+        library path/id added silently. Detection: pre-check via a 12.5.1
+        parent listing (sources caveat there), and after an "OK" treat
+        "no active player post-settle" as the failure it is.
     [ ] 12.10.10 playPause — Pauses or unpause playback and returns the new state (Player.PlayPause)
     [ ] 12.10.11 rotate — Rotates current picture (Player.Rotate)
     [ ] 12.10.12 seek — Seek through the playing item (Player.Seek)

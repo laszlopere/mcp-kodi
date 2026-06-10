@@ -192,12 +192,29 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     malformed file on reload should keep the last good config, not kill
     the server.
 
-[ ] 11.12 Missing media file — proper error reporting. Check what happens
-    when a library item's file is missing from disk and playback fails:
-    Kodi's Player.Open may still return "OK" while playback silently
-    never starts, so the play/playfile/queue tools must detect the
-    failure and report a proper error message to the client instead of
-    claiming success. Test fixture: on mini02 (living-room TV), songid
-    592 — "/home/pipas/net/storage0x/Music/Iron Maiden/1980 - Iron
-    Maiden/01 Prowler.mp3" — exists in the music library but the file is
-    missing from disk; use it to verify the behavior.
+[x] 11.12 Missing media file — proper error reporting. Verified live (19.4 +
+    20.5): Player.Open/Playlist.Add disk-check only paths NOT in the
+    library ("Invalid params"); an in-library path whose file is gone is
+    accepted with "OK" and playback silently never starts (a doomed open
+    even stops what was playing); a library id is never disk-checked.
+    Fix (mk-tools.c, missing-media section): playfile and queue verify
+    the file themselves before touching the player — list its parent dir
+    with Files.GetDirectory media:"files" (a true disk listing, but only
+    inside the configured sources; a refused listing convicts only a
+    path under a Files.GetSources source — outside, the file is
+    unverifiable and Kodi stays the authority). queue resolves a library
+    id to its path via Get<Kind>Details first (an unknown id becomes a
+    proper "no <kind> with id" error). Kodi's own bare refusals are
+    reshaped to name the file and cause, and playfile backstops the
+    silent case: "OK" but no active player after the settle is a
+    "playback never started" error, never a stopped-success. Unit cases
+    (test-tools-handlers.c) + functional coverage (playfile.test,
+    queue.test). Fixtures kept for regression: mini02 songid 592
+    (Prowler, folder unlistable under the source) and local songid 1
+    (Ring Ring → deleted /tmp path, exercises the post-open backstop) —
+    do NOT AudioLibrary.Clean them away.
+    [ ] 11.12.1 Residual gap: queue of a library item whose path lies
+        outside every configured source (artificial; real entries are
+        scanned from sources) is unverifiable at add time and still
+        fails only when playback reaches it — a post-advance check would
+        need player monitoring (see 11.9.5).
