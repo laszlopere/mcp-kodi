@@ -76,6 +76,16 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
         Note: contains is a substring match — "abba" also matched
         "Black Sabbath". artistid carries into step 2.
 
+        More verified-live notes (contributors type "band" rides these):
+        albumartistsonly:true composes with a name filter — {"albumartists
+        only":true,"filter":{"field":"artist","operator":"contains",
+        "value":"abba"}} → exactly the matching ALBUM artists. But the
+        group-vs-person fields are useless on a tag-scraped library: the
+        `type` ("Group"/"Person") and `gender` artist properties come back
+        as "" for every artist (they are MusicBrainz-fed; plain ID3 tags
+        never populate them), so "band" cannot be filtered natively —
+        isalbumartist is the only workable proxy (TODO 11.6.4.4).
+
         Step 2 — albums of that artist (AudioLibrary.GetAlbums, see 12.3.4).
         Use the special {"artistid": N} filter (not a field/operator rule):
         {
@@ -145,12 +155,20 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
     [ ] 12.3.12 recentlyAddedSongs — Retrieve recently added songs (AudioLibrary.GetRecentlyAddedSongs)
     [ ] 12.3.13 recentlyPlayedAlbums — Retrieve recently played albums (AudioLibrary.GetRecentlyPlayedAlbums)
     [ ] 12.3.14 recentlyPlayedSongs — Retrieve recently played songs (AudioLibrary.GetRecentlyPlayedSongs)
-    [ ] 12.3.15 roles — Retrieve all contributor roles (AudioLibrary.GetRoles)
+    [x] 12.3.15 roles — Retrieve all contributor roles (AudioLibrary.GetRoles)
         Enumerates the contribution kinds usable as the {"field":"role"}
         filter in GetArtists/GetSongs (with allroles:true). Verified on local
         Kodi: roleid 1 Artist, 2 Composer, 3 Conductor, 4 Lyricist. So
         "songs composed by X" = GetSongs filter role is "Composer" + artist
         contains X, allroles:true.
+        The GetArtists side is verified live too (contributors type
+        "composer" rides it): {"allroles":true,"filter":{"field":"role",
+        "operator":"is","value":"Composer"}} returns the composer-role
+        artists, and the rule and-combines with an artist-name rule via the
+        composite {"and":[...]} form — role is "Composer" + artist contains
+        "sedaka" → exactly the 2 matching rows. Roles also come back as the
+        `roles` artist property ([{role, roleid}]); artists with no song
+        role (malformed-tag album artists) omit the property entirely.
     [ ] 12.3.16 songDetails — Retrieve details about a specific song (AudioLibrary.GetSongDetails)
     [x] 12.3.17 songs — Retrieve all songs from specified album, artist or genre (AudioLibrary.GetSongs) — see chain in 12.3.6 (step 3): {"albumid": N}/{"artistid": N}/{"genreid": N} filter; file = playable path, songid = Player.Open handle.
     [ ] 12.3.18 sources — Get all music sources, including unique ID (AudioLibrary.GetSources)

@@ -108,6 +108,27 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             set (default 50, max 500); answers "do we have
             anything with X" and feeds 11.6.4.2 with exact names
             (tests/contributors.test)
+        [x] 11.6.4.4 contributors type filter — "list all the bands" as a
+            first-class query: optional type ∈ band|composer|actor|director
+            narrows to one contributor kind, and name is now optional
+            (omitted = enumerate everyone of that kind, paged). band is
+            SYNTHESIZED from isalbumartist (= GetArtists albumartistsonly:
+            true — one server-filtered call, no node walks): Kodi's native
+            group/person notion (artisttype/gender properties, MusicBrainz-
+            fed) is empty on real tag-scraped libraries (verified live), so
+            "band" = album-level artist — includes solo headliners, which is
+            the right set for "what bands do we have". composer = allroles:
+            true + server-side {role is "Composer"} rule, and-combined with
+            the name rule when both apply (verified live — KODI-API
+            12.3.15); actor = movies/actors + tvshows/actors nodes; director
+            = movies/directors. Each type skips the sources that cannot hold
+            it. Omitted type keeps all sources (unchanged). {} enumerates
+            the whole merged people set instead of erroring — node matching
+            is app-side anyway, so an empty needle costs the same as a
+            one-letter one (verified ~12k merged people on mini02). Result
+            shape unchanged. (tests/contributors.test §6-7, unit
+            contributors-{enumerate-all,band,composer,actor-director,
+            bad-type})
     [x] 11.6.5 playfile — play one file via Player.Open {item:{file}}
         (KODI-API 12.10.9); any path, in-library or not; auto-selects the
         audio/video player; Kodi enriches a scanned file back to its
