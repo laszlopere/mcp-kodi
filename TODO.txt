@@ -321,9 +321,10 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         a primary, high-value filter ("everything Pink Floyd I played",
         "how much Metallica this week"). It is the music analogue of the
         searchmedia `artist` / contributors band lookup, fed by the same
-        names. BLOCKED ON 11.13.1: the entry's `artist` is empty for
-        poorly-tagged songs today, so an artist filter is only as good as
-        what monitoring captured — fix the capture first.
+        names. UNBLOCKED by 11.13.1 (done): the capture now records an
+        album/display-artist fallback, so the entry carries an artist whenever
+        Kodi knows one — the filter is only as good as what monitoring captured,
+        but that is now as good as Kodi's own metadata.
       - text match: a substring (case-insensitive) over the other human
         fields an entry carries — `title`/`album`/`showtitle`/`label` —
         so a partial title/album narrows the log without the caller
@@ -349,8 +350,16 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     query. Spec the exact arg set before coding (single `match` vs
     per-field is the main open choice).
 
-    [ ] 11.13.1 Capture a usable artist for songs (prerequisite for the
-        artist filter above). Investigated 2026-06-10: artist is NOT
+    [x] 11.13.1 Capture a usable artist for songs (prerequisite for the
+        artist filter above). DONE 2026-06-10: player_state() now requests
+        `albumartist`/`displayartist` alongside `artist`, and copy_best_artist()
+        (mk-tools.c) records the best non-empty one (song `artist` → albumartist
+        → displayartist, the last wrapped to the array shape). copy_member_nonempty
+        now also drops an all-empty-string array (the `[""]` Kodi hands back for an
+        untagged song), so a blank artist is omitted rather than stored as `[""]`.
+        Unit cases in test-tools.c (artist-prefers-song-tag / -fallback-albumartist
+        / -fallback-displayartist / -all-empty-omitted), driven by a configurable
+        stub Player.GetItem item. Investigated 2026-06-10: artist is NOT
         broadly missing — it is captured fine for properly-tagged music
         (Abba, Iron Maiden, Metallica all present in history.json) — but
         it lands empty for poorly-tagged files. Two causes:

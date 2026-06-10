@@ -27,6 +27,7 @@
 /* From stub-kodi.c / stub-history.c. */
 extern GPtrArray *stub_kodi_methods;
 extern void       stub_kodi_reset (void);
+extern void       stub_kodi_set_item (const char *json);
 extern int        stub_history_record_calls;
 extern void       stub_history_reset (void);
 
@@ -136,6 +137,138 @@ case_unknown_tool_is_error (void)
   mk_config_free (cfg);
 }
 
+/* Run `noop` and hand back the parsed now-playing snapshot object node (owned
+ * by the caller). The handler funnels through player_state(), so this is how a
+ * case inspects the snapshot player_state() built from the stub's
+ * Player.GetItem reply (which a case can shape with stub_kodi_set_item). */
+static JsonNode *
+noop_snapshot (MkTools *tools)
+{
+  GError *error = NULL;
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "noop", NULL, &error);
+  MK_CHECK (error == NULL);
+  MK_CHECK (res != NULL);
+  if (res == NULL)
+    {
+      g_clear_error (&error);
+      return NULL;
+    }
+  JsonObject *o = json_node_get_object (res);
+  JsonArray *content = json_object_get_array_member (o, "content");
+  JsonObject *c0 = json_array_get_object_element (content, 0);
+  const char *text = json_object_get_string_member (c0, "text");
+  return json_from_string (text, NULL);
+}
+
+/* Assert the snapshot's `artist` is a one-element array holding @expected. */
+static void
+check_artist (JsonNode *snap, const char *expected)
+{
+  MK_CHECK (snap != NULL && JSON_NODE_HOLDS_OBJECT (snap));
+  if (snap == NULL || !JSON_NODE_HOLDS_OBJECT (snap))
+    return;
+  JsonObject *s = json_node_get_object (snap);
+  MK_CHECK (json_object_has_member (s, "artist"));
+  if (!json_object_has_member (s, "artist"))
+    return;
+  JsonArray *a = json_object_get_array_member (s, "artist");
+  MK_CHECK (a != NULL && json_array_get_length (a) >= 1);
+  if (a != NULL && json_array_get_length (a) >= 1)
+    MK_CHECK_STR_EQ (json_array_get_string_element (a, 0), expected);
+}
+
+/* The song `artist` tag wins when present — fallbacks are not consulted. */
+static void
+case_artist_prefers_song_tag (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_item ("{ \"title\": \"X\", \"file\": \"/m/x.flac\","
+                      "  \"type\": \"song\", \"id\": 1,"
+                      "  \"artist\": [\"Iron Maiden\"],"
+                      "  \"albumartist\": [\"Various\"],"
+                      "  \"displayartist\": \"Various\" }");
+
+  g_autoptr (JsonNode) snap = noop_snapshot (tools);
+  check_artist (snap, "Iron Maiden");
+
+  mk_tools_free (tools);
+  mk_kodi_free (kodi);
+  mk_config_free (cfg);
+}
+
+/* A blank song `artist:[""]` falls back to `albumartist`. */
+static void
+case_artist_falls_back_to_albumartist (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_item ("{ \"title\": \"TRACK 01\", \"file\": \"/m/lp.flac\","
+                      "  \"type\": \"song\", \"id\": 2,"
+                      "  \"artist\": [\"\"],"
+                      "  \"albumartist\": [\"Pink Floyd\"],"
+                      "  \"displayartist\": \"Pink Floyd\" }");
+
+  g_autoptr (JsonNode) snap = noop_snapshot (tools);
+  check_artist (snap, "Pink Floyd");
+
+  mk_tools_free (tools);
+  mk_kodi_free (kodi);
+  mk_config_free (cfg);
+}
+
+/* With both `artist` and `albumartist` blank, `displayartist` (a plain string)
+ * is wrapped into the one-element array shape. */
+static void
+case_artist_falls_back_to_displayartist (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_item ("{ \"title\": \"TRACK 02\", \"file\": \"/m/lp.flac\","
+                      "  \"type\": \"song\", \"id\": 3,"
+                      "  \"artist\": [\"\"],"
+                      "  \"albumartist\": [\"\"],"
+                      "  \"displayartist\": \"The Doors\" }");
+
+  g_autoptr (JsonNode) snap = noop_snapshot (tools);
+  check_artist (snap, "The Doors");
+
+  mk_tools_free (tools);
+  mk_kodi_free (kodi);
+  mk_config_free (cfg);
+}
+
+/* An all-empty artist with no usable fallback is omitted, so an absent
+ * `artist` honestly means "unknown" rather than a noisy `[""]`. */
+static void
+case_artist_all_empty_is_omitted (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_item ("{ \"title\": \"TRACK 03\", \"file\": \"/m/lp.flac\","
+                      "  \"type\": \"song\", \"id\": 4,"
+                      "  \"artist\": [\"\"],"
+                      "  \"albumartist\": [\"\"],"
+                      "  \"displayartist\": \"\" }");
+
+  g_autoptr (JsonNode) snap = noop_snapshot (tools);
+  MK_CHECK (snap != NULL && JSON_NODE_HOLDS_OBJECT (snap));
+  if (snap != NULL && JSON_NODE_HOLDS_OBJECT (snap))
+    MK_CHECK (!json_object_has_member (json_node_get_object (snap), "artist"));
+
+  mk_tools_free (tools);
+  mk_kodi_free (kodi);
+  mk_config_free (cfg);
+}
+
 static void
 case_noop_routes_through_stub (void)
 {
@@ -191,9 +324,13 @@ int
 main (int argc, char **argv)
 {
   static const MkTestCase cases[] = {
-    { "tools-list-shape",         case_tools_list_shape },
-    { "unknown-tool-is-error",    case_unknown_tool_is_error },
-    { "noop-routes-through-stub", case_noop_routes_through_stub },
+    { "tools-list-shape",            case_tools_list_shape },
+    { "unknown-tool-is-error",       case_unknown_tool_is_error },
+    { "artist-prefers-song-tag",     case_artist_prefers_song_tag },
+    { "artist-fallback-albumartist", case_artist_falls_back_to_albumartist },
+    { "artist-fallback-displayartist", case_artist_falls_back_to_displayartist },
+    { "artist-all-empty-omitted",    case_artist_all_empty_is_omitted },
+    { "noop-routes-through-stub",    case_noop_routes_through_stub },
   };
   return mk_test_run (argc, argv, cases, G_N_ELEMENTS (cases));
 }

@@ -308,19 +308,49 @@ copy_member (JsonBuilder *b, JsonObject *src, const char *name)
 }
 
 /**
+ * array_has_value:
+ * @a: a JSON array.
+ *
+ * @return TRUE if @a carries any information: a string element is informative
+ * only when non-empty, any non-string element always counts. So `[]` and an
+ * array of only empty strings (`[""]`, the blank artist Kodi hands back for an
+ * untagged song) report FALSE, while `["Abba"]` reports TRUE.
+ */
+static gboolean
+array_has_value (JsonArray *a)
+{
+  guint n = json_array_get_length (a);
+  for (guint i = 0; i < n; i++)
+    {
+      JsonNode *el = json_array_get_element (a, i);
+      if (!JSON_NODE_HOLDS_VALUE (el)
+          || json_node_get_value_type (el) != G_TYPE_STRING)
+        return TRUE;
+      const char *s = json_node_get_string (el);
+      if (s != NULL && *s != '\0')
+        return TRUE;
+    }
+  return FALSE;
+}
+
+/**
  * copy_member_nonempty:
  * @b: the builder, positioned inside an object.
  * @src: the source object to copy from, or NULL.
  * @name: the member to copy.
  *
  * Like copy_member(), but skips values that carry no information: an empty
- * string, an empty array, or a negative integer. Kodi returns every requested
- * `Player.GetItem` property regardless of media type, filling the inapplicable
- * ones with sentinels — `""`, `[]`, and `-1` (confirmed live: an off-library
- * file reports `season`/`episode`/`track` as -1 and `showtitle`/`album` as ""
- * with `type:"unknown"`). This omits exactly those, so the snapshot
- * carries a per-media field only where it applies ("omit what's empty").
- * A zero is kept on purpose — `season` 0 is the legitimate "specials" season.
+ * string, an empty (or all-empty-string) array, or a negative integer. Kodi
+ * returns every requested `Player.GetItem` property regardless of media type,
+ * filling the inapplicable ones with sentinels — `""`, `[]`, and `-1`
+ * (confirmed live: an off-library file reports `season`/`episode`/`track` as -1
+ * and `showtitle`/`album` as "" with `type:"unknown"`). A poorly-tagged song
+ * also yields `artist:[""]` — a one-element array of an empty string, length 1
+ * yet empty — which this likewise drops, so a blank artist is omitted (its
+ * absence then honestly means "unknown") rather than stored as noisy `[""]`.
+ * This omits exactly those, so the snapshot carries a per-media field only where
+ * it applies ("omit what's empty"). A zero is kept on purpose — `season` 0 is
+ * the legitimate "specials" season.
  */
 static void
 copy_member_nonempty (JsonBuilder *b, JsonObject *src, const char *name)
@@ -341,10 +371,60 @@ copy_member_nonempty (JsonBuilder *b, JsonObject *src, const char *name)
         return;
     }
   else if (JSON_NODE_HOLDS_ARRAY (node)
-           && json_array_get_length (json_node_get_array (node)) == 0)
+           && !array_has_value (json_node_get_array (node)))
     return;
   json_builder_set_member_name (b, name);
   json_builder_add_value (b, json_node_copy (node));
+}
+
+/**
+ * copy_best_artist:
+ * @b: the builder, positioned inside the snapshot object.
+ * @item: the `Player.GetItem` item object.
+ *
+ * Records the best available performer for a song under `artist`, trying the
+ * song-level `artist`, then `albumartist`, then `displayartist` in turn and
+ * stopping at the first that carries a value. For a well-tagged track the song
+ * `artist` wins as before; but Kodi returns `artist:[""]` for an untagged /
+ * bootleg rip even when it has computed an `albumartist`/`displayartist` from
+ * the album/folder/scraper, so requesting only `artist` (as player_state() used
+ * to) lost the performer for poorly-tagged music. The chosen value is
+ * normalized to the array shape `artist` already carries: a `displayartist`
+ * (a plain joined string) is wrapped in a one-element array. Nothing is
+ * recorded when none of the three carries a value, so an absent `artist`
+ * honestly means "unknown" — mirroring copy_member_nonempty's "omit what's
+ * empty" for the rest of the snapshot.
+ */
+static void
+copy_best_artist (JsonBuilder *b, JsonObject *item)
+{
+  static const char *const sources[] = { "artist", "albumartist", NULL };
+  for (gsize i = 0; sources[i] != NULL; i++)
+    {
+      if (!json_object_has_member (item, sources[i]))
+        continue;
+      JsonNode *node = json_object_get_member (item, sources[i]);
+      if (JSON_NODE_HOLDS_ARRAY (node)
+          && array_has_value (json_node_get_array (node)))
+        {
+          json_builder_set_member_name (b, "artist");
+          json_builder_add_value (b, json_node_copy (node));
+          return;
+        }
+    }
+  if (!json_object_has_member (item, "displayartist"))
+    return;
+  JsonNode *node = json_object_get_member (item, "displayartist");
+  if (!JSON_NODE_HOLDS_VALUE (node)
+      || json_node_get_value_type (node) != G_TYPE_STRING)
+    return;
+  const char *s = json_node_get_string (node);
+  if (s == NULL || *s == '\0')
+    return;
+  json_builder_set_member_name (b, "artist");
+  json_builder_begin_array (b);
+  json_builder_add_string_value (b, s);
+  json_builder_end_array (b);
 }
 
 /**
@@ -400,6 +480,10 @@ player_props (gint64 playerid, const char *const *fields)
  * it applies (copy_member_nonempty drops the `""`/`[]`/`-1` sentinels Kodi
  * returns for the other media types), so a movie carries none of them and every
  * status/transport reply reads richer ("playing S01E02 of …") for free. The
+ * call also requests `albumartist`/`displayartist`: an untagged song reports a
+ * blank `artist:[""]`, so copy_best_artist falls back to those computed names
+ * (album/folder/scraper-derived) and records the best non-empty one as
+ * `artist`, so the performer survives for poorly-tagged music too. The
  * real media type and library id (`media`/`id`) are surfaced too, under keys
  * distinct from `type` (which is spent on the player kind): both are identity
  * fields Kodi auto-injects into the same GetItem reply, so they cost nothing
@@ -468,12 +552,14 @@ player_state (MkTools *self, const char *instance, GError **error)
     return NULL;
   JsonObject *props = json_node_get_object (pres);
 
-  static const char *const item_fields[] = { "title", "file",
-                                             /* History enrichment:
-                                              * episode and song identifiers,
-                                              * fetched in this same call. */
-                                             "showtitle", "season", "episode",
-                                             "album", "artist", "track", NULL };
+  static const char *const item_fields[] = {
+    "title", "file",
+    /* History enrichment: episode and song identifiers, fetched in this same
+     * call. `albumartist`/`displayartist` are the fallbacks copy_best_artist
+     * uses when an untagged song's own `artist` tag is blank. */
+    "showtitle", "season", "episode", "album", "artist", "albumartist",
+    "displayartist", "track", NULL
+  };
   g_autoptr (JsonNode) iparams = player_props (playerid, item_fields);
   g_autoptr (JsonNode) ires =
     mk_kodi_call (self->kodi, instance, "Player.GetItem", iparams, error);
@@ -523,7 +609,8 @@ player_state (MkTools *self, const char *instance, GError **error)
   copy_member_nonempty (b, item, "season");
   copy_member_nonempty (b, item, "episode");
   copy_member_nonempty (b, item, "album");
-  copy_member_nonempty (b, item, "artist");
+  /* artist with album-artist / display-artist fallback for untagged rips. */
+  copy_best_artist (b, item);
   copy_member_nonempty (b, item, "track");
   copy_member (b, props, "time");
   copy_member (b, props, "totaltime");

@@ -22,13 +22,28 @@
 /* Names of every method passed to mk_kodi_call(), in order. Owned strings. */
 GPtrArray *stub_kodi_methods = NULL;
 
-/* Reset the recorded call log between cases. */
+/* Optional override for the `Player.GetItem` item body. When non-NULL, it is
+ * used verbatim as the `item` in place of the default song, letting a case
+ * drive player_state() with a chosen item (e.g. an empty-artist song to
+ * exercise the album/display-artist fallback). Owned string. */
+static char *stub_kodi_item_json = NULL;
+
+/* Set (or clear, with NULL) the Player.GetItem item override for one case. */
+void
+stub_kodi_set_item (const char *json)
+{
+  g_free (stub_kodi_item_json);
+  stub_kodi_item_json = json != NULL ? g_strdup (json) : NULL;
+}
+
+/* Reset the recorded call log and the item override between cases. */
 void
 stub_kodi_reset (void)
 {
   if (stub_kodi_methods != NULL)
     g_ptr_array_unref (stub_kodi_methods);
   stub_kodi_methods = g_ptr_array_new_with_free_func (g_free);
+  g_clear_pointer (&stub_kodi_item_json, g_free);
 }
 
 /* ---- The stubbed client -------------------------------------------------- */
@@ -102,10 +117,18 @@ mk_kodi_call (MkKodi     *self,
                    "\"seconds\": 30, \"milliseconds\": 0 } }");
 
   if (strcmp (method, "Player.GetItem") == 0)
-    return canned ("{ \"item\": { \"title\": \"Test Track\","
-                   "  \"file\": \"/music/test.flac\","
-                   "  \"label\": \"Test Track\","
-                   "  \"type\": \"song\", \"id\": 42 } }");
+    {
+      if (stub_kodi_item_json != NULL)
+        {
+          g_autofree char *wrapped =
+            g_strdup_printf ("{ \"item\": %s }", stub_kodi_item_json);
+          return canned (wrapped);
+        }
+      return canned ("{ \"item\": { \"title\": \"Test Track\","
+                     "  \"file\": \"/music/test.flac\","
+                     "  \"label\": \"Test Track\","
+                     "  \"type\": \"song\", \"id\": 42 } }");
+    }
 
   return canned ("{}");
 }
