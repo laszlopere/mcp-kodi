@@ -262,7 +262,103 @@ else
 fi
 
 # ===========================================================================
-# 6. Error + edge paths (no discovery needed).
+# 6. Person search (§11.6.4.2) — movie/tv-show by actor/director.
+#    Discovers a real cast member and director from the library, then
+#    exercises the server-side person filters: alone, and-combined with
+#    title, and the library-wide tv path (no title → rows carry showtitle).
+# ===========================================================================
+echo "-- person search"
+
+# A movie's first-billed actor and director (cast via GetMovieDetails — the
+# list-level cast property is flagged slow by Kodi).
+mvrow=$(kodi_rpc VideoLibrary.GetMovies \
+          '{"properties":["director"],"limits":{"start":0,"end":1}}' \
+        | jq -c '.result.movies[0] // empty')
+mtitle=""; mdirector=""; mactor=""
+if [ -n "$mvrow" ]; then
+  mtitle=$(g "$mvrow" '.label // ""')
+  mdirector=$(g "$mvrow" '.director[0] // ""')
+  mid=$(g "$mvrow" '.movieid // 0')
+  mactor=$(kodi_rpc VideoLibrary.GetMovieDetails \
+             "{\"movieid\":$mid,\"properties\":[\"cast\"]}" \
+           | jq -r '.result.moviedetails.cast[0].name // ""')
+fi
+
+# An episode's first cast member and director, plus its show.
+eprow=$(kodi_rpc VideoLibrary.GetEpisodes \
+          '{"properties":["showtitle"],"limits":{"start":0,"end":1}}' \
+        | jq -c '.result.episodes[0] // empty')
+tshow=""; tactor=""; tdirector=""
+if [ -n "$eprow" ]; then
+  tshow=$(g "$eprow" '.showtitle // ""')
+  eid=$(g "$eprow" '.episodeid // 0')
+  epdet=$(kodi_rpc VideoLibrary.GetEpisodeDetails \
+            "{\"episodeid\":$eid,\"properties\":[\"cast\",\"director\"]}" \
+          | jq -c '.result.episodedetails // empty')
+  if [ -n "$epdet" ]; then
+    tactor=$(g "$epdet" '.cast[0].name // ""')
+    tdirector=$(g "$epdet" '.director[0] // ""')
+  fi
+fi
+
+if [ -n "$mactor" ]; then
+  echo "   (movie person: $mactor · director: ${mdirector:-—} · from: $mtitle)"
+
+  b=$(res_body "$(search "$(jargs --arg a "$mactor" '{type:"movie",actor:$a,limit:5}')")")
+  check_invariants "$b" movie 0 "movie/actor"
+  is_true "movie/actor finds the source movie's cast" "$(j "$b" '.total >= 1')"
+
+  # actor and title and-combine: the source movie still matches both.
+  b=$(res_body "$(search "$(jargs --arg t "$mtitle" --arg a "$mactor" \
+                            '{type:"movie",title:$t,actor:$a,limit:5}')")")
+  check_invariants "$b" movie 0 "movie/title+actor"
+  is_true "movie/title+actor still matches"  "$(j "$b" '.total >= 1')"
+
+  # ...and a person no library matches, and-combined, kills the title match.
+  b=$(res_body "$(search "$(jargs --arg t "$mtitle" \
+                            '{type:"movie",title:$t,actor:"zzqq-no-such-actor-zzqq"}')")")
+  eq "movie/title+bogus-actor matches nothing" 0 "$(g "$b" '.total')"
+else
+  echo "   (no movie cast in library — movie actor assertions skipped)"
+fi
+
+if [ -n "$mdirector" ]; then
+  b=$(res_body "$(search "$(jargs --arg d "$mdirector" '{type:"movie",director:$d,count:true}')")")
+  check_invariants "$b" movie 0 "movie/director"
+  is_true "movie/director finds the source movie" "$(j "$b" '.total >= 1')"
+fi
+
+if [ -n "$tactor" ]; then
+  echo "   (tv person: $tactor · director: ${tdirector:-—} · from: $tshow)"
+
+  # Titled: the person rule narrows within the resolved show.
+  b=$(res_body "$(search "$(jargs --arg s "$tshow" --arg a "$tactor" \
+                            '{type:"tv-show",title:$s,actor:$a,limit:5}')")")
+  check_invariants "$b" tv-show 0 "tv/title+actor"
+  is_true "tv/title+actor finds episodes"    "$(j "$b" '.total >= 1')"
+  is_true "tv/title+actor resolves the show" "$(j "$b" '(.resolved.tvshowid // 0) > 0')"
+
+  # Library-wide: no title → no resolved container, rows name their show.
+  b=$(res_body "$(search "$(jargs --arg a "$tactor" '{type:"tv-show",actor:$a,limit:5}')")")
+  check_invariants "$b" tv-show 0 "tv/actor-global"
+  is_true "tv/actor-global finds episodes"   "$(j "$b" '.total >= 1')"
+  is_true "tv/actor-global has no resolved"  "$(j "$b" 'has("resolved") | not')"
+  if [ "$(j "$b" '.returned > 0')" = true ]; then
+    is_true "tv/actor-global rows carry showtitle" \
+            "$(j "$b" 'all(.rows[]; has("showtitle") and (.showtitle|length>0))')"
+  fi
+else
+  echo "   (no episode cast in library — tv actor assertions skipped)"
+fi
+
+if [ -n "$tdirector" ]; then
+  b=$(res_body "$(search "$(jargs --arg d "$tdirector" '{type:"tv-show",director:$d,count:true}')")")
+  check_invariants "$b" tv-show 0 "tv/director-global"
+  is_true "tv/director-global finds episodes" "$(j "$b" '.total >= 1')"
+fi
+
+# ===========================================================================
+# 7. Error + edge paths (no discovery needed).
 #    A bad request is a clean tool error (isError:true), never a crash; a
 #    no-match is a normal empty result.
 # ===========================================================================
@@ -286,10 +382,18 @@ case "$(g "$(res_body "$b")" '.error')" in
 esac
 
 b=$(search '{"type":"tv-show"}')
-eq "tv-show without title -> tool error" true "$(res_err "$b")"
+eq "tv-show without title/actor/director -> tool error" true "$(res_err "$b")"
 case "$(g "$(res_body "$b")" '.error')" in
   *title*) ok "tv error names \"title\"";;
   *)       no "tv error names \"title\"";;
+esac
+
+# season/number narrow a show — meaningless on a show-less person query.
+b=$(search '{"type":"tv-show","actor":"someone","season":1}')
+eq "tv-show person + season without title -> tool error" true "$(res_err "$b")"
+case "$(g "$(res_body "$b")" '.error')" in
+  *show*) ok "tv season-less error explains a show is needed";;
+  *)      no "tv season-less error explains a show is needed";;
 esac
 
 # A genuine no-match is success with an empty result set, not an error.
@@ -301,7 +405,7 @@ eq "no-match returned is 0"  0 "$(g "$nb" '.returned')"
 eq "no-match rows are empty" 0 "$(g "$nb" '.rows|length')"
 
 # ===========================================================================
-# 7. Library report — exercise `search` to enumerate and print real content.
+# 8. Library report — exercise `search` to enumerate and print real content.
 #    This both stresses the listing path (multiple rows, multiple containers)
 #    and gives a human-readable peek at what is in the target library.
 # ===========================================================================

@@ -24,6 +24,12 @@
 /* Names of every method passed to mk_kodi_call(), in order. Owned strings. */
 GPtrArray *stub_kodi_methods = NULL;
 
+/* The params of every call, serialized JSON, index-parallel with
+ * stub_kodi_methods ("null" for a NULL params). Owned strings. Lets a test
+ * assert not just which RPC a handler issued but what it asked for — e.g.
+ * the exact filter rules `search` composed. */
+GPtrArray *stub_kodi_params = NULL;
+
 /* method name -> canned JSON `result` literal (owned strings, both). */
 static GHashTable *stub_kodi_responses = NULL;
 /* method name -> present means "fail this call" (set; key owned). */
@@ -36,6 +42,10 @@ stub_kodi_reset (void)
   if (stub_kodi_methods != NULL)
     g_ptr_array_unref (stub_kodi_methods);
   stub_kodi_methods = g_ptr_array_new_with_free_func (g_free);
+
+  if (stub_kodi_params != NULL)
+    g_ptr_array_unref (stub_kodi_params);
+  stub_kodi_params = g_ptr_array_new_with_free_func (g_free);
 
   if (stub_kodi_responses != NULL)
     g_hash_table_unref (stub_kodi_responses);
@@ -120,11 +130,13 @@ mk_kodi_call (MkKodi     *self,
 {
   (void) self;
   (void) instance;
-  (void) params;
 
   if (stub_kodi_methods == NULL)
     stub_kodi_reset ();
   g_ptr_array_add (stub_kodi_methods, g_strdup (method));
+  g_ptr_array_add (stub_kodi_params,
+                   params != NULL ? json_to_string (params, FALSE)
+                                  : g_strdup ("null"));
 
   if (stub_kodi_failures != NULL
       && g_hash_table_contains (stub_kodi_failures, method))

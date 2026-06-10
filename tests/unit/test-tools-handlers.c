@@ -25,6 +25,7 @@
 
 /* From stub-kodi-prog.c / stub-history.c. */
 extern GPtrArray *stub_kodi_methods;
+extern GPtrArray *stub_kodi_params;
 extern void       stub_kodi_reset (void);
 extern void       stub_kodi_set_response (const char *method, const char *json);
 extern void       stub_kodi_set_error (const char *method);
@@ -76,6 +77,28 @@ called (const char *method)
     if (strcmp (g_ptr_array_index (stub_kodi_methods, i), method) == 0)
       return TRUE;
   return FALSE;
+}
+
+/* The serialized params of the first recorded call to METHOD (compact JSON,
+ * "null" for none), or NULL when METHOD was never called. Borrowed. */
+static const char *
+params_of (const char *method)
+{
+  if (stub_kodi_methods == NULL)
+    return NULL;
+  for (guint i = 0; i < stub_kodi_methods->len; i++)
+    if (strcmp (g_ptr_array_index (stub_kodi_methods, i), method) == 0)
+      return g_ptr_array_index (stub_kodi_params, i);
+  return NULL;
+}
+
+/* True if the first call to METHOD carried NEEDLE somewhere in its compact
+ * serialized params — a light way to assert a filter rule was composed. */
+static gboolean
+params_carry (const char *method, const char *needle)
+{
+  const char *p = params_of (method);
+  return p != NULL && strstr (p, needle) != NULL;
 }
 
 /* Parse a JSON literal into an owned node holding an arguments object. */
@@ -206,6 +229,253 @@ case_search_music (void)
   /* music: resolve the artist, then fetch songs — two distinct RPCs. */
   MK_CHECK (called ("AudioLibrary.GetArtists"));
   MK_CHECK (called ("AudioLibrary.GetSongs"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* movie + title + actor + director: still ONE GetMovies call, the three rules
+ * and-combined into a single composite filter (§11.6.4.2). */
+static void
+case_search_movie_person (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "VideoLibrary.GetMovies",
+    "{ \"movies\": ["
+    "    { \"movieid\": 1, \"label\": \"Alien\", \"title\": \"Alien\","
+    "      \"file\": \"/m/alien.mp4\", \"year\": 1979 } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 1, \"total\": 1 } }");
+
+  g_autoptr (JsonNode) an = args_node (
+    "{ \"type\": \"movie\", \"title\": \"alien\","
+    "  \"actor\": \"weaver\", \"director\": \"scott\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  MK_CHECK (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload));
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 1);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "returned"), 1);
+    }
+
+  MK_CHECK (called ("VideoLibrary.GetMovies"));
+  /* all three rules ride one composite and-filter. */
+  MK_CHECK (params_carry ("VideoLibrary.GetMovies", "\"and\""));
+  MK_CHECK (params_carry ("VideoLibrary.GetMovies",
+                          "{\"field\":\"title\",\"operator\":\"contains\","
+                          "\"value\":\"alien\"}"));
+  MK_CHECK (params_carry ("VideoLibrary.GetMovies",
+                          "{\"field\":\"actor\",\"operator\":\"contains\","
+                          "\"value\":\"weaver\"}"));
+  MK_CHECK (params_carry ("VideoLibrary.GetMovies",
+                          "{\"field\":\"director\",\"operator\":\"contains\","
+                          "\"value\":\"scott\"}"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* movie + actor only: a single bare rule, NOT wrapped in "and". */
+static void
+case_search_movie_actor_only (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "VideoLibrary.GetMovies",
+    "{ \"movies\": [], \"limits\": { \"start\": 0, \"end\": 0, \"total\": 0 } }");
+
+  g_autoptr (JsonNode) an =
+    args_node ("{ \"type\": \"movie\", \"actor\": \"weaver\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  (void) payload;
+
+  MK_CHECK (params_carry ("VideoLibrary.GetMovies",
+                          "\"filter\":{\"field\":\"actor\""));
+  MK_CHECK (!params_carry ("VideoLibrary.GetMovies", "\"and\""));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* tv-show + title + actor: the show resolves by title as before, and the
+ * person rule rides the GetEpisodes call (episode cast covers regulars and
+ * guests), and-combined with the episode-number pin. */
+static void
+case_search_tv_person (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "VideoLibrary.GetTVShows",
+    "{ \"tvshows\": [ { \"tvshowid\": 449, \"label\": \"Star Trek: Voyager\" } ],"
+    "  \"limits\": { \"total\": 1 } }");
+  stub_kodi_set_response (
+    "VideoLibrary.GetEpisodes",
+    "{ \"episodes\": ["
+    "    { \"episodeid\": 18802, \"label\": \"1x01. Caretaker\","
+    "      \"title\": \"Caretaker\", \"season\": 1, \"episode\": 1,"
+    "      \"file\": \"/t/voy-s01e01.mkv\" } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 1, \"total\": 1 } }");
+
+  g_autoptr (JsonNode) an = args_node (
+    "{ \"type\": \"tv-show\", \"title\": \"voyager\","
+    "  \"actor\": \"mulgrew\", \"number\": 1 }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  MK_CHECK (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload));
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      /* the resolved show is still echoed. */
+      JsonObject *r = json_object_get_object_member (p, "resolved");
+      MK_CHECK (r != NULL);
+      if (r != NULL)
+        MK_CHECK_INT_EQ (json_object_get_int_member (r, "tvshowid"), 449);
+    }
+
+  MK_CHECK (called ("VideoLibrary.GetTVShows"));
+  MK_CHECK (called ("VideoLibrary.GetEpisodes"));
+  /* episodes are pinned to the resolved show AND filtered by person+number. */
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes", "\"tvshowid\":449"));
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes", "\"and\""));
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes",
+                          "{\"field\":\"episode\",\"operator\":\"is\","
+                          "\"value\":\"1\"}"));
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes",
+                          "{\"field\":\"actor\",\"operator\":\"contains\","
+                          "\"value\":\"mulgrew\"}"));
+  /* the resolve itself stays a pure title match — the person rule must not
+   * leak there (a guest star is absent from show-level cast). */
+  MK_CHECK (!params_carry ("VideoLibrary.GetTVShows", "\"actor\""));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* tv-show + person, NO title: the resolve is skipped and one library-wide
+ * GetEpisodes call filters by person; rows carry showtitle instead of a
+ * resolved container. */
+static void
+case_search_tv_person_global (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "VideoLibrary.GetEpisodes",
+    "{ \"episodes\": ["
+    "    { \"episodeid\": 4874, \"label\": \"2x08. Blendin's Game\","
+    "      \"title\": \"Blendin's Game\", \"season\": 2, \"episode\": 8,"
+    "      \"showtitle\": \"Gravity Falls\", \"file\": \"/t/gf-s02e08.mkv\" },"
+    "    { \"episodeid\": 11875, \"label\": \"1x01. Pilot\","
+    "      \"title\": \"Pilot\", \"season\": 1, \"episode\": 1,"
+    "      \"showtitle\": \"Rick and Morty\", \"file\": \"/t/rm-s01e01.mkv\" } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 2, \"total\": 93 } }");
+
+  g_autoptr (JsonNode) an =
+    args_node ("{ \"type\": \"tv-show\", \"actor\": \"roiland\", \"limit\": 2 }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  MK_CHECK (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload));
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 93);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "returned"), 2);
+      MK_CHECK (json_object_get_boolean_member (p, "truncated"));
+      /* no single show was resolved. */
+      MK_CHECK (!json_object_has_member (p, "resolved"));
+      /* each row names its show. */
+      JsonArray *rows = json_object_get_array_member (p, "rows");
+      JsonObject *r0 = json_array_get_object_element (rows, 0);
+      MK_CHECK_STR_EQ (json_object_get_string_member (r0, "showtitle"),
+                       "Gravity Falls");
+    }
+
+  /* no resolve happened; the one episodes call filters by person, asks for
+   * showtitle, and groups by show. */
+  MK_CHECK (!called ("VideoLibrary.GetTVShows"));
+  MK_CHECK (called ("VideoLibrary.GetEpisodes"));
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes",
+                          "\"filter\":{\"field\":\"actor\""));
+  MK_CHECK (!params_carry ("VideoLibrary.GetEpisodes", "\"tvshowid\""));
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes", "\"showtitle\""));
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes",
+                          "\"method\":\"tvshowtitle\""));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* tv-show person query with season/number but no title: rejected before any
+ * Kodi call — those narrow a show, and no show was named. */
+static void
+case_search_tv_person_season_error (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  g_autoptr (JsonNode) an = args_node (
+    "{ \"type\": \"tv-show\", \"actor\": \"roiland\", \"season\": 1 }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL); /* tool error, not a protocol error */
+
+  gboolean is_error = FALSE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      const char *msg = json_object_get_string_member (
+        json_node_get_object (payload), "error");
+      MK_CHECK (msg != NULL && strstr (msg, "need a show") != NULL);
+    }
+
+  MK_CHECK (!called ("VideoLibrary.GetTVShows"));
+  MK_CHECK (!called ("VideoLibrary.GetEpisodes"));
 
   g_clear_error (&error);
   free_tools (tools, cfg, kodi);
@@ -1844,6 +2114,11 @@ main (int argc, char **argv)
   static const MkTestCase cases[] = {
     { "search-movie",            case_search_movie },
     { "search-music",            case_search_music },
+    { "search-movie-person",     case_search_movie_person },
+    { "search-movie-actor-only", case_search_movie_actor_only },
+    { "search-tv-person",        case_search_tv_person },
+    { "search-tv-person-global", case_search_tv_person_global },
+    { "search-tv-person-season-error", case_search_tv_person_season_error },
     { "contributors-merge",      case_contributors_merge },
     { "contributors-paging",     case_contributors_paging },
     { "contributors-no-name",    case_contributors_missing_name },
