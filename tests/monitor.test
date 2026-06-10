@@ -170,10 +170,16 @@ mine=$(printf '%s' "$body" | jq -c --arg f "$playing_file" \
 eq "the played file was captured for \"live\"" 1 \
    "$(printf '%s' "$mine" | jq 'length')"
 
-# Several poll rounds, ONE entry: repeat sightings merged (11.9.4, live), the
-# re-observation showing as a last_seen later than at.
-is_true "repeat sightings merged into the entry" \
-        "$(printf '%s' "$mine" | jq '.[0] | has("last_seen") and (.last_seen >= .at)')"
+# Several poll rounds, still ONE entry (asserted just above): repeat sightings
+# MERGE rather than duplicate. The newest entry's `last_seen` bump is coarsened
+# (MK_HISTORY_LAST_SEEN_STEP, 10 min): while one item plays continuously the
+# poller does NOT rewrite the whole log every second just to nudge the stamp.
+# So within these few seconds last_seen stays deferred — absent — which is the
+# observable proof the per-poll write storm is gone. (The fine merge mechanics,
+# earliest `at` / latest `last_seen`, are covered by the history unit tests,
+# which use minute-scale gaps that clear the step.)
+is_true "repeat sightings merge without a per-poll last_seen rewrite" \
+        "$(printf '%s' "$mine" | jq '.[0] | (has("last_seen") | not)')"
 
 # The dead box stayed out of the log and out of the diagnostics.
 eq "no entry for the unreachable box" 0 \

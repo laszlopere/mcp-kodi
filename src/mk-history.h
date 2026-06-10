@@ -48,7 +48,12 @@
  *   - `last_seen` — the latest sighting of the same play, same ISO-8601
  *               form; written only once a play is re-observed (a repeat
  *               snapshot, or another process's sighting merging in), so its
- *               absence means "seen once". `at` stays the sort key.
+ *               absence means "seen once". `at` stays the sort key. For the
+ *               currently-playing item the per-poll advance is **coarsened**
+ *               (MK_HISTORY_LAST_SEEN_STEP): rather than rewrite the whole log
+ *               every ~2-minute poll to nudge the stamp, the bump is persisted
+ *               only once it clears the step, so `last_seen` trails the true
+ *               latest sighting by at most that step.
  *   - `kind`  — the player kind: `audio` or `video`, the snapshot's
  *               existing `type` from Player.GetActivePlayers. Tells music from
  *               video but not movie from episode from music video.

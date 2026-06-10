@@ -34,6 +34,21 @@
  * the same continuous playback hours later is still the same play. */
 #define MK_HISTORY_MERGE_WINDOW (10 * G_TIME_SPAN_MINUTE)
 
+/* Coarsening step for the `last_seen` bump on the instance's NEWEST entry.
+ * While one item plays continuously, every ~2-minute poll re-sights it and
+ * would rewrite the whole log just to nudge `last_seen` forward — a long
+ * single play (a movie) could rewrite the file dozens of times saying nothing
+ * new. So a bare advance of the newest entry's `last_seen` is persisted only
+ * once it clears this much past what is stored: the file then updates in steps,
+ * not once per poll, and a hard exit loses at most this much `last_seen`
+ * resolution. Kept at the merge window so `last_seen` is never staler than that
+ * window already tolerates when matching late, out-of-order sightings. Only the
+ * newest (continuous-playback) merge is coarsened; a rare out-of-order sighting
+ * folding into an OLDER entry still records its `last_seen` precisely, since it
+ * is not a per-poll amplification source and its freshness aids cross-process
+ * convergence. */
+#define MK_HISTORY_LAST_SEEN_STEP (10 * G_TIME_SPAN_MINUTE)
+
 struct _MkHistory
 {
   char *path; /* resolved path to the one global history.json (owned) */
@@ -284,6 +299,10 @@ entry_time (JsonObject *e, const char *name)
  * @have_id: whether the snapshot carries a library id.
  * @id: that library id (valid only when @have_id).
  * @at: the observation timestamp.
+ * @was_newest: out; set TRUE when the match is the instance's newest entry (a
+ *        continuous-playback re-sighting), FALSE for an older window match.
+ *        Untouched on a -1 (no-match) return; the caller coarsens only the
+ *        newest case.
  *
  * Finds the entry an observation of (@instance, item, @at) merges into.
  * The instance's newest entry matches on item identity alone — re-observing
@@ -299,7 +318,8 @@ entry_time (JsonObject *e, const char *name)
  */
 static gint
 find_merge_match (JsonArray *existing, const char *instance, const char *file,
-                  gboolean have_id, gint64 id, GDateTime *at)
+                  gboolean have_id, gint64 id, GDateTime *at,
+                  gboolean *was_newest)
 {
   if (existing == NULL)
     return -1;
@@ -320,7 +340,13 @@ find_merge_match (JsonArray *existing, const char *instance, const char *file,
       if (!same_item (e, file, have_id, id))
         continue;
       if (is_newest)
-        return (gint) i;
+        {
+          if (was_newest != NULL)
+            *was_newest = TRUE;
+          return (gint) i;
+        }
+      if (was_newest != NULL)
+        *was_newest = FALSE;
       /* an older entry: merge only a near-in-time re-sighting */
       g_autoptr (GDateTime) eat = entry_time (e, "at");
       if (eat == NULL)
@@ -342,9 +368,15 @@ find_merge_match (JsonArray *existing, const char *instance, const char *file,
  * @sort_key: out; a new ref on the merged entry's effective `at` for sorted
  *            re-insertion, or NULL when the old `at` is unparseable (the
  *            entry then keeps its current position).
+ * @coarsen: when TRUE (the matched entry is the instance's newest, i.e. a
+ *           continuous-playback re-sighting), a bare `last_seen` advance is
+ *           persisted only once it clears MK_HISTORY_LAST_SEEN_STEP past what
+ *           is stored, so a long single play does not rewrite the log every
+ *           poll. FALSE (an older out-of-order match) records `last_seen`
+ *           precisely, as before.
  * @changed: out; FALSE when the merge altered nothing (a same-second
- *           re-sighting, or @at already inside the entry's coverage) and the
- *           file need not be rewritten.
+ *           re-sighting, @at already inside the entry's coverage, or a
+ *           coarsened sub-step advance) and the file need not be rewritten.
  *
  * Folds a re-sighting into the entry it matched: `at` keeps the *earliest*
  * sighting and `last_seen` the latest, so concurrent writers converge on one
@@ -356,7 +388,7 @@ find_merge_match (JsonArray *existing, const char *instance, const char *file,
  */
 static JsonNode *
 merge_entry (JsonNode *oldnode, const char *at, GDateTime *at_dt,
-             GDateTime **sort_key, gboolean *changed)
+             gboolean coarsen, GDateTime **sort_key, gboolean *changed)
 {
   JsonNode *node = json_node_copy (oldnode);
   JsonObject *o = json_node_get_object (node);
@@ -383,7 +415,20 @@ merge_entry (JsonNode *oldnode, const char *at, GDateTime *at_dt,
   const char *final_at = new_at != NULL ? new_at : old_at;
   g_autofree char *new_seen = NULL; /* NULL = keep the entry's `last_seen` */
   if (g_strcmp0 (latest, final_at) != 0 && g_strcmp0 (latest, old_seen) != 0)
-    new_seen = g_strdup (latest);
+    {
+      /* The latest sighting advances `last_seen`. On the newest entry this
+       * fires every poll while one item plays, rewriting the whole log just to
+       * nudge the stamp; coarsen it — persist the bump only once it clears the
+       * step past what is stored. When `at` itself is being rewritten earlier
+       * (new_at set) the file is rewritten anyway, so record the precise
+       * latest then; likewise when not coarsening (an older out-of-order
+       * match) or when the stored upper is unparseable. */
+      gint64 advance = upper_dt != NULL
+                         ? g_date_time_difference (at_dt, upper_dt)
+                         : G_MAXINT64;
+      if (!coarsen || new_at != NULL || advance > MK_HISTORY_LAST_SEEN_STEP)
+        new_seen = g_strdup (latest);
+    }
 
   *changed = new_at != NULL || new_seen != NULL;
   if (new_at != NULL)
@@ -512,7 +557,9 @@ record_locked (MkHistory *self, JsonObject *snap, const char *instance,
     return FALSE; /* nothing identifies this item — can't dedup, don't log */
 
   /* Merge or append? */
-  gint match = find_merge_match (existing, instance, file, have_id, id, at_dt);
+  gboolean matched_newest = FALSE; /* coarsen `last_seen` only for this case */
+  gint match = find_merge_match (existing, instance, file, have_id, id, at_dt,
+                                 &matched_newest);
   g_autoptr (JsonNode) entry = NULL;
   g_autoptr (GDateTime) entry_at = NULL; /* sort key; NULL = keep position */
   if (match < 0)
@@ -524,7 +571,7 @@ record_locked (MkHistory *self, JsonObject *snap, const char *instance,
     {
       gboolean changed = FALSE;
       entry = merge_entry (json_array_get_element (existing, (guint) match),
-                           at, at_dt, &entry_at, &changed);
+                           at, at_dt, matched_newest, &entry_at, &changed);
       if (!changed)
         return FALSE; /* the sighting added nothing: leave the file alone */
     }

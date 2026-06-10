@@ -244,6 +244,26 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         asserts the poller logged it once (merged across rounds) while
         skipping a dead box silently.
 
+    [x] 11.9.5.1 Coarsen the per-poll last_seen rewrite. Each poll of a
+        continuously-playing item merged into its newest entry and bumped
+        last_seen, rewriting the whole ~22KB log every ~2 minutes (×N for
+        N concurrent client-session processes) just to nudge a timestamp —
+        a long single play (a movie) could rewrite the file dozens of
+        times saying nothing new. Fix (mk-history.c): the newest-entry
+        merge now persists a bare last_seen advance only once it clears
+        MK_HISTORY_LAST_SEEN_STEP (10 min) past what is stored, so the log
+        updates in steps, not once per poll; last_seen trails the true
+        latest sighting by at most that step, and a hard exit loses no more
+        than that. find_merge_match reports whether the match was the
+        instance's newest so only that case is coarsened — a rare
+        out-of-order sighting folding into an OLDER entry still records
+        last_seen precisely (it is not an amplification source, and its
+        freshness aids cross-process convergence). The file stays the
+        single source of truth (no in-memory deferral), keeping the
+        multi-process merge idempotent. monitor.test now asserts last_seen
+        stays deferred across the short poll window; the unit cases use
+        minute-scale gaps that clear the step and are unaffected.
+
 [ ] 11.10 Build clean, test against live Kodi, write README
 
 [ ] 11.11 Config hot-reload (mk-config). The server loads config.json once
