@@ -551,6 +551,33 @@ Everything below this section is original design for *this* project.
     the model cannot grant itself the hatch. An instance without the flag returns
     a clean tool error naming the instance and the flag; the schema lists which
     configured instances currently permit `rpc`.
+    [ ] 11.6.7 queue — continuous playback. Appends to the **already-playing**
+    queue; the caller must start playback first (a single `play`/`playfile` auto-
+    creates the one-item playlist, §13.2.2), so the tool never builds or starts a
+    playlist itself. `{instance?, type?, id?|file?, next?}`.
+      1. `Player.GetActivePlayers` → the active `playerid`.
+      2. `Player.GetProperties {playerid,["playlistid"]}`. **`playlistid < 0` →
+         tool error** "nothing queueable is playing" — one check covering both no
+         active player and non-playlist playback (live TV / streams). The live
+         playback names its own playlist (audio 0 / video 1); nothing to guess.
+      3. `Playlist.Add {playlistid, item}` (append), or `Playlist.Insert
+         {playlistid, position:<current+1>, item}` when `next:true`. `item` =
+         `{<type>id:id}` or `{file}`; matching the playlist's media type is the
+         caller's job. Returns the player_state() snapshot (playback unchanged).
+      Other table actions (remove/clear/list, line 145) deferred. Baseline test:
+      tests/functional/scenarios/queue-next-episode.txt.
+    [ ] 11.6.8 getplaylist — read the current queue. Resolves the active player's
+    playlist (like queue, §11.6.7), then `Playlist.GetItems {playlistid,
+    properties:[…]}`; reports the queued rows (`{<type>id|file, label, type}`)
+    plus the `position` of the now-playing item (Player.GetProperties), so the
+    caller sees what is queued and where playback sits. `{instance?, type?}` —
+    `type` (audio/video/picture) reads a specific playlist when nothing is
+    playing; otherwise the active one. Empty/none → empty list, not an error.
+    [ ] 11.6.9 dropplaylists — empty the queues. `{instance?}`. `Playlist.Clear`
+    on each playlist id (audio 0 / video 1 / picture 2) so no queued items
+    remain; plural — clears all three in one call. Clear on the *active* playlist
+    leaves the current item **playing** (only the queue behind it is emptied), so
+    this never interrupts playback. Returns the player_state() snapshot.
   [ ] 11.7 Prompts / resources — **deferred, not shipping now.** Neither MCP
     `prompts/*` nor `resources/*` is implemented; tools (§5/§11.6) are the whole
     server surface for now. `initialize` advertises only `{ "tools": {} }`
