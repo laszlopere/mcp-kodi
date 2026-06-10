@@ -1,8 +1,8 @@
 #!/bin/sh
-# Functional test for the `search` tool.
+# Functional test for the `searchmedia` tool.
 #
 # Drives the real mcp-kodi binary over its MCP stdio transport against a live
-# Kodi, exercising `search` across all three media types (music / tv-show /
+# Kodi, exercising `searchmedia` across all three media types (music / tv-show /
 # movie) and a spread of argument combinations (count, limit, offset paging,
 # album/season/track narrowing) plus the error and no-match paths.
 #
@@ -76,13 +76,13 @@ mcp_tool () { # name arguments-json  ->  tool result object
     | jq -c 'select(.id==2) | .result'
 }
 
-search   () { mcp_tool search "$1"; }          # arguments-json -> result object
-res_err  () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
-res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
-jargs    () { jq -cn "$@"; }                   # build an arguments object safely
-g        () { printf '%s' "$1" | jq -r "$2"; } # body, filter -> scalar
-j        () { printf '%s' "$1" | jq    "$2"; } # body, filter -> json/bool
-jx       () { b=$1; shift; printf '%s' "$b" | jq "$@"; } # body, jq-args... (--argjson)
+searchmedia () { mcp_tool searchmedia "$1"; }     # arguments-json -> result object
+res_err     () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
+res_body    () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
+jargs       () { jq -cn "$@"; }                   # build an arguments object safely
+g           () { printf '%s' "$1" | jq -r "$2"; } # body, filter -> scalar
+j           () { printf '%s' "$1" | jq    "$2"; } # body, filter -> json/bool
+jx          () { b=$1; shift; printf '%s' "$b" | jq "$@"; } # body, jq-args... (--argjson)
 
 # ---- assertions -----------------------------------------------------------
 
@@ -111,7 +111,7 @@ check_invariants () { # body type expected-offset label
        "$(j "$b" '(.offset + .returned) < .total')" "$(g "$b" '.truncated')"
 }
 
-echo "search functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+echo "searchmedia functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
 
 # ===========================================================================
 # 1. Reachability + noop (the prerequisite the task calls out explicitly).
@@ -156,13 +156,13 @@ echo "-- music"
 if [ -n "$artist" ]; then
   echo "   (artist: $artist · album: $album · track: $track)"
 
-  b=$(res_body "$(search "$(jargs --arg a "$artist" '{type:"music",artist:$a,count:true}')")")
+  b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" '{type:"music",artist:$a,count:true}')")")
   check_invariants "$b" music 0 "music/count"
   eq      "music/count returns zero rows"   0    "$(g "$b" '.returned')"
   is_true "music resolves an artistid"      "$(j "$b" '(.resolved.artistid // 0) > 0')"
   total=$(g "$b" '.total')
 
-  b=$(res_body "$(search "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:3}')")")
+  b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:3}')")")
   check_invariants "$b" music 0 "music/limit"
   is_true "music/limit caps rows at 3"      "$(j "$b" '.returned <= 3')"
   if [ "$(j "$b" '.returned > 0')" = true ]; then
@@ -172,7 +172,7 @@ if [ -n "$artist" ]; then
   first_page_id=$(g "$b" '.rows[0].songid // 0')
 
   # Second page is offset-disjoint when the discography spans it.
-  b=$(res_body "$(search "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:3,offset:3}')")")
+  b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:3,offset:3}')")")
   check_invariants "$b" music 3 "music/offset"
   if [ "$total" -gt 3 ] 2>/dev/null && [ "$(j "$b" '.returned > 0')" = true ]; then
     eq    "music page 2 differs from page 1" false \
@@ -181,7 +181,7 @@ if [ -n "$artist" ]; then
 
   # Album (title) narrows within the artist.
   if [ -n "$album" ]; then
-    b=$(res_body "$(search "$(jargs --arg a "$artist" --arg al "$album" \
+    b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" --arg al "$album" \
                               '{type:"music",artist:$a,title:$al,limit:50}')")")
     check_invariants "$b" music 0 "music/album"
     is_true "music/album finds the album"   "$(j "$b" '.total >= 1')"
@@ -189,7 +189,7 @@ if [ -n "$artist" ]; then
 
   # Track number narrows to that position.
   if [ -n "$album" ] && [ "$track" -gt 0 ] 2>/dev/null; then
-    b=$(res_body "$(search "$(jargs --arg a "$artist" --arg al "$album" --argjson n "$track" \
+    b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" --arg al "$album" --argjson n "$track" \
                               '{type:"music",artist:$a,title:$al,number:$n}')")")
     check_invariants "$b" music 0 "music/track"
     if [ "$(j "$b" '.returned > 0')" = true ]; then
@@ -208,12 +208,12 @@ echo "-- tv-show"
 if [ -n "$show" ]; then
   echo "   (show: $show · S${season}E${epnum})"
 
-  b=$(res_body "$(search "$(jargs --arg s "$show" '{type:"tv-show",title:$s,count:true}')")")
+  b=$(res_body "$(searchmedia "$(jargs --arg s "$show" '{type:"tv-show",title:$s,count:true}')")")
   check_invariants "$b" tv-show 0 "tv/count"
   eq      "tv/count returns zero rows"  0  "$(g "$b" '.returned')"
   is_true "tv resolves a tvshowid"      "$(j "$b" '(.resolved.tvshowid // 0) > 0')"
 
-  b=$(res_body "$(search "$(jargs --arg s "$show" '{type:"tv-show",title:$s,limit:5}')")")
+  b=$(res_body "$(searchmedia "$(jargs --arg s "$show" '{type:"tv-show",title:$s,limit:5}')")")
   check_invariants "$b" tv-show 0 "tv/limit"
   is_true "tv/limit caps rows at 5"     "$(j "$b" '.returned <= 5')"
   if [ "$(j "$b" '.returned > 0')" = true ]; then
@@ -222,7 +222,7 @@ if [ -n "$show" ]; then
   fi
 
   # The discovered season/episode must exist for its own show.
-  b=$(res_body "$(search "$(jargs --arg s "$show" --argjson se "$season" --argjson n "$epnum" \
+  b=$(res_body "$(searchmedia "$(jargs --arg s "$show" --argjson se "$season" --argjson n "$epnum" \
                             '{type:"tv-show",title:$s,season:$se,number:$n}')")")
   check_invariants "$b" tv-show 0 "tv/SxxExx"
   is_true "tv/SxxExx finds the episode" "$(j "$b" '.total >= 1')"
@@ -241,12 +241,12 @@ echo "-- movie"
 if [ -n "$movie" ]; then
   echo "   (movie: $movie)"
 
-  b=$(res_body "$(search '{"type":"movie","count":true}')")
+  b=$(res_body "$(searchmedia '{"type":"movie","count":true}')")
   check_invariants "$b" movie 0 "movie/count"
   eq      "movie/count returns zero rows" 0 "$(g "$b" '.returned')"
   is_true "movie library is non-empty"    "$(j "$b" '.total >= 1')"
 
-  b=$(res_body "$(search '{"type":"movie","limit":1}')")
+  b=$(res_body "$(searchmedia '{"type":"movie","limit":1}')")
   check_invariants "$b" movie 0 "movie/limit"
   is_true "movie/limit caps rows at 1"    "$(j "$b" '.returned <= 1')"
   if [ "$(j "$b" '.returned > 0')" = true ]; then
@@ -254,7 +254,7 @@ if [ -n "$movie" ]; then
     is_true "movie row carries a movieid"   "$(j "$b" '(.rows[0].movieid // 0) > 0')"
   fi
 
-  b=$(res_body "$(search "$(jargs --arg t "$movie" '{type:"movie",title:$t,limit:5}')")")
+  b=$(res_body "$(searchmedia "$(jargs --arg t "$movie" '{type:"movie",title:$t,limit:5}')")")
   check_invariants "$b" movie 0 "movie/title"
   is_true "movie/title finds the movie"   "$(j "$b" '.total >= 1')"
 else
@@ -304,18 +304,18 @@ fi
 if [ -n "$mactor" ]; then
   echo "   (movie person: $mactor · director: ${mdirector:-—} · from: $mtitle)"
 
-  b=$(res_body "$(search "$(jargs --arg a "$mactor" '{type:"movie",actor:$a,limit:5}')")")
+  b=$(res_body "$(searchmedia "$(jargs --arg a "$mactor" '{type:"movie",actor:$a,limit:5}')")")
   check_invariants "$b" movie 0 "movie/actor"
   is_true "movie/actor finds the source movie's cast" "$(j "$b" '.total >= 1')"
 
   # actor and title and-combine: the source movie still matches both.
-  b=$(res_body "$(search "$(jargs --arg t "$mtitle" --arg a "$mactor" \
+  b=$(res_body "$(searchmedia "$(jargs --arg t "$mtitle" --arg a "$mactor" \
                             '{type:"movie",title:$t,actor:$a,limit:5}')")")
   check_invariants "$b" movie 0 "movie/title+actor"
   is_true "movie/title+actor still matches"  "$(j "$b" '.total >= 1')"
 
   # ...and a person no library matches, and-combined, kills the title match.
-  b=$(res_body "$(search "$(jargs --arg t "$mtitle" \
+  b=$(res_body "$(searchmedia "$(jargs --arg t "$mtitle" \
                             '{type:"movie",title:$t,actor:"zzqq-no-such-actor-zzqq"}')")")
   eq "movie/title+bogus-actor matches nothing" 0 "$(g "$b" '.total')"
 else
@@ -323,7 +323,7 @@ else
 fi
 
 if [ -n "$mdirector" ]; then
-  b=$(res_body "$(search "$(jargs --arg d "$mdirector" '{type:"movie",director:$d,count:true}')")")
+  b=$(res_body "$(searchmedia "$(jargs --arg d "$mdirector" '{type:"movie",director:$d,count:true}')")")
   check_invariants "$b" movie 0 "movie/director"
   is_true "movie/director finds the source movie" "$(j "$b" '.total >= 1')"
 fi
@@ -332,14 +332,14 @@ if [ -n "$tactor" ]; then
   echo "   (tv person: $tactor · director: ${tdirector:-—} · from: $tshow)"
 
   # Titled: the person rule narrows within the resolved show.
-  b=$(res_body "$(search "$(jargs --arg s "$tshow" --arg a "$tactor" \
+  b=$(res_body "$(searchmedia "$(jargs --arg s "$tshow" --arg a "$tactor" \
                             '{type:"tv-show",title:$s,actor:$a,limit:5}')")")
   check_invariants "$b" tv-show 0 "tv/title+actor"
   is_true "tv/title+actor finds episodes"    "$(j "$b" '.total >= 1')"
   is_true "tv/title+actor resolves the show" "$(j "$b" '(.resolved.tvshowid // 0) > 0')"
 
   # Library-wide: no title → no resolved container, rows name their show.
-  b=$(res_body "$(search "$(jargs --arg a "$tactor" '{type:"tv-show",actor:$a,limit:5}')")")
+  b=$(res_body "$(searchmedia "$(jargs --arg a "$tactor" '{type:"tv-show",actor:$a,limit:5}')")")
   check_invariants "$b" tv-show 0 "tv/actor-global"
   is_true "tv/actor-global finds episodes"   "$(j "$b" '.total >= 1')"
   is_true "tv/actor-global has no resolved"  "$(j "$b" 'has("resolved") | not')"
@@ -352,7 +352,7 @@ else
 fi
 
 if [ -n "$tdirector" ]; then
-  b=$(res_body "$(search "$(jargs --arg d "$tdirector" '{type:"tv-show",director:$d,count:true}')")")
+  b=$(res_body "$(searchmedia "$(jargs --arg d "$tdirector" '{type:"tv-show",director:$d,count:true}')")")
   check_invariants "$b" tv-show 0 "tv/director-global"
   is_true "tv/director-global finds episodes" "$(j "$b" '.total >= 1')"
 fi
@@ -364,24 +364,24 @@ fi
 # ===========================================================================
 echo "-- errors / edges"
 
-b=$(search '{}')
+b=$(searchmedia '{}')
 eq "missing type -> tool error" true "$(res_err "$b")"
 case "$(g "$(res_body "$b")" '.error')" in
   *type*) ok "missing-type error names \"type\"";;
   *)      no "missing-type error names \"type\"";;
 esac
 
-b=$(search '{"type":"banana"}')
+b=$(searchmedia '{"type":"banana"}')
 eq "unknown type -> tool error" true "$(res_err "$b")"
 
-b=$(search '{"type":"music"}')
+b=$(searchmedia '{"type":"music"}')
 eq "music without artist -> tool error" true "$(res_err "$b")"
 case "$(g "$(res_body "$b")" '.error')" in
   *artist*) ok "music error names \"artist\"";;
   *)        no "music error names \"artist\"";;
 esac
 
-b=$(search '{"type":"tv-show"}')
+b=$(searchmedia '{"type":"tv-show"}')
 eq "tv-show without title/actor/director -> tool error" true "$(res_err "$b")"
 case "$(g "$(res_body "$b")" '.error')" in
   *title*) ok "tv error names \"title\"";;
@@ -389,7 +389,7 @@ case "$(g "$(res_body "$b")" '.error')" in
 esac
 
 # season/number narrow a show — meaningless on a show-less person query.
-b=$(search '{"type":"tv-show","actor":"someone","season":1}')
+b=$(searchmedia '{"type":"tv-show","actor":"someone","season":1}')
 eq "tv-show person + season without title -> tool error" true "$(res_err "$b")"
 case "$(g "$(res_body "$b")" '.error')" in
   *show*) ok "tv season-less error explains a show is needed";;
@@ -397,7 +397,7 @@ case "$(g "$(res_body "$b")" '.error')" in
 esac
 
 # A genuine no-match is success with an empty result set, not an error.
-b=$(search "$(jargs '{type:"music",artist:"zzqq-no-such-artist-zzqq"}')")
+b=$(searchmedia "$(jargs '{type:"music",artist:"zzqq-no-such-artist-zzqq"}')")
 eq "no-match music is not an error" false "$(res_err "$b")"
 nb=$(res_body "$b")
 eq "no-match total is 0"     0 "$(g "$nb" '.total')"
@@ -405,7 +405,7 @@ eq "no-match returned is 0"  0 "$(g "$nb" '.returned')"
 eq "no-match rows are empty" 0 "$(g "$nb" '.rows|length')"
 
 # ===========================================================================
-# 8. Library report — exercise `search` to enumerate and print real content.
+# 8. Library report — exercise `searchmedia` to enumerate and print real content.
 #    This both stresses the listing path (multiple rows, multiple containers)
 #    and gives a human-readable peek at what is in the target library.
 # ===========================================================================
@@ -414,7 +414,7 @@ echo "-- library report"
 # Songs: a sample of the discovered artist's tracks (track · title · album).
 echo "   songs:"
 if [ -n "$artist" ]; then
-  b=$(res_body "$(search "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:10}')")")
+  b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:10}')")")
   is_true "song listing returns rows" "$(j "$b" '.returned >= 1')"
   printf '     %s — %s of %s tracks\n' "$artist" "$(g "$b" '.returned')" "$(g "$b" '.total')"
   printf '%s' "$b" | jq -r '
@@ -425,7 +425,7 @@ fi
 
 # Movies: title (year), runtime in minutes, and the playable file.
 echo "   movies:"
-b=$(res_body "$(search '{"type":"movie","limit":10}')")
+b=$(res_body "$(searchmedia '{"type":"movie","limit":10}')")
 if [ "$(j "$b" '.returned >= 1')" = true ]; then
   is_true "movie listing returns rows" "$(j "$b" '.returned >= 1')"
   printf '     %s of %s movies\n' "$(g "$b" '.returned')" "$(g "$b" '.total')"
@@ -436,7 +436,7 @@ else
 fi
 
 # TV shows: for a handful of shows, episode count + a sample episode. Drives
-# `search` once per show (count) and once for the sample — the multi-container
+# `searchmedia` once per show (count) and once for the sample — the multi-container
 # listing path the single-show tests above do not cover.
 echo "   tv shows:"
 shows=$(kodi_rpc VideoLibrary.GetTVShows '{"limits":{"start":0,"end":5}}' \
@@ -444,9 +444,9 @@ shows=$(kodi_rpc VideoLibrary.GetTVShows '{"limits":{"start":0,"end":5}}' \
 if [ -n "$shows" ]; then
   printf '%s\n' "$shows" | while IFS= read -r s; do
     [ -n "$s" ] || continue
-    cnt=$(res_body "$(search "$(jargs --arg s "$s" '{type:"tv-show",title:$s,count:true}')")")
+    cnt=$(res_body "$(searchmedia "$(jargs --arg s "$s" '{type:"tv-show",title:$s,count:true}')")")
     eps=$(g "$cnt" '.total')
-    smp=$(res_body "$(search "$(jargs --arg s "$s" '{type:"tv-show",title:$s,limit:1}')")")
+    smp=$(res_body "$(searchmedia "$(jargs --arg s "$s" '{type:"tv-show",title:$s,limit:1}')")")
     first=$(printf '%s' "$smp" | jq -r '
       (.rows[0] // empty) | "S\(.season)E\(.episode) “\(.title)”"')
     [ -n "$first" ] || first="(no episodes)"
@@ -460,6 +460,6 @@ fi
 
 # ---- tally ----------------------------------------------------------------
 echo "------------------------------------------------------------"
-printf 'search functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+printf 'searchmedia functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0

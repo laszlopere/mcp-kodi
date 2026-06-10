@@ -5,7 +5,7 @@
 # Kodi. `queue` appends an item behind the already-playing one (Playlist.Add,
 # or Playlist.Insert at position+1 for next:true) so playback continues into
 # it; it never builds or starts a playlist itself. This test discovers two
-# playable leaves from the target library (via `search`), starts the first as a
+# playable leaves from the target library (via `searchmedia`), starts the first as a
 # single play (Player.Open auto-creates the one-item playlist), queues the
 # second behind it — by library id, then by file with next:true — and asserts
 # against Kodi's own Playlist.GetItems that the queue grew as requested while
@@ -113,17 +113,17 @@ mcp_tool () { # name arguments-json  ->  tool result object
     | jq -c 'select(.id==2) | .result'
 }
 
-queue    () { mcp_tool queue    "$1"; }        # arguments-json -> result object
-playfile () { mcp_tool playfile "$1"; }
-search   () { mcp_tool search   "$1"; }
-stop_t   () { mcp_tool stop     "$1"; }
-pause_t  () { mcp_tool pause    "$1"; }
-play_t   () { mcp_tool play     "$1"; }
-res_err  () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
-res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
-jargs    () { jq -cn "$@"; }                   # build an arguments object safely
-g        () { printf '%s' "$1" | jq -r "$2"; } # body, filter -> scalar
-j        () { printf '%s' "$1" | jq    "$2"; } # body, filter -> json/bool
+queue       () { mcp_tool queue       "$1"; }     # arguments-json -> result object
+playfile    () { mcp_tool playfile    "$1"; }
+searchmedia () { mcp_tool searchmedia "$1"; }
+stop_t      () { mcp_tool stop        "$1"; }
+pause_t     () { mcp_tool pause       "$1"; }
+play_t      () { mcp_tool play        "$1"; }
+res_err     () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
+res_body    () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
+jargs       () { jq -cn "$@"; }                   # build an arguments object safely
+g           () { printf '%s' "$1" | jq -r "$2"; } # body, filter -> scalar
+j           () { printf '%s' "$1" | jq    "$2"; } # body, filter -> json/bool
 
 # ---- assertions -----------------------------------------------------------
 
@@ -204,12 +204,12 @@ contains "nothing-playing error suggests play/playfile" "play" \
          "$(g "$(res_body "$b")" '.error')"
 
 # ===========================================================================
-# 3. Discover TWO playable leaves of the same type via `search`. Prefer
+# 3. Discover TWO playable leaves of the same type via `searchmedia`. Prefer
 #    movies; fall back to songs so the test runs against an audio-only
 #    library too.
 # ===========================================================================
 kind=""
-b=$(res_body "$(search '{"type":"movie","limit":2}')")
+b=$(res_body "$(searchmedia '{"type":"movie","limit":2}')")
 if [ "$(j "$b" '.returned >= 2')" = true ]; then
   kind=movie idkey=movieid
 else
@@ -217,7 +217,7 @@ else
   artist=$(kodi_rpc AudioLibrary.GetArtists '{"limits":{"start":0,"end":1}}' \
             | jq -r '.result.artists[0].artist // empty')
   if [ -n "$artist" ]; then
-    b=$(res_body "$(search "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:2}')")")
+    b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:2}')")")
     if [ "$(j "$b" '.returned >= 2')" = true ]; then
       kind=song idkey=songid
     fi

@@ -4,7 +4,7 @@
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
  * Companion to test-tools.c. Where that suite covers tools/list, the unknown
- * tool, and noop, this one exercises the OTHER handlers — search, contributors,
+ * tool, and noop, this one exercises the OTHER handlers — searchmedia, contributors,
  * playfile, the transport Buttons, mute/unmute, the rpc escape hatch and its
  * gate, plus a handler failure path — all driven against the *programmable* stub
  * (stub-kodi-prog.c): each handler's Kodi calls are answered with realistic
@@ -127,7 +127,7 @@ envelope_payload (JsonNode *res, gboolean *is_error)
   return json_from_string (text, NULL);
 }
 
-/* ---- search ---------------------------------------------------------------- */
+/* ---- searchmedia ----------------------------------------------------------- */
 
 static void
 case_search_movie (void)
@@ -148,7 +148,7 @@ case_search_movie (void)
   g_autoptr (JsonNode) an = args_node ("{ \"type\": \"movie\" }");
   GError *error = NULL;
   g_autoptr (JsonNode) res =
-    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
 
   MK_CHECK (error == NULL);
   MK_CHECK (res != NULL);
@@ -199,7 +199,7 @@ case_search_music (void)
     args_node ("{ \"type\": \"music\", \"artist\": \"Radiohead\" }");
   GError *error = NULL;
   g_autoptr (JsonNode) res =
-    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
 
   MK_CHECK (error == NULL);
 
@@ -255,7 +255,7 @@ case_search_movie_person (void)
     "  \"actor\": \"weaver\", \"director\": \"scott\" }");
   GError *error = NULL;
   g_autoptr (JsonNode) res =
-    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
 
   MK_CHECK (error == NULL);
 
@@ -303,7 +303,7 @@ case_search_movie_actor_only (void)
     args_node ("{ \"type\": \"movie\", \"actor\": \"weaver\" }");
   GError *error = NULL;
   g_autoptr (JsonNode) res =
-    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
 
   MK_CHECK (error == NULL);
 
@@ -347,7 +347,7 @@ case_search_tv_person (void)
     "  \"actor\": \"mulgrew\", \"number\": 1 }");
   GError *error = NULL;
   g_autoptr (JsonNode) res =
-    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
 
   MK_CHECK (error == NULL);
 
@@ -409,7 +409,7 @@ case_search_tv_person_global (void)
     args_node ("{ \"type\": \"tv-show\", \"actor\": \"roiland\", \"limit\": 2 }");
   GError *error = NULL;
   g_autoptr (JsonNode) res =
-    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
 
   MK_CHECK (error == NULL);
 
@@ -460,7 +460,7 @@ case_search_tv_person_season_error (void)
     "{ \"type\": \"tv-show\", \"actor\": \"roiland\", \"season\": 1 }");
   GError *error = NULL;
   g_autoptr (JsonNode) res =
-    mk_tools_call (tools, "search", json_node_get_object (an), &error);
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
 
   MK_CHECK (error == NULL); /* tool error, not a protocol error */
 

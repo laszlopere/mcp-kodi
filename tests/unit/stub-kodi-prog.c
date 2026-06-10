@@ -8,7 +8,7 @@
  * is *programmable per JSON-RPC method*. A test sets the canned `result` for a
  * method with stub_kodi_set_response(), or makes a method fail (NULL + GError)
  * with stub_kodi_set_error(), so a handler that issues several different calls —
- * `search` resolving an artist then fetching its songs, or `playfile` opening
+ * `searchmedia` resolving an artist then fetching its songs, or `playfile` opening
  * then snapshotting — can be driven end-to-end with realistic, per-call replies.
  * Every call is recorded in stub_kodi_methods (in order) so a test can assert
  * exactly which RPCs a handler routed through.
@@ -27,7 +27,7 @@ GPtrArray *stub_kodi_methods = NULL;
 /* The params of every call, serialized JSON, index-parallel with
  * stub_kodi_methods ("null" for a NULL params). Owned strings. Lets a test
  * assert not just which RPC a handler issued but what it asked for — e.g.
- * the exact filter rules `search` composed. */
+ * the exact filter rules `searchmedia` composed. */
 GPtrArray *stub_kodi_params = NULL;
 
 /* method name -> canned JSON `result` literal (owned strings, both). */

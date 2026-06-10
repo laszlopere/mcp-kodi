@@ -1160,7 +1160,7 @@ handler_instances (MkTools *self, const MkToolDef *def, JsonObject *args,
   return NULL;
 }
 
-/* ---- search ---------------------------------------------------------------
+/* ---- searchmedia ----------------------------------------------------------
  *
  * One generic find-by-name tool that drills each media type's hierarchy down to
  * playable **leaf files**. The key design choice is to descend to the
@@ -1606,7 +1606,7 @@ build_row (JsonBuilder *b, JsonObject *item)
  * @rows: leaf items to emit, or NULL; ignored when @count.
  * @count: when TRUE, emit zero rows (a count-only response).
  *
- * Builds the shared `search` response shape: `{ type, total, returned,
+ * Builds the shared `searchmedia` response shape: `{ type, total, returned,
  * offset, truncated, approximate?, resolved?, rows[] }`. `truncated` is true
  * when rows remain beyond this page (`offset + returned < total`).
  *
@@ -1946,14 +1946,14 @@ search_tv (MkTools *self, const char *instance, const char *title,
   if (!have_title && !have_person)
     {
       g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                   "search tv-show: \"title\" (show name), \"actor\" or "
+                   "searchmedia tv-show: \"title\" (show name), \"actor\" or "
                    "\"director\" is required");
       return NULL;
     }
   if (!have_title && (have_season || have_number))
     {
       g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                   "search tv-show: \"season\"/\"number\" need a show — "
+                   "searchmedia tv-show: \"season\"/\"number\" need a show — "
                    "give \"title\" too");
       return NULL;
     }
@@ -2042,7 +2042,7 @@ search_music (MkTools *self, const char *instance, const char *artist,
   if (artist == NULL || artist[0] == '\0')
     {
       g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                   "search music: \"artist\" is required");
+                   "searchmedia music: \"artist\" is required");
       return NULL;
     }
 
@@ -2151,7 +2151,7 @@ search_music (MkTools *self, const char *instance, const char *artist,
  * schema_search:
  * @self: the table (used to name the configured instances).
  *
- * Schema for the `search` tool: the `type` selector plus the
+ * Schema for the `searchmedia` tool: the `type` selector plus the
  * optional drill fields and paging controls.
  *
  * @return a newly allocated schema node.
@@ -2207,7 +2207,7 @@ schema_search (MkTools *self)
  * @args: the call arguments; `type` selects the per-type chain.
  * @error: return location for a GError, or NULL.
  *
- * Implements the `search` tool: reads the drill fields and paging
+ * Implements the `searchmedia` tool: reads the drill fields and paging
  * controls, clamps `limit`/`offset`, and dispatches to the per-type resolver.
  * Makes no Kodi state change.
  *
@@ -2224,7 +2224,7 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
   if (type == NULL || type[0] == '\0')
     {
       g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                   "search: \"type\" is required (music/tv-show/movie)");
+                   "searchmedia: \"type\" is required (music/tv-show/movie)");
       return NULL;
     }
 
@@ -2257,7 +2257,7 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
                          limit, offset, count, error);
 
   g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-               "search: unknown type \"%s\" (use music/tv-show/movie)", type);
+               "searchmedia: unknown type \"%s\" (use music/tv-show/movie)", type);
   return NULL;
 }
 
@@ -2265,7 +2265,7 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
  *
  * Find or list *people* — bands, solo artists, composers, actors, directors —
  * instead of media. Each row is `{ name, in: [containers] }`: the exact name IS
- * the follow-up handle (`search` takes names, and Kodi's person filters are
+ * the follow-up handle (`searchmedia` takes names, and Kodi's person filters are
  * name-only — no id-based filter exists), and `in` lists where feeding it back
  * will hit (albums/songs for music people, movies/tvshows for cast and crew),
  * so the caller knows where to drill next without Kodi-specific knowledge.
@@ -2293,7 +2293,7 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
 #define MK_CONTRIB_NODE_PAGE 1000 /* labels per Files.GetDirectory page */
 
 /* Container bits for a row's `in` list — where the person's name yields hits
- * when fed back into `search`. Bits make the cross-source merge a cheap OR;
+ * when fed back into `searchmedia`. Bits make the cross-source merge a cheap OR;
  * mk_contrib_containers spells them out in emission order. */
 enum
 {
@@ -2925,7 +2925,7 @@ check_file_on_disk (MkTools *self, const char *instance, const char *file,
 
 /* ---- playfile -------------------------------------------------------------
  *
- * Play one file by path. The natural partner to `search`: the caller
+ * Play one file by path. The natural partner to `searchmedia`: the caller
  * picks a `file` out of a multi-leaf search result and hands it here. Unlike the
  * library `play` (by id), this opens an arbitrary path, so it works for items
  * that are not in the library at all.
@@ -2950,7 +2950,7 @@ schema_playfile (MkTools *self)
 
   prop_instance (b, self, FALSE);
   prop_typed (b, "file", "string",
-              "Path of the file to play — the `file` field of a `search` result "
+              "Path of the file to play — the `file` field of a `searchmedia` result "
               "row. Any path Kodi can reach works, in-library or not.");
 
   static const char *const required[] = { "file", NULL };
@@ -3080,7 +3080,7 @@ handler_playfile (MkTools *self, const MkToolDef *def, JsonObject *args,
  */
 
 /* The library id kinds `queue` accepts for its `type`/`id` pair — one per
- * `search` media type, each mapping to Kodi's `<type>id` item key. */
+ * `searchmedia` media type, each mapping to Kodi's `<type>id` item key. */
 static const char *const mk_queue_types[] = { "song", "episode", "movie", NULL };
 
 /**
@@ -3169,7 +3169,7 @@ library_item_file (MkTools *self, const char *instance, const char *type,
  * @self: the table (used to name the configured instances).
  *
  * Schema for the `queue` tool: the optional `instance`, the item to
- * queue as either a `type` + `id` pair (a library item from a `search` row) or
+ * queue as either a `type` + `id` pair (a library item from a `searchmedia` row) or
  * a `file` path, and the optional `next` flag (insert right after the current
  * item instead of appending). The one-of-`id`/`file` rule is enforced in the
  * handler so the schema stays a flat property list.
@@ -3190,10 +3190,10 @@ schema_queue (MkTools *self)
              "playback, an episode or movie joins video playback.");
   prop_typed (b, "id", "integer",
               "Library id of the item to queue — the `songid`/`episodeid`/"
-              "`movieid` of a `search` result row, matching `type`. Give "
+              "`movieid` of a `searchmedia` result row, matching `type`. Give "
               "exactly one of `id` or `file`.");
   prop_typed (b, "file", "string",
-              "Path of the file to queue — the `file` field of a `search` "
+              "Path of the file to queue — the `file` field of a `searchmedia` "
               "result row; any path Kodi can reach works. Give exactly one of "
               "`id` or `file`.");
   prop_typed (b, "next", "boolean",
@@ -3903,7 +3903,7 @@ schema_history (MkTools *self)
  * @error: return location for a GError, or NULL.
  *
  * Implements the `history` tool: reads the local playback log via
- * mk_history_read() and wraps the matches in a `search`-style envelope. Makes no
+ * mk_history_read() and wraps the matches in a `searchmedia`-style envelope. Makes no
  * Kodi call. An omitted `instance` spans all boxes (an inversion — see
  * schema_history()); `limit` defaults to 50 and is clamped. A malformed window
  * bound or a corrupt log surfaces as a normal tool error (mk_history_read sets
@@ -4154,7 +4154,7 @@ static const MkToolDef mk_tool_defs[] = {
    *      files; no Kodi state change. ---- */
 
   /**
-   * search (Search tool):
+   * searchmedia (Search tool):
    *
    * Find playable leaf files by name across the three media types.
    * Drills each type's hierarchy to leaf rows, descending to
@@ -4192,9 +4192,12 @@ static const MkToolDef mk_tool_defs[] = {
    *         "approximate"?, "resolved"?, "rows": [ { "file", "<id>", "label",
    *         "title", … } ] }`. Each row's `file` is the `playfile` input.
    */
-  { "search", "Find playable files by name: music/tv-show/movie, drilled to "
-              "leaf files with paging (limit/offset) and a total count. "
-              "Movie and tv-show queries can also filter by actor/director.",
+  { "searchmedia", "Find playable files by name: music/tv-show/movie, "
+                   "drilled to leaf files with paging (limit/offset) and a "
+                   "total count. Movie and tv-show queries can also filter "
+                   "by actor/director. Finds media items only — for people "
+                   "lookups (bands, artists, who is in the library) use "
+                   "`contributors`.",
     schema_search, handler_search, NULL },
 
   /**
@@ -4203,7 +4206,7 @@ static const MkToolDef mk_tool_defs[] = {
    * Find or list *people* — bands, solo artists, composers, actors,
    * directors — not media. Answers "do we have anything with X" and "what
    * bands do we have" across the whole library and hands back the exact names
-   * to feed into `search`: names are the only follow-up handle (Kodi's person
+   * to feed into `searchmedia`: names are the only follow-up handle (Kodi's person
    * filters are name-only; no id-based filter exists), so rows carry no person
    * ids. Each row's `in` lists the containers where that name yields hits —
    * `albums`/`songs` for music people (`albums` only when the artist is an
@@ -4240,7 +4243,7 @@ static const MkToolDef mk_tool_defs[] = {
                     "optional type (band/composer/actor/director) — e.g. "
                     "{type: \"band\"} lists all bands. Rows {name, in: "
                     "[albums|songs|movies|tvshows]} say where each name yields "
-                    "hits — feed the exact name back into `search` to drill.",
+                    "hits — feed the exact name back into `searchmedia` to drill.",
     schema_contributors, handler_contributors, NULL },
 
   /* ---- Playback tools — open content on a player. ---- */
@@ -4248,12 +4251,12 @@ static const MkToolDef mk_tool_defs[] = {
   /**
    * playfile (Playback tool):
    *
-   * Play one file by path — the partner to `search`.
-   * Takes a `file` (typically the `file` field of a `search` result row) and
+   * Play one file by path — the partner to `searchmedia`.
+   * Takes a `file` (typically the `file` field of a `searchmedia` result row) and
    * opens it with Player.Open `{ "item": { "file": <file> } }` (KODI-API 12.10.9). Kodi
    * auto-selects the audio vs video player from the file type and, when the path
    * matches a scanned library item, enriches the now-playing state back to its
-   * library id. Plays a single file; for a multi-leaf `search` result the caller
+   * library id. Plays a single file; for a multi-leaf `searchmedia` result the caller
    * picks which row to play. Works for any path Kodi can reach, in-library or
    * not. A file missing from disk is a proper tool error, never a false
    * success: it is refused before the open when verifiable on disk, and an
@@ -4271,7 +4274,7 @@ static const MkToolDef mk_tool_defs[] = {
    *         "totaltime" }` — a missing or never-starting file is an error,
    *         not a "stopped" snapshot.
    */
-  { "playfile", "Play one file by path (e.g. a `search` result's `file`): "
+  { "playfile", "Play one file by path (e.g. a `searchmedia` result's `file`): "
                 "Player.Open auto-selects the audio/video player. Works for any "
                 "reachable path, in-library or not. A file missing from disk "
                 "(stale library entry) is reported as an error.",
@@ -4285,7 +4288,7 @@ static const MkToolDef mk_tool_defs[] = {
    * auto-creates the one-item playlist, so this tool never builds or
    * starts a playlist itself — no active player, or non-playlist playback
    * (live TV / streams), is the one "nothing queueable is playing" error. The
-   * item is a `search` row's library id (`type` + `id`) or `file` path;
+   * item is a `searchmedia` row's library id (`type` + `id`) or `file` path;
    * `next: true` inserts it right after the current item instead of appending.
    * A library id whose kind does not match the playing queue (song ↔ audio,
    * episode/movie ↔ video) is refused — Kodi would accept the foreign item
@@ -4309,7 +4312,7 @@ static const MkToolDef mk_tool_defs[] = {
    *         the current item keeps playing with the new one queued behind it.
    */
   { "queue", "Queue an item behind the one now playing, for continuous "
-             "playback: a `search` row's library id (type+id) or a file path; "
+             "playback: a `searchmedia` row's library id (type+id) or a file path; "
              "next:true plays it right after the current item. Something must "
              "already be playing (start with play/playfile). An item whose "
              "file is missing from disk (stale library entry) is refused.",
@@ -4382,7 +4385,7 @@ static const MkToolDef mk_tool_defs[] = {
    * written as a side effect of every playback-affecting call. Reads only the
    * local `history.json`; makes no Kodi request, so it answers even when no box
    * is reachable. Mirror of the write path: mk_history_read() under a shared
-   * lock, wrapped in a `search`-style envelope.
+   * lock, wrapped in a `searchmedia`-style envelope.
    *
    * @param since (optional): ISO-8601 lower bound; omitted = start of the log.
    * @param until (optional): ISO-8601 upper bound; omitted = now.

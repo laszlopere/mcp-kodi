@@ -106,17 +106,17 @@ mcp_tool () { # name arguments-json  ->  tool result object
     | jq -c 'select(.id==2) | .result'
 }
 
-drop     () { mcp_tool dropplaylists "$1"; }   # arguments-json -> result object
-getpl    () { mcp_tool getplaylist   "$1"; }
-queue    () { mcp_tool queue         "$1"; }
-playfile () { mcp_tool playfile      "$1"; }
-search   () { mcp_tool search        "$1"; }
-stop_t   () { mcp_tool stop          "$1"; }
-res_err  () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
-res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
-jargs    () { jq -cn "$@"; }                   # build an arguments object safely
-g        () { printf '%s' "$1" | jq -r "$2"; } # body, filter -> scalar
-j        () { printf '%s' "$1" | jq    "$2"; } # body, filter -> json/bool
+drop        () { mcp_tool dropplaylists "$1"; }   # arguments-json -> result object
+getpl       () { mcp_tool getplaylist   "$1"; }
+queue       () { mcp_tool queue         "$1"; }
+playfile    () { mcp_tool playfile      "$1"; }
+searchmedia () { mcp_tool searchmedia   "$1"; }
+stop_t      () { mcp_tool stop          "$1"; }
+res_err     () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
+res_body    () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
+jargs       () { jq -cn "$@"; }                   # build an arguments object safely
+g           () { printf '%s' "$1" | jq -r "$2"; } # body, filter -> scalar
+j           () { printf '%s' "$1" | jq    "$2"; } # body, filter -> json/bool
 
 # Kodi's own item count for one fixed playlist id — the independent check that
 # a drop really emptied it.
@@ -183,12 +183,12 @@ for plid in 0 1 2; do
 done
 
 # ===========================================================================
-# 3. Discover TWO playable leaves of the same type via `search`. Prefer
+# 3. Discover TWO playable leaves of the same type via `searchmedia`. Prefer
 #    movies; fall back to songs so the test runs against an audio-only
 #    library too.
 # ===========================================================================
 kind=""
-b=$(res_body "$(search '{"type":"movie","limit":2}')")
+b=$(res_body "$(searchmedia '{"type":"movie","limit":2}')")
 if [ "$(j "$b" '.returned >= 2')" = true ]; then
   kind=movie pltype=video activeid=1 otherid=0 other=audio
 else
@@ -196,7 +196,7 @@ else
   artist=$(kodi_rpc AudioLibrary.GetArtists '{"limits":{"start":0,"end":1}}' \
             | jq -r '.result.artists[0].artist // empty')
   if [ -n "$artist" ]; then
-    b=$(res_body "$(search "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:2}')")")
+    b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:2}')")")
     if [ "$(j "$b" '.returned >= 2')" = true ]; then
       kind=song pltype=audio activeid=0 otherid=1 other=video
     fi
