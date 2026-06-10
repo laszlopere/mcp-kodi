@@ -63,6 +63,14 @@ JsonNode *mk_tools_call (MkTools     *self,
                          JsonObject  *arguments,
                          GError     **error);
 
+/* One round of live monitoring: snapshot every configured instance's
+ * now-playing state, which feeds the playback-history log exactly as a tool
+ * call would — so the log also captures playback not initiated through this
+ * server (e.g. started from the TV remote). An unreachable box is normal
+ * (powered off) and is skipped silently. Driven by a timer in main(); never
+ * fails. */
+void mk_tools_poll_history (MkTools *self);
+
 G_END_DECLS
 
 #endif /* MK_TOOLS_H */

@@ -547,6 +547,41 @@ player_state (MkTools *self, const char *instance, GError **error)
 }
 
 /**
+ * mk_tools_poll_history:
+ * @self: the tool table.
+ *
+ * One round of live monitoring (TODO 11.9.5): take a player_state() snapshot
+ * of **every** configured instance, purely for the side effect of that
+ * snapshot feeding the playback-history log (mk_history_record, inside
+ * player_state()). This is how the history also captures playback the server
+ * did not cause — something started from the TV remote is observed on the
+ * next round, and a repeat sighting of the same play merges instead of
+ * duplicating, so the ~2-minute cadence costs nothing in log noise. With
+ * several mcp-kodi processes polling the same boxes (one per client session),
+ * the flock-serialized merge keeps recording idempotent.
+ *
+ * Errors are dropped without even a warning: an unreachable box is the normal
+ * state of a powered-off TV, not a fault — polling it again next round *is*
+ * the handling. An idle box costs one RPC (the active-players probe) and
+ * never touches the log.
+ */
+void
+mk_tools_poll_history (MkTools *self)
+{
+  g_return_if_fail (self != NULL);
+
+  GList *names = mk_config_instance_names (self->config);
+  for (GList *l = names; l != NULL; l = l->next)
+    {
+      g_autoptr (GError) error = NULL;
+      g_autoptr (JsonNode) snapshot =
+        player_state (self, l->data, &error);
+      (void) snapshot; /* wanted only for its history side effect */
+    }
+  g_list_free (names);
+}
+
+/**
  * app_audio_state:
  * @self: the tool table.
  * @instance: target instance name, or NULL for the configured default.
