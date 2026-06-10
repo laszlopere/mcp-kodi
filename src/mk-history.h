@@ -154,30 +154,67 @@ gboolean mk_history_record (MkHistory  *self,
                             const char *name,
                             JsonNode   *snapshot);
 
-/* Read entries back from the log — the mirror of
- * mk_history_record. @instance NULL returns every box's entries (the log is
- * cross-instance); a key restricts to that box. @since/@until are ISO-8601
- * bounds (NULL = open on that end); an `at` we can't parse is kept, not
- * dropped (as the age-trim). @limit ≤ 0 means no cap; otherwise at most
- * @limit *newest* matches are returned (the file is newest-first). @total,
- * when non-NULL, is set to the number of entries matching @instance+window
- * before the limit, so the caller can tell it truncated.
+/* A read query: the filters and paging applied to the stored log. Every field
+ * is optional and AND-combined — a zeroed struct ({0}) reads the whole log,
+ * newest-first, uncapped. The log is never re-queried from Kodi: each filter is
+ * an app-side predicate over what monitoring already captured, so it is only as
+ * complete as the recorded metadata (e.g. @artist depends on 11.13.1's capture).
+ *
+ *  - @instance: restrict to this box key, or NULL for every box (the log is
+ *    cross-instance).
+ *  - @since/@until: ISO-8601 window bounds (NULL/"" = open on that end); an `at`
+ *    we cannot parse is kept, not dropped (as the age-trim).
+ *  - @media: keep only entries whose `media` equals this
+ *    (song/episode/movie/musicvideo/picture/channel), case-insensitively;
+ *    NULL/"" = any.
+ *  - @kind: keep only entries whose `kind` equals this (audio/video),
+ *    case-insensitively; NULL/"" = any.
+ *  - @artist: case-insensitive substring over the entry's captured `artist`
+ *    array — the music-by-performer filter; NULL/"" = any.
+ *  - @match: case-insensitive substring over the entry's human text fields
+ *    (`title`/`album`/`showtitle`/`label`) AND its `artist`; NULL/"" = any.
+ *  - @id + @have_id: when @have_id, keep only entries whose library `id` equals
+ *    @id (ids are per-media-type, so pair it with @media).
+ *  - @limit: ≤ 0 means no cap; otherwise at most @limit matches are returned.
+ *  - @offset: matches to skip before @limit (newest-first by default); < 0 is
+ *    treated as 0. Page older matches by advancing @offset.
+ *  - @oldest_first: FALSE (default) returns newest-first; TRUE replays the
+ *    window in the order it happened. @offset/@limit apply in the chosen order.
+ */
+typedef struct
+{
+  const char *instance;
+  const char *since;
+  const char *until;
+  const char *media;
+  const char *kind;
+  const char *artist;
+  const char *match;
+  gint64      id;
+  gboolean    have_id;
+  gint64      limit;
+  gint64      offset;
+  gboolean    oldest_first;
+} MkHistoryQuery;
+
+/* Read entries back from the log — the mirror of mk_history_record. @query
+ * carries the filters and paging (see MkHistoryQuery); pass a zeroed struct to
+ * read the whole log newest-first. @total, when non-NULL, is set to the number
+ * of entries matching every filter *before* @offset/@limit, so the caller can
+ * tell it paged/truncated.
  *
  * Unlike the best-effort write path this reports failures: a malformed
- * @since/@until, an unparseable or ill-shaped file, or an I/O error returns NULL
+ * since/until, an unparseable or ill-shaped file, or an I/O error returns NULL
  * with @error set. A missing file is not an error — it reads as zero entries.
  * Runs under a shared flock on the sidecar lock, so it never parses a
  * file mid-rewrite.
  *
- * @return a newly allocated JSON array node of entries (newest-first), or NULL
- *         with @error set; free with json_node_unref(). */
-JsonNode *mk_history_read (MkHistory  *self,
-                           const char *instance,
-                           const char *since,
-                           const char *until,
-                           gint64      limit,
-                           gint64     *total,
-                           GError    **error);
+ * @return a newly allocated JSON array node of entries (in the requested
+ *         order), or NULL with @error set; free with json_node_unref(). */
+JsonNode *mk_history_read (MkHistory            *self,
+                           const MkHistoryQuery *query,
+                           gint64               *total,
+                           GError              **error);
 
 G_END_DECLS
 

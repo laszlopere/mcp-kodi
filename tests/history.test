@@ -6,7 +6,8 @@
 # playback log (history.json), makes no Kodi call, and answers even when no box
 # is reachable. The test materialises a known log under a private XDG_STATE_HOME
 # and a minimal two-instance config under a private XDG_CONFIG_HOME, then asserts
-# the windowing, instance filter, limit/truncated, ordering and error paths.
+# the windowing, instance filter, limit/truncated, the 11.13 app-side filters
+# (media/kind/artist/match/id), offset/count/order paging, and error paths.
 #
 # Preconditions (else the test SKIPs, automake exit 77):
 #   - jq on PATH
@@ -162,7 +163,65 @@ eq "limit 1: truncated"    true  "$(g "$pb" '.truncated')"
 eq "limit 1: kept the newest" "Newest" "$(g "$pb" '.entries[0].title')"
 
 # ===========================================================================
-# 5. Error paths and an empty log.
+# 5. App-side filters (media / kind / artist / match / id), AND-combined.
+# ===========================================================================
+echo "-- filters"
+# media: only the two songs (Newest + Undated).
+pb=$(res_body "$(hist '{"media":"song"}')")
+eq "media=song: two" 2 "$(g "$pb" '.total')"
+is_true "media=song: all songs" \
+  "$(j "$pb" '[.entries[].media] | all(. == "song")')"
+
+# kind: the episode + the movie.
+pb=$(res_body "$(hist '{"kind":"video"}')")
+eq "kind=video: two" 2 "$(g "$pb" '.total')"
+
+# artist: a case-insensitive substring over the stored artist array.
+pb=$(res_body "$(hist '{"artist":"abba"}')")
+eq "artist=abba: one"   1        "$(g "$pb" '.total')"
+eq "artist=abba: right" "Newest" "$(g "$pb" '.entries[0].title')"
+
+# match: free text over the human fields — showtitle here.
+pb=$(res_body "$(hist '{"match":"show"}')")
+eq "match=show: the episode" "Mid" "$(g "$pb" '.entries[0].title')"
+eq "match=show: just one"    1     "$(g "$pb" '.total')"
+
+# id: exact, per media type — paired with media it must still match.
+pb=$(res_body "$(hist '{"id":42,"media":"episode"}')")
+eq "id+media: one"   1     "$(g "$pb" '.total')"
+eq "id+media: right" "Mid" "$(g "$pb" '.entries[0].title')"
+# the same id under the wrong media misses.
+pb=$(res_body "$(hist '{"id":42,"media":"movie"}')")
+eq "id+wrong media: none" 0 "$(g "$pb" '.total')"
+
+# AND-combination: living + audio narrows to the two living songs.
+pb=$(res_body "$(hist '{"instance":"living","kind":"audio"}')")
+eq "living+audio: two" 2 "$(g "$pb" '.total')"
+
+# ===========================================================================
+# 6. Paging and shape: offset, count-only, oldest-first order.
+# ===========================================================================
+echo "-- paging / count / order"
+# offset pages the song matches (newest-first: Newest, then Undated).
+pb=$(res_body "$(hist '{"media":"song","limit":1,"offset":1}')")
+eq "offset 1: total still full" 2         "$(g "$pb" '.total')"
+eq "offset 1: echoes offset"    1         "$(g "$pb" '.offset')"
+eq "offset 1: the second song"  "Undated" "$(g "$pb" '.entries[0].title')"
+eq "offset 1: still truncated?" false     "$(g "$pb" '.truncated')"
+
+# count: only the tally, no rows.
+pb=$(res_body "$(hist '{"media":"song","count":true}')")
+eq "count: full total"   2 "$(g "$pb" '.total')"
+eq "count: zero returned" 0 "$(g "$pb" '.returned')"
+eq "count: no entries"    0 "$(j "$pb" '.entries | length')"
+
+# order=oldest replays in observation order: Oldest precedes Newest.
+pb=$(res_body "$(hist '{"order":"oldest"}')")
+is_true "order=oldest: oldest before newest" \
+  "$(j "$pb" '([.entries[].title] | index("Oldest")) < ([.entries[].title] | index("Newest"))')"
+
+# ===========================================================================
+# 7. Error paths and an empty log.
 # ===========================================================================
 echo "-- errors and empty log"
 b=$(hist '{"since":"yesterday"}')
@@ -176,13 +235,21 @@ eq "missing log is not an error" false "$(res_err "$b")"
 eq "missing log: zero total"     0     "$(g "$(res_body "$b")" '.total')"
 
 # ===========================================================================
-# 6. Schema: advertises the args and the all-instances semantics.
+# 8. Schema: advertises the args and the all-instances semantics.
 # ===========================================================================
 echo "-- schema"
 s=$(schema)
 contains "schema has since"  "$s" '"since"'
 contains "schema has until"  "$s" '"until"'
 contains "schema has limit"  "$s" '"limit"'
+contains "schema has offset" "$s" '"offset"'
+contains "schema has order"  "$s" '"order"'
+contains "schema has count"  "$s" '"count"'
+contains "schema has media"  "$s" '"media"'
+contains "schema has kind"   "$s" '"kind"'
+contains "schema has artist" "$s" '"artist"'
+contains "schema has match"  "$s" '"match"'
+contains "schema has id"     "$s" '"id"'
 contains "instance desc says ALL instances" \
   "$(printf '%s' "$s" | jq -r '.properties.instance.description')" "ALL instances"
 

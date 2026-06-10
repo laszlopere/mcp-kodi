@@ -24,6 +24,9 @@
  *     out-of-order sighting of a non-newest entry merges within the window
  *     but is a distinct play beyond it; a new entry is inserted by its
  *     observation `at`, not blindly prepended.
+ *   - 11.13 filters: media/kind exact (case-insensitive), artist and free-text
+ *     `match` substrings (the latter spanning title/album/showtitle/label and
+ *     artist), exact id, AND-combination of several, and offset/order paging.
  */
 
 #define MK_TEST_IMPL
@@ -120,6 +123,21 @@ seed (const char *path, const char *json)
   g_clear_error (&err);
 }
 
+/* Read with only the legacy window/instance/limit query, the rest of
+ * MkHistoryQuery zeroed (newest-first, no offset, no filters). Keeps the
+ * pre-11.13 cases readable now that the real reader takes a query struct. */
+static JsonNode *
+read_basic (MkHistory *h, const char *instance, const char *since,
+            const char *until, gint64 limit, gint64 *total, GError **error)
+{
+  MkHistoryQuery q = { 0 };
+  q.instance = instance;
+  q.since = since;
+  q.until = until;
+  q.limit = limit;
+  return mk_history_read (h, &q, total, error);
+}
+
 static void
 case_record_then_read (void)
 {
@@ -136,7 +154,7 @@ case_record_then_read (void)
   gint64 total = -1;
   GError *err = NULL;
   g_autoptr (JsonNode) out =
-    mk_history_read (h, NULL, NULL, NULL, 0, &total, &err);
+    read_basic (h, NULL, NULL, NULL, 0, &total, &err);
   MK_CHECK (err == NULL);
   MK_CHECK (out != NULL && JSON_NODE_HOLDS_ARRAY (out));
   MK_CHECK_INT_EQ (arr_len (out), 1);
@@ -187,7 +205,7 @@ case_dedup_same_item (void)
 
   gint64 total = -1;
   g_autoptr (JsonNode) out =
-    mk_history_read (h, NULL, NULL, NULL, 0, &total, NULL);
+    read_basic (h, NULL, NULL, NULL, 0, &total, NULL);
   MK_CHECK_INT_EQ (arr_len (out), 1);
   MK_CHECK_INT_EQ (total, 1);
 
@@ -218,7 +236,7 @@ case_nothing_loaded_skips (void)
 
   gint64 total = -1;
   g_autoptr (JsonNode) out =
-    mk_history_read (h, NULL, NULL, NULL, 0, &total, NULL);
+    read_basic (h, NULL, NULL, NULL, 0, &total, NULL);
   MK_CHECK_INT_EQ (arr_len (out), 0);
   MK_CHECK_INT_EQ (total, 0);
 
@@ -243,7 +261,7 @@ case_newest_first (void)
 
   gint64 total = -1;
   g_autoptr (JsonNode) out =
-    mk_history_read (h, NULL, NULL, NULL, 0, &total, NULL);
+    read_basic (h, NULL, NULL, NULL, 0, &total, NULL);
   MK_CHECK_INT_EQ (arr_len (out), 2);
   MK_CHECK_INT_EQ (total, 2);
   /* most recently recorded item comes first */
@@ -274,14 +292,14 @@ case_cross_instance (void)
   /* NULL → the whole cross-instance log */
   gint64 total = -1;
   g_autoptr (JsonNode) all =
-    mk_history_read (h, NULL, NULL, NULL, 0, &total, NULL);
+    read_basic (h, NULL, NULL, NULL, 0, &total, NULL);
   MK_CHECK_INT_EQ (arr_len (all), 2);
   MK_CHECK_INT_EQ (total, 2);
 
   /* a key restricts to that box */
   gint64 t1 = -1;
   g_autoptr (JsonNode) only1 =
-    mk_history_read (h, "box1", NULL, NULL, 0, &t1, NULL);
+    read_basic (h, "box1", NULL, NULL, 0, &t1, NULL);
   MK_CHECK_INT_EQ (arr_len (only1), 1);
   MK_CHECK_INT_EQ (t1, 1);
   MK_CHECK_STR_EQ (
@@ -302,7 +320,7 @@ case_missing_file_is_empty (void)
   gint64 total = -1;
   GError *err = NULL;
   g_autoptr (JsonNode) out =
-    mk_history_read (h, NULL, NULL, NULL, 0, &total, &err);
+    read_basic (h, NULL, NULL, NULL, 0, &total, &err);
   MK_CHECK (err == NULL);
   MK_CHECK (out != NULL && JSON_NODE_HOLDS_ARRAY (out));
   MK_CHECK_INT_EQ (arr_len (out), 0);
@@ -332,7 +350,7 @@ case_limit_and_total (void)
   /* limit caps the returned set; total still reports the full match count */
   gint64 total = -1;
   g_autoptr (JsonNode) out =
-    mk_history_read (h, NULL, NULL, NULL, 2, &total, NULL);
+    read_basic (h, NULL, NULL, NULL, 2, &total, NULL);
   MK_CHECK_INT_EQ (arr_len (out), 2);
   MK_CHECK_INT_EQ (total, 4);
   /* the kept ones are the newest (last recorded was /f3) */
@@ -359,21 +377,21 @@ case_window_filtering (void)
 
   /* a window entirely in the past excludes the just-recorded entry */
   gint64 t_old = -1;
-  g_autoptr (JsonNode) old = mk_history_read (
+  g_autoptr (JsonNode) old = read_basic (
     h, NULL, NULL, "2000-01-01T00:00:00Z", 0, &t_old, NULL);
   MK_CHECK_INT_EQ (arr_len (old), 0);
   MK_CHECK_INT_EQ (t_old, 0);
 
   /* a window entirely in the future also excludes it */
   gint64 t_fut = -1;
-  g_autoptr (JsonNode) fut = mk_history_read (
+  g_autoptr (JsonNode) fut = read_basic (
     h, NULL, "2100-01-01T00:00:00Z", NULL, 0, &t_fut, NULL);
   MK_CHECK_INT_EQ (arr_len (fut), 0);
   MK_CHECK_INT_EQ (t_fut, 0);
 
   /* a window that straddles now keeps it */
   gint64 t_in = -1;
-  g_autoptr (JsonNode) in = mk_history_read (
+  g_autoptr (JsonNode) in = read_basic (
     h, NULL, "2000-01-01T00:00:00Z", "2100-01-01T00:00:00Z", 0, &t_in, NULL);
   MK_CHECK_INT_EQ (arr_len (in), 1);
   MK_CHECK_INT_EQ (t_in, 1);
@@ -381,7 +399,7 @@ case_window_filtering (void)
   /* a malformed bound is a hard error, unlike missing-file */
   GError *err = NULL;
   g_autoptr (JsonNode) bad =
-    mk_history_read (h, NULL, "not-a-timestamp", NULL, 0, NULL, &err);
+    read_basic (h, NULL, "not-a-timestamp", NULL, 0, NULL, &err);
   MK_CHECK (bad == NULL);
   MK_CHECK (err != NULL);
   if (err != NULL)
@@ -414,7 +432,7 @@ case_merge_newest_sets_last_seen (void)
   MK_CHECK (!mk_history_record (h, "box", "Box", s));
 
   g_autoptr (JsonNode) out =
-    mk_history_read (h, NULL, NULL, NULL, 0, NULL, NULL);
+    read_basic (h, NULL, NULL, NULL, 0, NULL, NULL);
   MK_CHECK_INT_EQ (arr_len (out), 1);
   JsonObject *e = arr_obj (out, 0);
   MK_CHECK (e != NULL);
@@ -458,7 +476,7 @@ case_out_of_order_sighting_merges (void)
 
   gint64 total = -1;
   g_autoptr (JsonNode) out =
-    mk_history_read (h, NULL, NULL, NULL, 0, &total, NULL);
+    read_basic (h, NULL, NULL, NULL, 0, &total, NULL);
   MK_CHECK_INT_EQ (arr_len (out), 2); /* no spurious second X */
   MK_CHECK_INT_EQ (total, 2);
   JsonObject *x = arr_obj (out, 1);
@@ -500,7 +518,7 @@ case_replay_beyond_window_is_new (void)
   MK_CHECK (mk_history_record (h, "box", "Box", s)); /* a NEW entry */
 
   g_autoptr (JsonNode) out =
-    mk_history_read (h, NULL, NULL, NULL, 0, NULL, NULL);
+    read_basic (h, NULL, NULL, NULL, 0, NULL, NULL);
   MK_CHECK_INT_EQ (arr_len (out), 3);
   /* the fresh play lands on top; the old X keeps its own entry */
   MK_CHECK_STR_EQ (json_object_get_string_member (arr_obj (out, 0), "file"),
@@ -534,12 +552,210 @@ case_insert_by_observation_time (void)
   MK_CHECK (mk_history_record (h, "box", "Box", s));
 
   g_autoptr (JsonNode) out =
-    mk_history_read (h, NULL, NULL, NULL, 0, NULL, NULL);
+    read_basic (h, NULL, NULL, NULL, 0, NULL, NULL);
   MK_CHECK_INT_EQ (arr_len (out), 2);
   MK_CHECK_STR_EQ (json_object_get_string_member (arr_obj (out, 0), "file"),
                    "/z");
   MK_CHECK_STR_EQ (json_object_get_string_member (arr_obj (out, 1), "file"),
                    "/x");
+
+  cleanup (dir, path);
+}
+
+/* A mixed five-entry log for the 11.13 filter cases: two boxes, both kinds,
+ * three media types, two with an artist, one untagged. Newest-first as stored.
+ * The artists deliberately differ in case ("abba" lower) to prove the substring
+ * match folds case. */
+static const char *const FILTER_LOG =
+  "[\n"
+  "  {\"at\":\"2026-06-09T10:00:00Z\",\"instance\":\"living\",\"kind\":\"audio\","
+  "   \"media\":\"song\",\"id\":11,\"title\":\"Dancing Queen\",\"album\":\"Arrival\","
+  "   \"artist\":[\"abba\"]},\n"
+  "  {\"at\":\"2026-06-08T10:00:00Z\",\"instance\":\"bedroom\",\"kind\":\"video\","
+  "   \"media\":\"episode\",\"id\":42,\"title\":\"Pilot\",\"showtitle\":\"The Wire\"},\n"
+  "  {\"at\":\"2026-06-07T10:00:00Z\",\"instance\":\"living\",\"kind\":\"audio\","
+  "   \"media\":\"song\",\"id\":12,\"title\":\"Master of Puppets\","
+  "   \"album\":\"Master of Puppets\",\"artist\":[\"Metallica\"]},\n"
+  "  {\"at\":\"2026-06-06T10:00:00Z\",\"instance\":\"living\",\"kind\":\"video\","
+  "   \"media\":\"movie\",\"id\":7,\"title\":\"Heat\"},\n"
+  "  {\"at\":\"2026-06-05T10:00:00Z\",\"instance\":\"living\",\"kind\":\"audio\","
+  "   \"media\":\"song\",\"id\":13,\"title\":\"Untitled\"}\n"
+  "]";
+
+/* Read the seeded FILTER_LOG through @q and assert the match count; returns the
+ * read node so the caller can inspect rows (owned by the caller). */
+static JsonNode *
+filter_read (MkHistory *h, MkHistoryQuery *q, gint64 *total)
+{
+  JsonNode *out = mk_history_read (h, q, total, NULL);
+  MK_CHECK (out != NULL && JSON_NODE_HOLDS_ARRAY (out));
+  return out;
+}
+
+static void
+case_filter_media_and_kind (void)
+{
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+  seed (path, FILTER_LOG);
+
+  /* media=song keeps only the three songs */
+  MkHistoryQuery q = { 0 };
+  q.media = "song";
+  gint64 total = -1;
+  g_autoptr (JsonNode) songs = filter_read (h, &q, &total);
+  MK_CHECK_INT_EQ (arr_len (songs), 3);
+  MK_CHECK_INT_EQ (total, 3);
+
+  /* kind=video keeps the episode + the movie */
+  MkHistoryQuery qv = { 0 };
+  qv.kind = "video";
+  gint64 tv = -1;
+  g_autoptr (JsonNode) vids = filter_read (h, &qv, &tv);
+  MK_CHECK_INT_EQ (arr_len (vids), 2);
+  MK_CHECK_INT_EQ (tv, 2);
+
+  /* media is matched case-insensitively */
+  MkHistoryQuery qc = { 0 };
+  qc.media = "MOVIE";
+  gint64 tc = -1;
+  g_autoptr (JsonNode) mv = filter_read (h, &qc, &tc);
+  MK_CHECK_INT_EQ (tc, 1);
+
+  cleanup (dir, path);
+}
+
+static void
+case_filter_artist (void)
+{
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+  seed (path, FILTER_LOG);
+
+  /* a case-insensitive substring over the stored artist array */
+  MkHistoryQuery q = { 0 };
+  q.artist = "ABBA"; /* the entry stored "abba" */
+  gint64 total = -1;
+  g_autoptr (JsonNode) out = filter_read (h, &q, &total);
+  MK_CHECK_INT_EQ (total, 1);
+  MK_CHECK_STR_EQ (json_object_get_string_member (arr_obj (out, 0), "title"),
+                   "Dancing Queen");
+
+  /* a substring is enough ("metal" → Metallica) */
+  MkHistoryQuery qs = { 0 };
+  qs.artist = "metal";
+  gint64 ts = -1;
+  g_autoptr (JsonNode) out2 = filter_read (h, &qs, &ts);
+  MK_CHECK_INT_EQ (ts, 1);
+
+  /* the untagged song (no artist) never matches an artist filter */
+  MkHistoryQuery qn = { 0 };
+  qn.artist = "Untitled"; /* matches the title, not any artist */
+  gint64 tn = -1;
+  g_autoptr (JsonNode) out3 = filter_read (h, &qn, &tn);
+  MK_CHECK_INT_EQ (tn, 0);
+
+  cleanup (dir, path);
+}
+
+static void
+case_filter_match_text (void)
+{
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+  seed (path, FILTER_LOG);
+
+  /* match spans title... */
+  MkHistoryQuery qt = { 0 };
+  qt.match = "puppets"; /* "Master of Puppets" — title + album */
+  gint64 tt = -1;
+  g_autoptr (JsonNode) o1 = filter_read (h, &qt, &tt);
+  MK_CHECK_INT_EQ (tt, 1);
+
+  /* ...showtitle... */
+  MkHistoryQuery qs = { 0 };
+  qs.match = "the wire";
+  gint64 ts = -1;
+  g_autoptr (JsonNode) o2 = filter_read (h, &qs, &ts);
+  MK_CHECK_INT_EQ (ts, 1);
+
+  /* ...and artist (so a generic match still finds music by performer) */
+  MkHistoryQuery qa = { 0 };
+  qa.match = "abba";
+  gint64 ta = -1;
+  g_autoptr (JsonNode) o3 = filter_read (h, &qa, &ta);
+  MK_CHECK_INT_EQ (ta, 1);
+
+  cleanup (dir, path);
+}
+
+static void
+case_filter_id_and_combination (void)
+{
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+  seed (path, FILTER_LOG);
+
+  /* exact id match */
+  MkHistoryQuery q = { 0 };
+  q.have_id = TRUE;
+  q.id = 12;
+  gint64 total = -1;
+  g_autoptr (JsonNode) out = filter_read (h, &q, &total);
+  MK_CHECK_INT_EQ (total, 1);
+  MK_CHECK_STR_EQ (json_object_get_string_member (arr_obj (out, 0), "title"),
+                   "Master of Puppets");
+
+  /* ids are per media type — the same id under a different media misses */
+  MkHistoryQuery qbad = { 0 };
+  qbad.have_id = TRUE;
+  qbad.id = 12;
+  qbad.media = "movie";
+  gint64 tbad = -1;
+  g_autoptr (JsonNode) none = filter_read (h, &qbad, &tbad);
+  MK_CHECK_INT_EQ (tbad, 0);
+
+  /* filters AND-combine: living + audio + artist=metallica → just one */
+  MkHistoryQuery qand = { 0 };
+  qand.instance = "living";
+  qand.kind = "audio";
+  qand.artist = "Metallica";
+  gint64 tand = -1;
+  g_autoptr (JsonNode) one = filter_read (h, &qand, &tand);
+  MK_CHECK_INT_EQ (tand, 1);
+
+  cleanup (dir, path);
+}
+
+static void
+case_offset_and_order (void)
+{
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+  seed (path, FILTER_LOG);
+
+  /* newest-first with a limit+offset pages the song matches: ids 11,12,13.
+   * offset 1, limit 1 → the middle one (id 12). total is the full match
+   * count regardless of the page. */
+  MkHistoryQuery q = { 0 };
+  q.media = "song";
+  q.limit = 1;
+  q.offset = 1;
+  gint64 total = -1;
+  g_autoptr (JsonNode) page = filter_read (h, &q, &total);
+  MK_CHECK_INT_EQ (total, 3);
+  MK_CHECK_INT_EQ (arr_len (page), 1);
+  MK_CHECK_INT_EQ (json_object_get_int_member (arr_obj (page, 0), "id"), 12);
+
+  /* oldest-first flips the order: the first song is now id 13 (the oldest) */
+  MkHistoryQuery qo = { 0 };
+  qo.media = "song";
+  qo.oldest_first = TRUE;
+  gint64 to = -1;
+  g_autoptr (JsonNode) asc = filter_read (h, &qo, &to);
+  MK_CHECK_INT_EQ (arr_len (asc), 3);
+  MK_CHECK_INT_EQ (json_object_get_int_member (arr_obj (asc, 0), "id"), 13);
+  MK_CHECK_INT_EQ (json_object_get_int_member (arr_obj (asc, 2), "id"), 11);
 
   cleanup (dir, path);
 }
@@ -560,6 +776,11 @@ main (int argc, char **argv)
     { "merge-out-of-order",       case_out_of_order_sighting_merges },
     { "replay-beyond-window-new", case_replay_beyond_window_is_new },
     { "insert-by-at",             case_insert_by_observation_time },
+    { "filter-media-and-kind",    case_filter_media_and_kind },
+    { "filter-artist",            case_filter_artist },
+    { "filter-match-text",        case_filter_match_text },
+    { "filter-id-and-combo",      case_filter_id_and_combination },
+    { "offset-and-order",         case_offset_and_order },
   };
   return mk_test_run (argc, argv, cases, G_N_ELEMENTS (cases));
 }

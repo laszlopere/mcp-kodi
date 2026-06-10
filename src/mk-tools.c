@@ -4021,11 +4021,14 @@ handler_rpc (MkTools *self, const MkToolDef *def, JsonObject *args,
  * @self: the table (used to name the configured instances).
  *
  * Schema for the `history` tool: an optional ISO-8601 window
- * (`since`/`until`), an optional `instance`, and a `limit`. Nothing is required
- * — a bare call returns the most recent entries across all boxes. The `instance`
- * description deliberately spells out that *omitting* it spans all instances,
- * which inverts the convention every other tool follows (omitted = the
- * default box), so the difference is explicit rather than a surprise.
+ * (`since`/`until`), an optional `instance`, paging (`limit`/`offset`/`order`/
+ * `count`), and a set of app-side filters over the stored entries — `media`,
+ * `kind`, `artist`, free-text `match`, and an exact `id`. Nothing is required —
+ * a bare call returns the most recent entries across all boxes; every filter is
+ * AND-combined with the window. The `instance` description deliberately spells
+ * out that *omitting* it spans all instances, which inverts the convention every
+ * other tool follows (omitted = the default box), so the difference is explicit
+ * rather than a surprise.
  *
  * @return a newly allocated schema node.
  */
@@ -4065,8 +4068,41 @@ schema_history (MkTools *self)
               "Only entries at or before this ISO-8601 time. Omitted = up to "
               "now.");
   prop_typed (b, "limit", "integer",
-              "Max entries to return, newest first (default 50, max 1000). When "
-              "more match the window, the reply sets \"truncated\": true.");
+              "Max entries to return (default 50, max 1000). When more match, "
+              "the reply sets \"truncated\": true — page the rest with offset.");
+  prop_typed (b, "offset", "integer",
+              "Number of matching entries to skip before this page — paginate "
+              "together with limit, keeping the same order.");
+  static const char *const orders[] = { "newest", "oldest", NULL };
+  prop_enum (b, "order", orders,
+             "Result order: \"newest\" first (default) or \"oldest\" first to "
+             "replay a session in the order it happened.");
+  prop_typed (b, "count", "boolean",
+              "When true, return only the total match count (zero entries) — a "
+              "cheap \"how many times / how much did X play\".");
+
+  static const char *const medias[] = { "song",       "episode", "movie",
+                                        "musicvideo", "picture", "channel",
+                                        NULL };
+  prop_enum (b, "media", medias,
+             "Keep only entries of this media kind (song/episode/movie/"
+             "musicvideo/picture/channel) — e.g. \"movies only\".");
+  static const char *const kinds[] = { "audio", "video", NULL };
+  prop_enum (b, "kind", kinds,
+             "Keep only entries of this broad kind: audio or video — e.g. "
+             "\"what music did I play\".");
+  prop_typed (b, "artist", "string",
+              "Keep only entries whose performer contains this (substring, "
+              "case-insensitive) — the music-by-artist filter (\"everything "
+              "Pink Floyd I played\"). Only as good as the captured artist tag.");
+  prop_typed (b, "match", "string",
+              "Free-text substring (case-insensitive) over an entry's human "
+              "fields — title, album, show, label and artist — to narrow the "
+              "log without knowing ids.");
+  prop_typed (b, "id", "integer",
+              "Exact library id to match (\"every time THIS item played\"). Ids "
+              "are per media type, so pair with media; feed back a searchmedia "
+              "or getplaylist row's id.");
 
   schema_end (b, NULL);
   return json_builder_get_root (b);
@@ -4080,14 +4116,16 @@ schema_history (MkTools *self)
  * @error: return location for a GError, or NULL.
  *
  * Implements the `history` tool: reads the local playback log via
- * mk_history_read() and wraps the matches in a `searchmedia`-style envelope. Makes no
- * Kodi call. An omitted `instance` spans all boxes (an inversion — see
- * schema_history()); `limit` defaults to 50 and is clamped. A malformed window
- * bound or a corrupt log surfaces as a normal tool error (mk_history_read sets
- * @error).
+ * mk_history_read() and wraps the matches in a `searchmedia`-style envelope.
+ * Makes no Kodi call. An omitted `instance` spans all boxes (an inversion — see
+ * schema_history()); the optional `media`/`kind`/`artist`/`match`/`id` filters
+ * are AND-combined with the window. `limit` defaults to 50 and is clamped,
+ * `offset` pages, `order` flips newest/oldest-first, and `count` returns only
+ * the total (zero entries). A malformed window bound or a corrupt log surfaces
+ * as a normal tool error (mk_history_read sets @error).
  *
- * @return `{ "instance"?, "since"?, "until"?, "total", "returned", "truncated",
- *         "entries": [ … ] }`, or NULL with @error set.
+ * @return `{ "instance"?, "since"?, "until"?, "total", "returned", "offset",
+ *         "truncated", "entries": [ … ] }`, or NULL with @error set.
  */
 static JsonNode *
 handler_history (MkTools *self, const MkToolDef *def, JsonObject *args,
@@ -4096,48 +4134,75 @@ handler_history (MkTools *self, const MkToolDef *def, JsonObject *args,
   (void) def;
   /* Unlike every other tool, an omitted instance is NOT defaulted to a box: NULL
    * tells mk_history_read() to span all instances. */
-  const char *instance = arg_instance (args);
-  const char *since = arg_str (args, "since", NULL);
-  const char *until = arg_str (args, "until", NULL);
+  MkHistoryQuery q = { 0 };
+  q.instance = arg_instance (args);
+  q.since = arg_str (args, "since", NULL);
+  q.until = arg_str (args, "until", NULL);
+  q.media = arg_str (args, "media", NULL);
+  q.kind = arg_str (args, "kind", NULL);
+  q.artist = arg_str (args, "artist", NULL);
+  q.match = arg_str (args, "match", NULL);
 
-  gint64 limit = MK_HISTORY_DEFAULT_LIMIT, v = 0;
+  gint64 v = 0;
+  q.have_id = arg_int (args, "id", &q.id);
+
+  gint64 limit = MK_HISTORY_DEFAULT_LIMIT;
   if (arg_int (args, "limit", &v))
     limit = v;
-  limit = CLAMP (limit, 1, MK_HISTORY_MAX_LIMIT);
+  q.limit = CLAMP (limit, 1, MK_HISTORY_MAX_LIMIT);
+  if (arg_int (args, "offset", &v))
+    q.offset = v;
+  if (q.offset < 0)
+    q.offset = 0;
+
+  const char *order = arg_str (args, "order", NULL);
+  q.oldest_first = order != NULL && g_str_equal (order, "oldest");
+
+  /* count-only: ask for the matches but emit none — q.limit drives the read, so
+   * read a single page then drop the rows, keeping `total` honest. */
+  gboolean count = arg_bool (args, "count");
 
   gint64 total = 0;
   g_autoptr (JsonNode) entries =
-    mk_history_read (self->history, instance, since, until, limit, &total,
-                     error);
+    mk_history_read (self->history, &q, &total, error);
   if (entries == NULL)
     return NULL;
-  gint64 returned = json_array_get_length (json_node_get_array (entries));
+  gint64 returned = count ? 0
+                          : json_array_get_length (json_node_get_array (entries));
 
   g_autoptr (JsonBuilder) b = json_builder_new ();
   json_builder_begin_object (b);
-  if (instance != NULL)
+  if (q.instance != NULL)
     {
       json_builder_set_member_name (b, "instance");
-      json_builder_add_string_value (b, instance);
+      json_builder_add_string_value (b, q.instance);
     }
-  if (since != NULL && *since != '\0')
+  if (q.since != NULL && *q.since != '\0')
     {
       json_builder_set_member_name (b, "since");
-      json_builder_add_string_value (b, since);
+      json_builder_add_string_value (b, q.since);
     }
-  if (until != NULL && *until != '\0')
+  if (q.until != NULL && *q.until != '\0')
     {
       json_builder_set_member_name (b, "until");
-      json_builder_add_string_value (b, until);
+      json_builder_add_string_value (b, q.until);
     }
   json_builder_set_member_name (b, "total");
   json_builder_add_int_value (b, total);
   json_builder_set_member_name (b, "returned");
   json_builder_add_int_value (b, returned);
+  json_builder_set_member_name (b, "offset");
+  json_builder_add_int_value (b, q.offset);
   json_builder_set_member_name (b, "truncated");
-  json_builder_add_boolean_value (b, total > returned);
+  json_builder_add_boolean_value (b, q.offset + returned < total);
   json_builder_set_member_name (b, "entries");
-  json_builder_add_value (b, json_node_ref (entries));
+  if (count)
+    {
+      json_builder_begin_array (b);
+      json_builder_end_array (b);
+    }
+  else
+    json_builder_add_value (b, json_node_ref (entries));
   json_builder_end_object (b);
   return json_builder_get_root (b);
 }

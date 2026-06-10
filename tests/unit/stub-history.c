@@ -75,19 +75,13 @@ mk_history_record (MkHistory  *self,
 }
 
 JsonNode *
-mk_history_read (MkHistory  *self,
-                 const char *instance,
-                 const char *since,
-                 const char *until,
-                 gint64      limit,
-                 gint64     *total,
-                 GError    **error)
+mk_history_read (MkHistory            *self,
+                 const MkHistoryQuery *query,
+                 gint64               *total,
+                 GError              **error)
 {
   (void) self;
-  (void) instance;
-  (void) since;
-  (void) until;
-  (void) limit;
+  (void) query;
   (void) error;
   if (total != NULL)
     *total = 0;

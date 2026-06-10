@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <string.h>
 #include <sys/file.h>
 #include <unistd.h>
 
@@ -854,43 +855,202 @@ load_locked (MkHistory *self, JsonParser **parser, JsonArray **entries,
 }
 
 /**
+ * empty_or_null:
+ * @s: a filter string.
+ *
+ * @return TRUE if @s is NULL or the empty string — i.e. an absent filter.
+ */
+static gboolean
+empty_or_null (const char *s)
+{
+  return s == NULL || *s == '\0';
+}
+
+/**
+ * ci_contains:
+ * @haystack: the text to search (may be NULL).
+ * @folded_needle: the search term, already case-folded by the caller.
+ *
+ * Case-insensitive, Unicode-aware substring test. @folded_needle is folded once
+ * by the caller (it is reused across every entry); @haystack is folded here.
+ *
+ * @return TRUE if @haystack contains @folded_needle (always FALSE for NULL).
+ */
+static gboolean
+ci_contains (const char *haystack, const char *folded_needle)
+{
+  if (haystack == NULL)
+    return FALSE;
+  g_autofree char *h = g_utf8_casefold (haystack, -1);
+  return strstr (h, folded_needle) != NULL;
+}
+
+/**
+ * artist_contains:
+ * @e: a history entry.
+ * @folded_needle: the case-folded search term.
+ *
+ * Tests the entry's `artist` array (the shape 11.13.1 records) for a member
+ * containing @folded_needle. An entry with no `artist`, or a non-array/non-string
+ * value, simply does not match.
+ *
+ * @return TRUE if any artist string contains @folded_needle.
+ */
+static gboolean
+artist_contains (JsonObject *e, const char *folded_needle)
+{
+  JsonNode *an = json_object_get_member (e, "artist");
+  if (an == NULL || !JSON_NODE_HOLDS_ARRAY (an))
+    return FALSE;
+  JsonArray *arr = json_node_get_array (an);
+  guint m = json_array_get_length (arr);
+  for (guint k = 0; k < m; k++)
+    {
+      JsonNode *el = json_array_get_element (arr, k);
+      if (el != NULL && JSON_NODE_HOLDS_VALUE (el)
+          && json_node_get_value_type (el) == G_TYPE_STRING
+          && ci_contains (json_node_get_string (el), folded_needle))
+        return TRUE;
+    }
+  return FALSE;
+}
+
+/**
+ * field_equals_ci:
+ * @e: a history entry.
+ * @field: the member name to read.
+ * @want: the value to compare against.
+ *
+ * @return TRUE if @e has a string @field equal to @want, case-insensitively.
+ */
+static gboolean
+field_equals_ci (JsonObject *e, const char *field, const char *want)
+{
+  const char *v = json_object_get_string_member_with_default (e, field, NULL);
+  return v != NULL && g_ascii_strcasecmp (v, want) == 0;
+}
+
+/**
+ * id_equals:
+ * @e: a history entry.
+ * @id: the library id to match.
+ *
+ * @return TRUE if @e carries an integer `id` member equal to @id. An entry with
+ *         no id (e.g. a channel/picture that monitoring logged without one)
+ *         never matches an id filter.
+ */
+static gboolean
+id_equals (JsonObject *e, gint64 id)
+{
+  JsonNode *n = json_object_get_member (e, "id");
+  if (n == NULL || !JSON_NODE_HOLDS_VALUE (n)
+      || json_node_get_value_type (n) != G_TYPE_INT64)
+    return FALSE;
+  return json_node_get_int (n) == id;
+}
+
+/**
+ * entry_matches:
+ * @e: a history entry.
+ * @q: the parsed query.
+ * @since_dt: the parsed lower bound, or NULL.
+ * @until_dt: the parsed upper bound, or NULL.
+ * @folded_artist: the case-folded @q->artist, or NULL when unset.
+ * @folded_match: the case-folded @q->match, or NULL when unset.
+ *
+ * The conjunction of every active filter — instance, window, media, kind, id,
+ * artist and the free-text match. The two needles are pre-folded once by the
+ * caller so this stays cheap per entry. A filter left unset (NULL/absent) is
+ * simply skipped, so a zeroed query matches everything.
+ *
+ * @return TRUE if @e satisfies all active filters.
+ */
+static gboolean
+entry_matches (JsonObject *e, const MkHistoryQuery *q, GDateTime *since_dt,
+               GDateTime *until_dt, const char *folded_artist,
+               const char *folded_match)
+{
+  if (q->instance != NULL
+      && g_strcmp0 (
+           json_object_get_string_member_with_default (e, "instance", NULL),
+           q->instance)
+           != 0)
+    return FALSE;
+  if (!in_window (e, since_dt, until_dt))
+    return FALSE;
+  if (!empty_or_null (q->media) && !field_equals_ci (e, "media", q->media))
+    return FALSE;
+  if (!empty_or_null (q->kind) && !field_equals_ci (e, "kind", q->kind))
+    return FALSE;
+  if (q->have_id && !id_equals (e, q->id))
+    return FALSE;
+  if (folded_artist != NULL && !artist_contains (e, folded_artist))
+    return FALSE;
+  if (folded_match != NULL
+      && !(ci_contains (
+             json_object_get_string_member_with_default (e, "title", NULL),
+             folded_match)
+           || ci_contains (
+                json_object_get_string_member_with_default (e, "album", NULL),
+                folded_match)
+           || ci_contains (json_object_get_string_member_with_default (
+                             e, "showtitle", NULL),
+                           folded_match)
+           || ci_contains (
+                json_object_get_string_member_with_default (e, "label", NULL),
+                folded_match)
+           || artist_contains (e, folded_match)))
+    return FALSE;
+  return TRUE;
+}
+
+/**
  * mk_history_read:
  * @self: the history log.
- * @instance: restrict to this instance key, or NULL for all instances.
- * @since: ISO-8601 lower bound (inclusive), or NULL/"" for open.
- * @until: ISO-8601 upper bound (inclusive), or NULL/"" for open.
- * @limit: maximum entries to return; ≤ 0 means no cap.
- * @total: out; set to the number of matches before the limit, or NULL.
+ * @query: the filters and paging (see MkHistoryQuery); must be non-NULL.
+ * @total: out; set to the number of matches before offset/limit, or NULL.
  * @error: return location for a GError.
  *
- * The read path. See the header for the contract. Parses the bounds, loads
- * the log under a shared lock, then walks it newest-first keeping
- * entries whose `instance` matches and whose `at` lies in [@since, @until],
- * collecting at most @limit of them — so the result is the newest matches. The
- * walk keeps counting matches past the cap to report @total, from which the
- * caller derives `truncated`.
+ * The read path. See the header for the contract. Parses the bounds, loads the
+ * log under a shared lock, then walks it in the requested order (newest-first by
+ * default, oldest-first when @query->oldest_first) keeping entries that satisfy
+ * every filter in @query, skipping @query->offset of them and collecting at most
+ * @query->limit — so the result is one page of the matches. The walk keeps
+ * counting matches past the page to report @total, from which the caller derives
+ * `truncated`.
  *
- * @return a newly allocated JSON array node (newest-first), or NULL with @error
- *         set; free with json_node_unref().
+ * @return a newly allocated JSON array node (in the requested order), or NULL
+ *         with @error set; free with json_node_unref().
  */
 JsonNode *
-mk_history_read (MkHistory *self, const char *instance, const char *since,
-                 const char *until, gint64 limit, gint64 *total, GError **error)
+mk_history_read (MkHistory *self, const MkHistoryQuery *query, gint64 *total,
+                 GError **error)
 {
   g_return_val_if_fail (self != NULL, NULL);
+  g_return_val_if_fail (query != NULL, NULL);
   if (total != NULL)
     *total = 0;
 
   g_autoptr (GDateTime) since_dt = NULL;
   g_autoptr (GDateTime) until_dt = NULL;
-  if (!parse_bound (since, "since", &since_dt, error)
-      || !parse_bound (until, "until", &until_dt, error))
+  if (!parse_bound (query->since, "since", &since_dt, error)
+      || !parse_bound (query->until, "until", &until_dt, error))
     return NULL;
+
+  /* Fold the substring needles once; reused across every entry. NULL means the
+   * filter is unset (an empty needle would match everything, so treat it so). */
+  g_autofree char *folded_artist =
+    empty_or_null (query->artist) ? NULL : g_utf8_casefold (query->artist, -1);
+  g_autofree char *folded_match =
+    empty_or_null (query->match) ? NULL : g_utf8_casefold (query->match, -1);
 
   g_autoptr (JsonParser) parser = NULL;
   JsonArray *entries = NULL;
   if (!load_locked (self, &parser, &entries, error))
     return NULL;
+
+  gint64 offset = query->offset > 0 ? query->offset : 0;
+  gint64 limit = query->limit;
 
   g_autoptr (JsonBuilder) b = json_builder_new ();
   json_builder_begin_array (b);
@@ -898,22 +1058,22 @@ mk_history_read (MkHistory *self, const char *instance, const char *since,
   if (entries != NULL)
     {
       guint n = json_array_get_length (entries);
-      for (guint i = 0; i < n; i++)
+      for (guint idx = 0; idx < n; idx++)
         {
+          /* The file is stored newest-first; walk it in reverse for
+           * oldest-first output so offset/limit page the chosen order. */
+          guint i = query->oldest_first ? (n - 1 - idx) : idx;
           JsonObject *e = json_array_get_object_element (entries, i);
           if (e == NULL)
             continue;
-          if (instance != NULL
-              && g_strcmp0 (json_object_get_string_member_with_default (
-                              e, "instance", NULL),
-                            instance)
-                   != 0)
-            continue;
-          if (!in_window (e, since_dt, until_dt))
+          if (!entry_matches (e, query, since_dt, until_dt, folded_artist,
+                              folded_match))
             continue;
           matched++;
-          /* Past the cap we keep counting (for @total) but stop collecting. The
-           * file is newest-first, so the kept ones are the most recent. */
+          /* Skip the page before @offset, and once @limit is reached keep
+           * counting (for @total) without collecting. */
+          if (matched <= offset)
+            continue;
           if (limit > 0 && kept >= limit)
             continue;
           json_builder_add_value (

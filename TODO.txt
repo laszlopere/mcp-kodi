@@ -307,8 +307,28 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         fails only when playback reaches it — a post-advance check would
         need player monitoring (see 11.9.5).
 
-[ ] 11.13 History tool — optional filters for a more flexible query. Today
-    `history` takes only instance/since/until/limit (mk-tools.c
+[x] 11.13 History tool — optional filters for a more flexible query. DONE
+    2026-06-10. Arg set decided (the "single match vs per-field" open choice):
+    BOTH — a dedicated `artist` substring (music-by-performer is the common
+    query) AND a single free-text `match` spanning title/album/showtitle/label
+    *and* artist, so a generic needle still finds performers. Added to schema_history
+    /handler_history (mk-tools.c): media, kind, artist, match, id, count, offset,
+    order — all OPTIONAL and AND-combined with the existing instance+window. The
+    predicates live in mk_history_read (mk-history.c), now taking an MkHistoryQuery
+    struct (replacing the positional instance/since/until/limit args): media/kind
+    are case-insensitive exact, artist/match are Unicode case-folded substrings
+    (the two needles folded once, then reused per entry), id is an exact int match
+    that misses on entries without an id, offset/order page the chosen direction
+    (the file is newest-first; oldest-first walks it in reverse). The envelope
+    gained `offset`, and `count` returns total with zero entries. Unit cases in
+    test-history.c (filter-media-and-kind / -artist / -match-text / -id-and-combo /
+    offset-and-order) over a seeded mixed log; functional history.test grew end-to-end
+    sections 5-6 plus schema asserts for every new prop (58 asserts, all pass).
+    README tool table updated. Note: only filters what monitoring captured — not a
+    Kodi library query.
+
+    Original plan (for reference):
+    Today `history` takes only instance/since/until/limit (mk-tools.c
     schema_history / handler_history; the match itself is mk_history_read
     in mk-history.c). It reads only the local history.json and makes no
     Kodi call, so every filter is an app-side predicate over the stored
