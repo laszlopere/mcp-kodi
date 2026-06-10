@@ -406,3 +406,66 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         a song snapshot with empty `artist` but populated `albumartist` /
         `displayartist` records the fallback; an all-empty artist array is
         omitted.
+
+[x] 11.14 Doc staleness from the 2026-06-10 tool-surface review (text only):
+    [x] 11.14.1 history one-line description (mk-tools.c ~4648) + its
+        Doxygen (@param list, @return missing offset; handler_history
+        header) predate the 11.13 schema — mention the media/kind/artist/
+        match/id/count/offset/order filters.
+    [x] 11.14.2 instances tool-table @return omits allow_rpc, though
+        instances_list() reports it (read-only).
+    [x] 11.14.3 README snapshot field list misses the 11.13.1 artist
+        (and type) fields.
+    [x] 11.14.4 play description should say "resumes only — cannot start
+        new content; use playfile" (with nothing loaded it is a no-op).
+    [x] 11.14.5 searchmedia description should state that music title
+        means ALBUM — songs cannot be matched by their own name (until
+        11.19 lands).
+
+[ ] 11.15 Surface the server version where the AI can see it (e.g. in the
+    noop reply or instances get envelope), so an assistant can detect it is
+    talking to a stale binary (live session today still served the
+    pre-11.13 history schema).
+
+[ ] 11.16 Result shapes are invisible to the model: envelopes (total/
+    returned/offset/truncated, approximate, resolved, has_auth, last_seen)
+    live only in Doxygen/README. Adopt MCP outputSchema, or add a short
+    shape clause to each description (volume already does this).
+
+[ ] 11.17 Rename/alias noop — same discoverability argument as the
+    11.6.4.5 search→searchmedia rename: an assistant hunting "what's
+    playing" looks for status/nowplaying, not a name that says "does
+    nothing".
+
+[ ] 11.18 skipnext / skipprevious Buttons — "skip this song"; reuse
+    handler_button via Input.ExecuteAction, cheapest missing remote keys.
+
+[ ] 11.19 Song search by title — searchmedia music resolves only
+    artist→songs / album→songs; "play Hey Jude" without artist context is
+    unresolvable. AudioLibrary.GetSongs takes a server-side title filter;
+    add a song/track arg.
+
+[ ] 11.20 seek — no "skip ahead 5 min" / "restart" / "go to 1:12:00".
+    Relative signed step like volume, plus an absolute `to` (snapshot
+    already reports time/totaltime).
+
+[ ] 11.21 Play/queue a whole container in one call — playfile is one file,
+    queue needs playback already running, so "play the album Animals" is
+    playfile + N-1 queue calls (chatty, racy). Player.Open
+    {item:{albumid}} and season/show equivalents. The biggest gap vs the
+    README's "build the evening's lineup" vision.
+
+[ ] 11.22 Queue editing — remove-one (deferred in 11.6.7), reorder, jump
+    to item N (Player.GoTo), shuffle/repeat toggles. Today the only
+    mutation between "append" and "drop everything" is nothing.
+
+[ ] 11.23 Discovery beyond names — genre / year / rating / recently-added
+    filters ("play some jazz", "what's new"); Kodi's filters support all
+    of these. Genre + recently-added are the highest value.
+
+[ ] 11.24 Media-kind asymmetry — history can record musicvideo/picture/
+    channel entries, but searchmedia cannot find them and queue cannot
+    queue them; the log names things no other tool can act on.
+
+[ ] 11.25 Subtitle / audio-track selection for video playback —
+    common living-room request, rpc-only today.

@@ -4112,7 +4112,9 @@ schema_history (MkTools *self)
  * handler_history:
  * @self: the tool table.
  * @def: this tool's row (unused).
- * @args: the call arguments: optional instance/since/until/limit.
+ * @args: the call arguments: optional instance, since/until window, the
+ *        media/kind/artist/match/id filters and limit/offset/order/count
+ *        paging controls (see schema_history()).
  * @error: return location for a GError, or NULL.
  *
  * Implements the `history` tool: reads the local playback log via
@@ -4222,9 +4224,11 @@ static const MkToolDef mk_tool_defs[] = {
   /**
    * play (Button):
    *
-   * Press Play on the Kodi remote — resume a paused player or begin playback of
-   * the focused/active item on the target instance. A remote keypress, not a
-   * player command: no playerid and no active-player resolution.
+   * Press Play on the Kodi remote — resume a paused player on the target
+   * instance. A remote keypress, not a player command: no playerid and no
+   * active-player resolution. It cannot start new content — with nothing
+   * loaded the keypress lands on the idle GUI and does nothing; starting
+   * something is `playfile`'s job.
    *
    * Call:  Input.ExecuteAction { "action": "play" }, then player_state() to
    *        report the effect.
@@ -4236,8 +4240,9 @@ static const MkToolDef mk_tool_defs[] = {
    *         nothing loaded the action is a no-op and the reply is
    *         `{ "state": "stopped" }`.
    */
-  { "play", "Press Play on the Kodi remote: resume/begin playback on the "
-            "target instance.",
+  { "play", "Press Play on the Kodi remote: resumes paused playback only — it "
+            "cannot start new content (with nothing loaded it is a no-op); "
+            "use playfile to start something.",
     schema_instance_only, handler_button, "play" },
 
   /**
@@ -4385,7 +4390,8 @@ static const MkToolDef mk_tool_defs[] = {
    * @param name|host|auth|scheme|insecure|default: instance fields for "set".
    * @return the resulting instance list (instances_list()): `{ "default": <key>,
    *         "instances": [ { "key", "name"?, "host", "scheme", "insecure",
-   *         "has_auth" } ] }`.
+   *         "has_auth", "allow_rpc" } ] }`. `allow_rpc` is read-only here — it
+   *         can only be changed by hand-editing the config file.
    */
   { "instances", "Read or modify the configured Kodi instances "
                  "(action: get/set/remove). Manages the MCP server's own "
@@ -4439,10 +4445,11 @@ static const MkToolDef mk_tool_defs[] = {
    */
   { "searchmedia", "Find playable files by name: music/tv-show/movie, "
                    "drilled to leaf files with paging (limit/offset) and a "
-                   "total count. Movie and tv-show queries can also filter "
-                   "by actor/director. Finds media items only — for people "
-                   "lookups (bands, artists, who is in the library) use "
-                   "`contributors`.",
+                   "total count. For music, title means the ALBUM name — "
+                   "songs cannot be matched by their own title. Movie and "
+                   "tv-show queries can also filter by actor/director. Finds "
+                   "media items only — for people lookups (bands, artists, "
+                   "who is in the library) use `contributors`.",
     schema_search, handler_search, NULL },
 
   /**
@@ -4637,18 +4644,26 @@ static const MkToolDef mk_tool_defs[] = {
    * @param instance (optional): restrict to one box. **Omitted spans ALL
    *        instances** — unlike other tools, where omitted means the default
    *        box.
-   * @param limit (optional): newest-in-window cap (default 50, max 1000).
-   * @return `{ "instance"?, "since"?, "until"?, "total", "returned",
+   * @param media|kind|artist|match|id (optional): app-side entry filters —
+   *        media kind (song/episode/movie/…), broad audio/video kind,
+   *        performer substring, free-text substring over the human fields,
+   *        exact library id — all AND-combined with the window.
+   * @param limit (optional): per-page cap (default 50, max 1000).
+   * @param offset|order|count (optional): paging (entries to skip; "newest" or
+   *        "oldest" first) and count-only mode (total with zero entries).
+   * @return `{ "instance"?, "since"?, "until"?, "total", "returned", "offset",
    *         "truncated", "entries": [ { "at", "last_seen"?, "instance",
    *         "name"?, "kind", "media"?, "id"?, "title"?, … } ] }` — each entry
-   *         a history record, newest first (`at` = earliest sighting,
-   *         `last_seen` = latest, present once re-observed); `total` counts
-   *         matches before the limit.
+   *         a history record, newest first by default (`at` = earliest
+   *         sighting, `last_seen` = latest, present once re-observed); `total`
+   *         counts matches before the limit.
    */
-  { "history", "List recently played items from the local playback log. Pass an "
-               "optional ISO-8601 window (since/until) and a limit; an omitted "
-               "instance returns all boxes. Reads only the local log — no Kodi "
-               "call, so it works even when no box is reachable.",
+  { "history", "List recently played items from the local playback log. Filter "
+               "with an ISO-8601 window (since/until), media/kind/artist, a "
+               "free-text match or an exact id; page with limit/offset/order, "
+               "or ask for a count only. An omitted instance returns all "
+               "boxes. Reads only the local log — no Kodi call, so it works "
+               "even when no box is reachable.",
     schema_history, handler_history, NULL },
 
   /* ---- Escape hatch — raw JSON-RPC passthrough, opt-in per instance
