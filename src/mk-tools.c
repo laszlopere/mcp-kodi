@@ -2139,7 +2139,8 @@ schema_queue (MkTools *self)
   prop_enum (b, "type", mk_queue_types,
              "Kind of library id passed in `id` — picks the item key "
              "(songid/episodeid/movieid). Required with `id`; not used with "
-             "`file`.");
+             "`file`. Must match the playing queue: a song joins audio "
+             "playback, an episode or movie joins video playback.");
   prop_typed (b, "id", "integer",
               "Library id of the item to queue — the `songid`/`episodeid`/"
               "`movieid` of a `search` result row, matching `type`. Give "
@@ -2178,10 +2179,13 @@ schema_queue (MkTools *self)
  *      the current one.
  *
  * The item is `{ "<type>id": id }` for a library item or `{ "file": path }`
- * for a path; matching the playlist's media type (audio vs video) is the
- * caller's job. Playback itself is untouched, so the returned player_state()
- * snapshot shows the still-playing current item — a same-item duplicate the
- * history dedup drops (§13.5) — and no settle delay is needed.
+ * for a path. A library item whose kind does not match the active player's
+ * type (song ↔ audio, episode/movie ↔ video) is refused before the add —
+ * Kodi would accept the foreign item silently — while a `file`'s media type
+ * is unknowable up front, so for files matching stays the caller's job.
+ * Playback itself is untouched, so the returned player_state() snapshot
+ * shows the still-playing current item — a same-item duplicate the history
+ * dedup drops (§13.5) — and no settle delay is needed.
  *
  * @return the player-state snapshot (playback unchanged), or NULL with @error
  *         set (bad arguments, nothing queueable playing, or a call failure).
@@ -2228,11 +2232,13 @@ handler_queue (MkTools *self, const MkToolDef *def, JsonObject *args,
   JsonArray *players =
     JSON_NODE_HOLDS_ARRAY (active) ? json_node_get_array (active) : NULL;
   gint64 playlistid = -1, position = -1;
+  const char *ptype = NULL;
   if (players != NULL && json_array_get_length (players) > 0)
     {
       JsonObject *p0 = json_array_get_object_element (players, 0);
       gint64 playerid =
         json_object_get_int_member_with_default (p0, "playerid", 0);
+      ptype = json_object_get_string_member_with_default (p0, "type", NULL);
 
       /* Step 2: the playlist the player is consuming, and where it sits in it
        * (the insert point for `next`). */
@@ -2255,6 +2261,27 @@ handler_queue (MkTools *self, const MkToolDef *def, JsonObject *args,
                    "queue: nothing queueable is playing — start playback "
                    "first (play/playfile), then queue behind it");
       return NULL;
+    }
+
+  /* A library item of the wrong kind for the playing queue: Kodi 19.4 accepts
+   * the foreign item silently (confirmed live), so without this check the
+   * mix-up would surface only later, as a queue that never auto-advances
+   * sensibly. A `file` is exempt — its media type is unknowable up front, so
+   * for files matching stays the caller's job. */
+  if (have_id && ptype != NULL)
+    {
+      const char *want = g_str_equal (type, "song") ? "audio" : "video";
+      if (!g_str_equal (ptype, want))
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "queue: a %s does not match the playing %s queue — "
+                       "queue %s instead, or start %s playback first",
+                       type, ptype,
+                       g_str_equal (ptype, "audio")
+                         ? "a song" : "an episode or movie",
+                       want);
+          return NULL;
+        }
     }
 
   /* Step 3: append, or insert right after the current item. */
@@ -2837,7 +2864,10 @@ static const MkToolDef mk_tool_defs[] = {
    * (live TV / streams), is the one "nothing queueable is playing" error. The
    * item is a `search` row's library id (`type` + `id`) or `file` path;
    * `next: true` inserts it right after the current item instead of appending.
-   * Matching the playlist's media type (audio vs video) is the caller's job.
+   * A library id whose kind does not match the playing queue (song ↔ audio,
+   * episode/movie ↔ video) is refused — Kodi would accept the foreign item
+   * silently; a `file`'s type is unknowable, so for files matching stays the
+   * caller's job.
    *
    * Call:  Player.GetActivePlayers → Player.GetProperties (playlistid,
    *        position) → Playlist.Add, or Playlist.Insert at position+1 for

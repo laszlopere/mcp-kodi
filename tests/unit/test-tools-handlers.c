@@ -363,6 +363,61 @@ case_queue_next_inserts (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* A library id whose kind does not match the playing queue (a movie onto
+ * audio playback) is refused before the add — Kodi would accept the foreign
+ * item silently — while a `file` is exempt (its type is unknowable). */
+static void
+case_queue_type_mismatch (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 0, \"type\": \"audio\" } ]");
+  stub_kodi_set_response ("Player.GetProperties",
+                          "{ \"playlistid\": 0, \"position\": 0, \"speed\": 1 }");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"type\": \"movie\", \"id\": 1 }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "queue", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = FALSE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      const char *msg = json_object_get_string_member (
+        json_node_get_object (payload), "error");
+      MK_CHECK (msg != NULL && strstr (msg, "does not match") != NULL);
+    }
+  MK_CHECK (!called ("Playlist.Add"));
+  MK_CHECK (!called ("Playlist.Insert"));
+
+  /* The same kind onto the same queue is fine: a song joins audio playback. */
+  stub_kodi_set_response ("Playlist.Add", "\"OK\"");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"Song\", \"file\": \"/s/a.flac\","
+    "  \"type\": \"song\", \"id\": 9 } }");
+  g_autoptr (JsonNode) an2 = args_node ("{ \"type\": \"song\", \"id\": 10 }");
+  g_autoptr (JsonNode) res2 =
+    mk_tools_call (tools, "queue", json_node_get_object (an2), &error);
+
+  MK_CHECK (error == NULL);
+  is_error = TRUE;
+  g_autoptr (JsonNode) payload2 = envelope_payload (res2, &is_error);
+  (void) payload2;
+  MK_CHECK (!is_error);
+  MK_CHECK (called ("Playlist.Add"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
 /* The one "nothing queueable is playing" error covers both no active player
  * (empty GetActivePlayers) and non-playlist playback (playlistid -1, live
  * TV/streams); neither path may reach Playlist.Add. */
@@ -820,6 +875,7 @@ main (int argc, char **argv)
     { "playfile",                case_playfile },
     { "queue-append",            case_queue_append },
     { "queue-next-inserts",      case_queue_next_inserts },
+    { "queue-type-mismatch",     case_queue_type_mismatch },
     { "queue-nothing-playing",   case_queue_nothing_playing },
     { "queue-bad-args",          case_queue_bad_args },
     { "button-play",             case_button_play },

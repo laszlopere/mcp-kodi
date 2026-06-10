@@ -15,10 +15,10 @@
 # Caller mistakes are exercised thoroughly: every malformed argument set, the
 # nothing-playing refusal, an unconfigured instance, and a nonexistent library
 # id must each return a tool error whose message names the mistake and the
-# accepted usage. One caller mistake is deliberately NOT caught: queueing an
-# item whose media type does not match the playing playlist is the caller's
-# job to avoid (§11.6.7), and the test documents that Kodi silently accepts
-# the foreign item rather than erroring.
+# accepted usage. A library id whose media type does not match the playing
+# playlist is refused by the server before the add (Kodi 19.4 would accept the
+# foreign item silently); a foreign *file* still passes through, since a
+# file's media type is unknowable up front (§11.6.7).
 #
 # Since real playback may be audible on a real device, the test reads the
 # volume at startup, lowers it to 2% for the run, and restores the original on
@@ -286,34 +286,46 @@ eq "the appended item stays last" \
 # ===========================================================================
 # 6. Cross-type queueing: an item whose media type does NOT match the playing
 #    playlist (a movie onto the audio queue, or a song onto the video queue).
-#    The spec makes matching the caller's job (§11.6.7 step 3) and Kodi 19.4
-#    *silently accepts* the foreign item — confirmed live — so this documents
-#    that no error comes back and the item really lands in the queue: the
-#    caller gets no safety net, only `getplaylist` would reveal the mix-up.
-#    Needs one leaf of the other type; a single-type library skips it.
+#    Kodi 19.4 would accept the foreign item silently (confirmed live), so the
+#    server refuses a mismatched library id itself, before the add (§11.6.7
+#    step 3) — and the queue must not grow. A `file` is exempt: its media type
+#    is unknowable up front, so a foreign file still passes through and lands
+#    in the queue — for files, matching stays the caller's job. Needs one leaf
+#    of the other type; a single-type library skips it.
 # ===========================================================================
 if [ "$kind" = movie ]; then
   othertype=song
-  otherid=$(kodi_rpc AudioLibrary.GetSongs '{"limits":{"start":0,"end":1}}' \
-             | jq -r '.result.songs[0].songid // empty')
+  other=$(kodi_rpc AudioLibrary.GetSongs \
+           '{"limits":{"start":0,"end":1},"properties":["file"]}' \
+           | jq -c '.result.songs[0] // empty')
+  otherid=$(printf '%s' "$other" | jq -r '.songid // empty')
 else
   othertype=movie
-  otherid=$(kodi_rpc VideoLibrary.GetMovies '{"limits":{"start":0,"end":1}}' \
-             | jq -r '.result.movies[0].movieid // empty')
+  other=$(kodi_rpc VideoLibrary.GetMovies \
+           '{"limits":{"start":0,"end":1},"properties":["file"]}' \
+           | jq -c '.result.movies[0] // empty')
+  otherid=$(printf '%s' "$other" | jq -r '.movieid // empty')
 fi
+otherfile=$(printf '%s' "$other" | jq -r '.file // empty')
 
 if [ -n "$otherid" ]; then
   echo "-- cross-type queueing ($othertype onto the $kind queue)"
-  b=$(queue "$(jargs --arg t "$othertype" --argjson i "$otherid" '{type:$t,id:$i}')")
-  eq "mismatched type is NOT refused (caller's job to match)" \
-     false "$(res_err "$b")"
-  eq "snapshot still plays the FIRST leaf" "$file1" "$(g "$(res_body "$b")" '.file')"
-  items=$(kodi_rpc Playlist.GetItems \
-          "{\"playlistid\":$plid,\"properties\":[\"file\"]}")
-  eq "the foreign item really joined the queue" 4 \
-     "$(printf '%s' "$items" | jq -r '.result.items | length')"
-  eq "queue tail is the foreign item's type" "$othertype" \
-     "$(printf '%s' "$items" | jq -r '.result.items[-1].type')"
+  queue_err "mismatched library id" \
+            "$(jargs --arg t "$othertype" --argjson i "$otherid" '{type:$t,id:$i}')" \
+            'does not match the playing'
+  eq "queue unchanged after the refused mismatch" 3 \
+     "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
+         | jq -r '.result.items | length')"
+
+  # The same foreign item by FILE is not (cannot be) caught: it queues.
+  if [ -n "$otherfile" ]; then
+    b=$(queue "$(jargs --arg f "$otherfile" '{file:$f}')")
+    eq "a foreign file is NOT refused (type unknowable; caller's job)" \
+       false "$(res_err "$b")"
+    eq "the foreign file joined the queue" 4 \
+       "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
+           | jq -r '.result.items | length')"
+  fi
 else
   echo "   (library holds no $othertype — cross-type assertions skipped)"
 fi

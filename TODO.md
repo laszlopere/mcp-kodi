@@ -563,8 +563,12 @@ Everything below this section is original design for *this* project.
          playback names its own playlist (audio 0 / video 1); nothing to guess.
       3. `Playlist.Add {playlistid, item}` (append), or `Playlist.Insert
          {playlistid, position:<current+1>, item}` when `next:true`. `item` =
-         `{<type>id:id}` or `{file}`; matching the playlist's media type is the
-         caller's job. Returns the player_state() snapshot (playback unchanged).
+         `{<type>id:id}` or `{file}`. A library id whose kind does not match
+         the active player's type (song ↔ audio, episode/movie ↔ video) is
+         refused before the add — Kodi 19.4 accepts the foreign item silently
+         (confirmed live), so the server checks; a `file`'s media type is
+         unknowable up front, so for files matching stays the caller's job.
+         Returns the player_state() snapshot (playback unchanged).
       Other table actions (remove/clear/list, line 145) deferred. Baseline test:
       tests/functional/scenarios/queue-next-episode.txt.
     [ ] 11.6.8 getplaylist — read the current queue. Resolves the active player's
