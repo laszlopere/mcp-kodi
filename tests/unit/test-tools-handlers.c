@@ -2408,6 +2408,77 @@ case_volume_clamps_high (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* Live monitoring (TODO 11.9.5): one poll round snapshots every configured
+ * instance — both boxes of the two-instance config — and each playing
+ * snapshot reaches the history write path. */
+static void
+case_poll_history (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 1, \"type\": \"video\" } ]");
+  stub_kodi_set_response ("Player.GetProperties", "{ \"speed\": 1 }");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"Heat\", \"file\": \"/m/heat.mkv\","
+    "  \"type\": \"movie\", \"id\": 1 } }");
+
+  mk_tools_poll_history (tools);
+
+  /* One snapshot per configured instance ("default" and "rpcbox")... */
+  MK_CHECK_INT_EQ (called_count ("Player.GetActivePlayers"), 2);
+  MK_CHECK_INT_EQ (called_count ("Player.GetItem"), 2);
+  /* ...and each one fed the history log. */
+  MK_CHECK_INT_EQ (stub_history_record_calls, 2);
+
+  free_tools (tools, cfg, kodi);
+}
+
+/* An unreachable box is the normal powered-off state: every poll fails at the
+ * first RPC, nothing reaches the history log, and nothing escalates — the
+ * round completes silently. */
+static void
+case_poll_history_unreachable (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_error ("Player.GetActivePlayers");
+
+  mk_tools_poll_history (tools);
+
+  /* Both boxes were probed; the failure stopped each snapshot there. */
+  MK_CHECK_INT_EQ (called_count ("Player.GetActivePlayers"), 2);
+  MK_CHECK (!called ("Player.GetItem"));
+  MK_CHECK_INT_EQ (stub_history_record_calls, 0);
+
+  free_tools (tools, cfg, kodi);
+}
+
+/* An idle box costs one RPC per round and never touches the log: the
+ * unprogrammed active-players probe reads as "nothing playing", so the
+ * snapshot is "stopped" and player_state() returns before the history feed. */
+static void
+case_poll_history_idle (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  mk_tools_poll_history (tools);
+
+  MK_CHECK_INT_EQ (called_count ("Player.GetActivePlayers"), 2);
+  MK_CHECK (!called ("Player.GetProperties"));
+  MK_CHECK (!called ("Player.GetItem"));
+  MK_CHECK_INT_EQ (stub_history_record_calls, 0);
+
+  free_tools (tools, cfg, kodi);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2460,6 +2531,9 @@ main (int argc, char **argv)
     { "rpc-allowed",             case_rpc_allowed },
     { "instances-get",           case_instances_get },
     { "handler-failure-shaped",  case_handler_failure_shaped },
+    { "poll-history",            case_poll_history },
+    { "poll-history-unreachable", case_poll_history_unreachable },
+    { "poll-history-idle",       case_poll_history_idle },
   };
   return mk_test_run (argc, argv, cases, G_N_ELEMENTS (cases));
 }

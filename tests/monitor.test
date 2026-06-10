@@ -1,0 +1,199 @@
+#!/bin/sh
+# Functional test for live monitoring (TODO 11.9.5).
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi, with the history poller cranked to a 1-second cadence via
+# MCP_KODI_POLL_SECONDS. The point of the feature is capturing playback the
+# server did NOT cause, so the test starts playback directly over Kodi's
+# JSON-RPC (curl — the "TV remote" stand-in), never through a tool call, lets
+# the poller run a few rounds, and then asks the server's own `history` tool
+# what it saw. The config also lists a "dead" box (a closed local port): an
+# unreachable instance must be skipped silently — no log entry, no warning —
+# without disturbing the live box's capture. Repeat sightings of the same play
+# across rounds must merge into ONE entry (the 11.9.4 idempotence, observed
+# live).
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#   - something playable in the library (else playback assertions are skipped)
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+KODI_HOST=${KODI_HOST:-127.0.0.1:8080}
+KODI_AUTH=${KODI_AUTH:-kodi:kodi}
+KODI_SCHEME=${KODI_SCHEME:-http}
+
+SKIP=77
+
+skip () { echo "SKIP: $*"; exit $SKIP; }
+
+# ---- dependencies ---------------------------------------------------------
+
+command -v jq   >/dev/null 2>&1 || skip "jq not found"
+command -v curl >/dev/null 2>&1 || skip "curl not found"
+
+# Locate the mcp-kodi binary: the automake build tree first ($top_builddir is
+# exported by `make check`), then fallbacks for running the script by hand.
+find_binary () {
+  for c in \
+    "${top_builddir:-}/src/mcp-kodi" \
+    "$(dirname "$0")/../src/mcp-kodi" \
+    "./src/mcp-kodi" \
+    "src/mcp-kodi"
+  do
+    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# ---- talking to Kodi directly (playback start + the liveness gate) --------
+
+kodi_rpc () { # method params-json  ->  raw JSON-RPC response
+  curl -s -m 20 -u "$KODI_AUTH" -H 'Content-Type: application/json' \
+    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" \
+    "$KODI_SCHEME://$KODI_HOST/jsonrpc"
+}
+
+pong=$(kodi_rpc JSONRPC.Ping '{}' | jq -r '.result // empty' 2>/dev/null)
+[ "$pong" = "pong" ] || skip "Kodi not reachable at $KODI_SCHEME://$KODI_HOST"
+
+# ---- a private config + state for the server under test -------------------
+
+WORK=$(mktemp -d) || skip "cannot mktemp"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/cfg/mcp-kodi" "$WORK/state"
+
+# "live" is the real box; "dead" is a closed local port (instant refusal) the
+# poller must skip silently. The default is "live", and the KODI_* env vars
+# are NOT passed to the server, so the config alone steers it.
+jq -n --arg host "$KODI_HOST" --arg auth "$KODI_AUTH" --arg scheme "$KODI_SCHEME" \
+  '{version: 2, default: "live", instances: {
+     live: {name: "Live Box", host: $host, auth: $auth, scheme: $scheme},
+     dead: {name: "Dead Box", host: "127.0.0.1:9", scheme: "http"}}}' \
+  > "$WORK/cfg/mcp-kodi/config.json"
+
+# ---- assertions -----------------------------------------------------------
+
+PASS=0
+FAIL=0
+ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
+
+eq () { # desc expected actual
+  if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi
+}
+is_true () { # desc jq-bool-string
+  if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi
+}
+
+echo "monitor functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ===========================================================================
+# 1. Start playback OUTSIDE the server — the "TV remote". Try library items
+#    until one actually plays (a deliberately stale fixture entry opens "OK"
+#    but never starts), movies first, then songs.
+# ===========================================================================
+prev=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+
+candidates=$( (kodi_rpc VideoLibrary.GetMovies '{"limits":{"start":0,"end":3}}' \
+                 | jq -r '.result.movies[]? | "movieid \(.movieid)"';
+               kodi_rpc AudioLibrary.GetSongs '{"limits":{"start":0,"end":5}}' \
+                 | jq -r '.result.songs[]? | "songid \(.songid)"') 2>/dev/null)
+
+played_id=""
+played_kind=""
+for cand in $(printf '%s\n' "$candidates" | tr ' ' ':'); do
+  kind=${cand%%:*}
+  id=${cand##*:}
+  kodi_rpc Player.Open "{\"item\":{\"$kind\":$id}}" >/dev/null 2>&1
+  for i in 1 2 3 4; do
+    sleep 0.5
+    active=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result | length')
+    [ "${active:-0}" -ge 1 ] && break
+  done
+  if [ "${active:-0}" -ge 1 ]; then played_id=$id; played_kind=$kind; break; fi
+done
+
+if [ -z "$played_id" ]; then
+  echo "   (nothing playable in the library — playback assertions skipped)"
+  echo "------------------------------------------------------------"
+  printf 'monitor functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+  [ "$FAIL" -eq 0 ] || exit 1
+  exit 0
+fi
+
+# The file Kodi says is now playing — what the poller must record.
+playerid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid')
+playing_file=$(kodi_rpc Player.GetItem \
+  "{\"playerid\":$playerid,\"properties\":[\"file\"]}" \
+  | jq -r '.result.item.file // empty')
+echo "   (playing $played_kind $played_id: $playing_file)"
+
+# ===========================================================================
+# 2. Run the server with a 1-second poll while that plays: initialize, hold
+#    the session open for a few poll rounds, then ask the `history` tool.
+#    Nothing in this session causes a snapshot itself — `initialize` and
+#    `history` touch no player — so whatever lands in the log, the poller put
+#    there.
+# ===========================================================================
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}'
+  sleep 4
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"history","arguments":{}}}'
+} | env -u KODI_HOST -u KODI_AUTH -u KODI_SCHEME \
+      XDG_CONFIG_HOME="$WORK/cfg" XDG_STATE_HOME="$WORK/state" \
+      MCP_KODI_POLL_SECONDS=1 \
+      "$MCP" > "$WORK/out.jsonl" 2> "$WORK/stderr.log"
+
+grep -q "history poll every 1s" "$WORK/stderr.log" \
+  && ok "server armed the 1s history poller" \
+  || no "server armed the 1s history poller" "$(cat "$WORK/stderr.log")"
+
+body=$(jq -c 'select(.id==2) | .result.content[0].text | fromjson' "$WORK/out.jsonl")
+[ -n "$body" ] || no "history tool answered" "$(cat "$WORK/out.jsonl")"
+
+g () { printf '%s' "$body" | jq -r "$1"; }
+j () { printf '%s' "$body" | jq    "$1"; }
+
+# The poller saw the externally started playback on the live box.
+is_true "history holds at least one entry"   "$(j '.returned >= 1')"
+mine=$(printf '%s' "$body" | jq -c --arg f "$playing_file" \
+        '[.entries[] | select(.file == $f and .instance == "live")]')
+eq "the played file was captured for \"live\"" 1 \
+   "$(printf '%s' "$mine" | jq 'length')"
+
+# Several poll rounds, ONE entry: repeat sightings merged (11.9.4, live), the
+# re-observation showing as a last_seen later than at.
+is_true "repeat sightings merged into the entry" \
+        "$(printf '%s' "$mine" | jq '.[0] | has("last_seen") and (.last_seen >= .at)')"
+
+# The dead box stayed out of the log and out of the diagnostics.
+eq "no entry for the unreachable box" 0 \
+   "$(j '[.entries[] | select(.instance == "dead")] | length')"
+if grep -qi "warning\|critical\|dead" "$WORK/stderr.log"; then
+  no "unreachable box skipped silently" "$(grep -i 'warning\|critical\|dead' "$WORK/stderr.log")"
+else
+  ok "unreachable box skipped silently"
+fi
+
+# ===========================================================================
+# 3. Cleanup — stop our playback; leaving the player stopped is the safe
+#    neutral state (as playfile.test).
+# ===========================================================================
+now=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+[ -n "$now" ] && kodi_rpc Player.Stop "{\"playerid\":$now}" >/dev/null 2>&1
+[ -n "$prev" ] && echo "   (note: a player was active before the test; left stopped)"
+
+# ---- tally ----------------------------------------------------------------
+echo "------------------------------------------------------------"
+printf 'monitor functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+exit 0
