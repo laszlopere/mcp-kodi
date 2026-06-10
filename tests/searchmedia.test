@@ -187,6 +187,17 @@ if [ -n "$artist" ]; then
     is_true "music/album finds the album"   "$(j "$b" '.total >= 1')"
   fi
 
+  # Album title alone (no artist) anchors the search: the album resolves
+  # library-wide and the result carries resolved.album/albumid (§11.6.4.6).
+  if [ -n "$album" ]; then
+    b=$(res_body "$(searchmedia "$(jargs --arg al "$album" \
+                              '{type:"music",title:$al,limit:50}')")")
+    check_invariants "$b" music 0 "music/album-only"
+    is_true "music/album-only finds songs"        "$(j "$b" '.total >= 1')"
+    is_true "music/album-only resolves an albumid" "$(j "$b" '(.resolved.albumid // 0) > 0')"
+    is_true "music/album-only has no artistid"     "$(j "$b" '.resolved | has("artistid") | not')"
+  fi
+
   # Track number narrows to that position.
   if [ -n "$album" ] && [ "$track" -gt 0 ] 2>/dev/null; then
     b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" --arg al "$album" --argjson n "$track" \
@@ -375,10 +386,10 @@ b=$(searchmedia '{"type":"banana"}')
 eq "unknown type -> tool error" true "$(res_err "$b")"
 
 b=$(searchmedia '{"type":"music"}')
-eq "music without artist -> tool error" true "$(res_err "$b")"
+eq "music without artist or title -> tool error" true "$(res_err "$b")"
 case "$(g "$(res_body "$b")" '.error')" in
-  *artist*) ok "music error names \"artist\"";;
-  *)        no "music error names \"artist\"";;
+  *artist*title*) ok "music error names \"artist\" and \"title\"";;
+  *)              no "music error names \"artist\" and \"title\"";;
 esac
 
 b=$(searchmedia '{"type":"tv-show"}')

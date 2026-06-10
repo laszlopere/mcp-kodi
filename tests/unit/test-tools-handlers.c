@@ -234,6 +234,107 @@ case_search_music (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* music + title only (no artist): the album anchors the search — resolved
+ * library-wide via GetAlbums (server-side `album contains` rule, exact match
+ * preferred), then one GetSongs {albumid} call; GetArtists is never touched
+ * (§11.6.4.6). */
+static void
+case_search_music_album_only (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  /* Two candidates: the substring hit sorts first, the exact match second —
+   * the resolve must prefer the exact one. */
+  stub_kodi_set_response (
+    "AudioLibrary.GetAlbums",
+    "{ \"albums\": ["
+    "    { \"albumid\": 21, \"label\": \"OK Computer OKNOTOK 1997 2017\" },"
+    "    { \"albumid\": 20, \"label\": \"OK Computer\" } ],"
+    "  \"limits\": { \"total\": 2 } }");
+  stub_kodi_set_response (
+    "AudioLibrary.GetSongs",
+    "{ \"songs\": ["
+    "    { \"songid\": 30, \"label\": \"Airbag\", \"title\": \"Airbag\","
+    "      \"track\": 1, \"file\": \"/s/airbag.flac\" } ],"
+    "  \"limits\": { \"total\": 1 } }");
+
+  g_autoptr (JsonNode) an =
+    args_node ("{ \"type\": \"music\", \"title\": \"ok computer\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  MK_CHECK (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload));
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_STR_EQ (json_object_get_string_member (p, "type"), "music");
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 1);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "returned"), 1);
+      /* resolved.album/albumid echo the matched container (the exact match). */
+      JsonObject *r = json_object_get_object_member (p, "resolved");
+      MK_CHECK (r != NULL);
+      if (r != NULL)
+        {
+          MK_CHECK_STR_EQ (json_object_get_string_member (r, "album"),
+                           "OK Computer");
+          MK_CHECK_INT_EQ (json_object_get_int_member (r, "albumid"), 20);
+        }
+    }
+
+  /* The album resolve carries the server-side title rule; the songs drill
+   * from the resolved albumid; no artist resolve happens at all. */
+  MK_CHECK (params_carry ("AudioLibrary.GetAlbums",
+                          "{\"field\":\"album\",\"operator\":\"contains\","
+                          "\"value\":\"ok computer\"}"));
+  MK_CHECK (params_carry ("AudioLibrary.GetSongs", "\"albumid\":20"));
+  MK_CHECK (!called ("AudioLibrary.GetArtists"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* music with neither artist nor title: a clean tool error naming both anchor
+ * fields, before any Kodi call. */
+static void
+case_search_music_no_args (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  g_autoptr (JsonNode) an = args_node ("{ \"type\": \"music\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL); /* tool error, not a protocol error */
+
+  gboolean is_error = FALSE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      const char *msg = json_object_get_string_member (
+        json_node_get_object (payload), "error");
+      MK_CHECK (msg != NULL && strstr (msg, "artist") != NULL
+                && strstr (msg, "title") != NULL);
+    }
+
+  MK_CHECK (!called ("AudioLibrary.GetArtists"));
+  MK_CHECK (!called ("AudioLibrary.GetAlbums"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
 /* movie + title + actor + director: still ONE GetMovies call, the three rules
  * and-combined into a single composite filter (§11.6.4.2). */
 static void
@@ -2313,6 +2414,8 @@ main (int argc, char **argv)
   static const MkTestCase cases[] = {
     { "search-movie",            case_search_movie },
     { "search-music",            case_search_music },
+    { "search-music-album-only", case_search_music_album_only },
+    { "search-music-no-args",    case_search_music_no_args },
     { "search-movie-person",     case_search_movie_person },
     { "search-movie-actor-only", case_search_movie_actor_only },
     { "search-tv-person",        case_search_tv_person },
