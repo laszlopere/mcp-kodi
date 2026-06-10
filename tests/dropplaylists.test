@@ -1,11 +1,11 @@
 #!/bin/sh
-# Functional test for the `dropplaylists` tool — TODO.md §11.6.9.
+# Functional test for the `dropplaylists` tool.
 #
 # Drives the real mcp-kodi binary over its MCP stdio transport against a live
 # Kodi. `dropplaylists` empties the queues: Playlist.Clear on each of Kodi's
 # three fixed playlists (audio 0 / video 1 / picture 2) in one call, so no
 # queued items remain anywhere, returning the player_state() snapshot. The
-# §11.6.9 contract under test: clearing the ACTIVE playlist leaves the current
+# contract under test: clearing the ACTIVE playlist leaves the current
 # item playing — only the queue behind it is emptied — so the tool never
 # interrupts playback.
 #
@@ -220,7 +220,7 @@ file2=$(g "$b" '.rows[1].file')
 #    by raw RPC (no player attached). One drop must empty all of them — the
 #    plural contract — while the current item keeps playing: the tool's own
 #    snapshot still names it, and Kodi independently confirms the player
-#    survived (§11.6.9).
+#    survived.
 # ===========================================================================
 echo "-- dropping live queues ($kind)"
 echo "   (playing: $file1)"

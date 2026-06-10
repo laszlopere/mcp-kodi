@@ -1,5 +1,5 @@
 #!/bin/sh
-# Functional test for the `history` read tool — TODO.md §13.10.
+# Functional test for the `history` read tool.
 #
 # Drives the real mcp-kodi binary over its MCP stdio transport. Unlike the other
 # functional tests this one needs NO live Kodi: `history` reads only the local
@@ -47,9 +47,9 @@ cat > "$WORK/cfg/mcp-kodi/config.json" <<'EOF'
   "bedroom":{"host":"127.0.0.1:8081","auth":"k:k","scheme":"http"}}}
 EOF
 
-# Four entries, newest-first as the writer stores them (§13.6): two boxes, a
+# Four entries, newest-first as the writer stores them: two boxes, a
 # spread of dates, and one with an unparseable timestamp that must be KEPT
-# (§13.8.2/§13.10.1 "keep what we can't parse").
+# (the reader keeps what it can't parse).
 HIST="$WORK/state/mcp-kodi/history.json"
 cat > "$HIST" <<'EOF'
 [

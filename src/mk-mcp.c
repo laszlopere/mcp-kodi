@@ -1,4 +1,4 @@
-/* mcp-kodi — MCP method dispatch. See mk-mcp.h and ../TODO.md §3.
+/* mcp-kodi — MCP method dispatch. See mk-mcp.h.
  *
  * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
@@ -10,8 +10,8 @@
 #include "mk-stdio.h"
 
 /* MCP protocol versions we speak, most recent first. On `initialize` we echo
- * the client's requested version when it is one of these, else offer our latest
- * (§3.3.1). */
+ * the client's requested version when it is one of these, else offer our
+ * latest. */
 static const char *const mk_mcp_protocol_versions[] = {
   "2025-06-18",
   "2025-03-26",
@@ -69,7 +69,7 @@ object_member (JsonObject *obj, const char *name)
  * @params: the `initialize` params object, or NULL.
  *
  * Picks the protocol version to report: the client's requested
- * `protocolVersion` when we recognise it, otherwise our latest (§3.3.1).
+ * `protocolVersion` when we recognise it, otherwise our latest.
  *
  * @return a borrowed static version string.
  */
@@ -93,7 +93,7 @@ negotiate_protocol (JsonObject *params)
  * @id: the request id to echo; borrowed.
  * @params: the request params, or NULL.
  *
- * Answers `initialize` (§3.3.1): negotiated `protocolVersion`, `capabilities`
+ * Answers `initialize`: negotiated `protocolVersion`, `capabilities`
  * (`{ "tools": {} }`), and `serverInfo` (`{ name, version }`).
  *
  * @return the response envelope; free with json_node_unref().
@@ -133,7 +133,7 @@ handle_initialize (JsonNode *id, JsonObject *params)
  * @self: the dispatcher.
  * @id: the request id to echo; borrowed.
  *
- * Answers `tools/list` (§3.3.4): wraps the tool table as `{ "tools": [ ... ] }`.
+ * Answers `tools/list`: wraps the tool table as `{ "tools": [ ... ] }`.
  *
  * @return the response envelope; free with json_node_unref().
  */
@@ -154,9 +154,9 @@ handle_tools_list (MkMcp *self, JsonNode *id)
  * @id: the request id to echo; borrowed.
  * @params: the request params, or NULL.
  *
- * Answers `tools/call` (§3.3.5): reads `name` and the optional `arguments`
+ * Answers `tools/call`: reads `name` and the optional `arguments`
  * object, then dispatches into the tool table. A handler/tool failure comes
- * back as a normal result with `isError: true` (§3.4); only an unknown tool
+ * back as a normal result with `isError: true`; only an unknown tool
  * name maps to a protocol-level `-32602` invalid-params error.
  *
  * @return the response envelope; free with json_node_unref().
@@ -178,7 +178,7 @@ handle_tools_call (MkMcp *self, JsonNode *id, JsonObject *params)
     mk_tools_call (self->tools, name, arguments, &error);
   if (result == NULL)
     {
-      /* Unknown tool name: the `name` argument is invalid (§3.4). */
+      /* Unknown tool name: the `name` argument is invalid. */
       g_autoptr (JsonNode) resp =
         mk_jsonrpc_error (id, MK_JSONRPC_INVALID_PARAMS,
                           error ? error->message : "unknown tool");
@@ -195,10 +195,10 @@ handle_tools_call (MkMcp *self, JsonNode *id, JsonObject *params)
  * @self: the dispatcher.
  * @message: one parsed JSON-RPC message; borrowed.
  *
- * Routes @message to its MCP method (§3.3). A message with no `id` is a
- * notification and never gets a reply (§3.5); a request gets a result or a
+ * Routes @message to its MCP method. A message with no `id` is a
+ * notification and never gets a reply; a request gets a result or a
  * JSON-RPC error envelope. Malformed envelopes yield `-32600`; unknown methods
- * yield `-32601` (§3.4).
+ * yield `-32601`.
  *
  * @return the response envelope, or NULL for notifications / no-reply cases.
  */
@@ -214,7 +214,7 @@ mk_mcp_dispatch (MkMcp *self, JsonNode *message)
 
   JsonObject *obj = json_node_get_object (message);
 
-  /* Presence of "id" distinguishes a request from a notification (§3.5). */
+  /* Presence of "id" distinguishes a request from a notification. */
   gboolean is_request = json_object_has_member (obj, "id");
   JsonNode *id = is_request ? json_object_get_member (obj, "id") : NULL;
 
@@ -230,7 +230,7 @@ mk_mcp_dispatch (MkMcp *self, JsonNode *message)
 
   JsonObject *params = object_member (obj, "params");
 
-  /* Notifications (no id): act where relevant, never reply (§3.3.2, §3.5). */
+  /* Notifications (no id): act where relevant, never reply. */
   if (!is_request)
     return NULL;
 

@@ -1,4 +1,4 @@
-/* mcp-kodi — playback history log (skeleton). See mk-history.h and ../TODO.md §13.
+/* mcp-kodi — playback history log (skeleton). See mk-history.h.
  *
  * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
@@ -15,11 +15,11 @@
 
 #include <glib/gstdio.h>
 
-/* Retention bounds (§13.8), tuned once we see real volume. With sparse,
- * call-driven entries (§13.2) 10k rows is many months — comfortably past
+/* Retention bounds, tuned once we see real volume. With sparse,
+ * call-driven entries 10k rows is many months — comfortably past
  * "last month". */
-#define MK_HISTORY_MAX          10000 /* keep newest this many entries (§13.8.1) */
-#define MK_HISTORY_MAX_AGE_DAYS 180   /* drop entries older than this (§13.8.2)  */
+#define MK_HISTORY_MAX          10000 /* keep newest this many entries */
+#define MK_HISTORY_MAX_AGE_DAYS 180   /* drop entries older than this  */
 
 struct _MkHistory
 {
@@ -39,10 +39,10 @@ G_DEFINE_QUARK (mk-history-error-quark, mk_history_error)
  * mk_history_default_path:
  *
  * Returns the default history path,
- * ${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/history.json (§13.6), computed once
+ * ${XDG_STATE_HOME:-~/.local/state}/mcp-kodi/history.json, computed once
  * and cached. This is state, not config — a backward-looking log of what played
- * — so it lives under XDG_STATE_HOME, separate from the §7 config and the §8
- * per-instance state (§13.1).
+ * — so it lives under XDG_STATE_HOME, separate from the config file and the
+ * per-instance state files.
  *
  * @return the path string, owned by the library; do not free.
  */
@@ -66,7 +66,7 @@ mk_history_default_path (void)
  * @path: path to the history log file, or NULL for mk_history_default_path().
  *
  * Allocates a history log bound to @path. Does not touch the filesystem: the
- * directory and file are created lazily by the first write (§13.6), once the
+ * directory and file are created lazily by the first write, once the
  * write path lands.
  *
  * @return a newly allocated MkHistory; free with mk_history_free().
@@ -107,7 +107,7 @@ mk_history_path (MkHistory *self)
   return self->path;
 }
 
-/* ---- write path (§13.9.1) ------------------------------------------------ */
+/* ---- write path ---------------------------------------------------------- */
 
 /**
  * write_all:
@@ -146,7 +146,7 @@ write_all (int fd, const char *data, gsize len)
  * Copies @src[@name] into the entry under the same key, or does nothing when
  * absent. The snapshot has already dropped the per-media fields that don't
  * apply (copy_member_nonempty in player_state()), so "omit what's empty"
- * (§13.4) needs no further filtering here.
+ * needs no further filtering here.
  */
 static void
 hist_copy (JsonBuilder *b, JsonObject *src, const char *name)
@@ -165,7 +165,7 @@ hist_copy (JsonBuilder *b, JsonObject *src, const char *name)
  * @to: the entry key to write it under.
  *
  * Like hist_copy() but renames the key — used to record the snapshot's `type`
- * (the player kind, §13.4.1) under the entry's `kind`.
+ * (the player kind) under the entry's `kind`.
  */
 static void
 hist_copy_as (JsonBuilder *b, JsonObject *src, const char *from, const char *to)
@@ -178,17 +178,17 @@ hist_copy_as (JsonBuilder *b, JsonObject *src, const char *from, const char *to)
 
 /**
  * compose_entry:
- * @snap: the now-playing snapshot (player_state(), §5.4).
+ * @snap: the now-playing snapshot (player_state()).
  * @instance: the instance config key.
  * @name: the instance display label, or NULL.
- * @at: the capture timestamp, ISO-8601 with timezone (§13.4.0).
+ * @at: the capture timestamp, ISO-8601 with timezone.
  *
- * Builds one history entry (§13.4) from the snapshot plus the instance
+ * Builds one history entry from the snapshot plus the instance
  * key/name and capture time: `at`/`instance`/`name`, the player kind as `kind`
- * (from the snapshot's `type`), then `media`/`id` (§13.4.1) and the per-media
- * identifiers (§13.4.2) copied straight across — present only where the
- * snapshot carries them. `state`/`time`/`totaltime` are deliberately not stored
- * (§13.4): the entry asserts only "this was played at `at`".
+ * (from the snapshot's `type`), then `media`/`id` and the per-media
+ * identifiers copied straight across — present only where the
+ * snapshot carries them. `state`/`time`/`totaltime` are deliberately not
+ * stored: the entry asserts only "this was played at `at`".
  *
  * @return a newly allocated object node; free with json_node_unref().
  */
@@ -207,11 +207,11 @@ compose_entry (JsonObject *snap, const char *instance, const char *name,
       json_builder_set_member_name (b, "name");
       json_builder_add_string_value (b, name);
     }
-  hist_copy_as (b, snap, "type", "kind"); /* player kind (§13.4.1) */
-  hist_copy (b, snap, "media");           /* real media type (§13.4.1) */
-  hist_copy (b, snap, "id");              /* library id (§13.4.1) */
+  hist_copy_as (b, snap, "type", "kind"); /* player kind */
+  hist_copy (b, snap, "media");           /* real media type */
+  hist_copy (b, snap, "id");              /* library id */
   hist_copy (b, snap, "title");
-  hist_copy (b, snap, "showtitle"); /* §13.4.2 */
+  hist_copy (b, snap, "showtitle"); /* per-media identifiers from here on */
   hist_copy (b, snap, "season");
   hist_copy (b, snap, "episode");
   hist_copy (b, snap, "album");
@@ -231,7 +231,7 @@ compose_entry (JsonObject *snap, const char *instance, const char *name,
  * @have_id: whether the snapshot carries a library id.
  * @id: that library id (valid only when @have_id).
  *
- * Implements the §13.5.2 "new item" test: find @instance's most recent entry
+ * Implements the "new item" dedup test: find @instance's most recent entry
  * (the first one for it in the newest-first array) and report whether it is the
  * same thing just re-observed — same `file`, or same `id` when neither carries
  * a file. Only the most recent entry per instance matters; an older repeat is
@@ -274,8 +274,8 @@ is_duplicate (JsonArray *existing, const char *instance, const char *file,
  * @error: return location for a GError.
  *
  * Writes @data to a 0600 temp file in @path's directory, fsync()s it, then
- * rename()s it over @path — the §7.4/§8.4 atomic-replacement discipline
- * (§13.7.2), run inside the caller's lock.
+ * rename()s it over @path — the usual atomic-replacement discipline,
+ * run inside the caller's lock.
  *
  * @return TRUE on success; FALSE with @error set on I/O failure.
  */
@@ -319,14 +319,14 @@ atomic_write (const char *path, const char *data, GError **error)
 /**
  * record_locked:
  * @self: the history log.
- * @snap: the now-playing snapshot, already known to be loaded (§13.5.1).
+ * @snap: the now-playing snapshot, already known to be loaded.
  * @instance: the instance config key.
  * @name: the instance display label, or NULL.
  * @error: return location for a GError.
  *
- * The critical section of mk_history_record(), run under the exclusive lock
- * (§13.7.2): read the current array → dedup (§13.5.2) → compose/prepend the new
- * entry → trim by count and age (§13.8) → atomic rewrite. A parse/shape error
+ * The critical section of mk_history_record(), run under the exclusive
+ * lock: read the current array → dedup → compose/prepend the new
+ * entry → trim by count and age → atomic rewrite. A parse/shape error
  * on the existing file aborts **without** clobbering it (better to keep the
  * user's log than overwrite data we failed to understand).
  *
@@ -363,7 +363,7 @@ record_locked (MkHistory *self, JsonObject *snap, const char *instance,
       /* root == NULL: an empty file, treated as no entries. */
     }
 
-  /* §13.5.2 dedup key: prefer file, fall back to the library id. */
+  /* Dedup key: prefer file, fall back to the library id. */
   const char *file =
     json_object_get_string_member_with_default (snap, "file", NULL);
   if (file != NULL && *file == '\0')
@@ -374,18 +374,18 @@ record_locked (MkHistory *self, JsonObject *snap, const char *instance,
     return FALSE; /* nothing identifies this item — can't dedup, don't log */
 
   if (is_duplicate (existing, instance, file, have_id, id))
-    return FALSE; /* same thing re-observed (§13.5.2): skip, no error */
+    return FALSE; /* same thing re-observed: skip, no error */
 
-  /* Compose the new entry and the new newest-first array, trimmed (§13.8). */
+  /* Compose the new entry and the new newest-first array, trimmed. */
   g_autoptr (GDateTime) now = g_date_time_new_now_utc ();
   g_autoptr (GDateTime) cutoff =
     g_date_time_add_days (now, -MK_HISTORY_MAX_AGE_DAYS);
-  g_autofree char *at = g_date_time_format_iso8601 (now); /* …Z, §13.4.0 */
+  g_autofree char *at = g_date_time_format_iso8601 (now); /* UTC …Z */
   g_autoptr (JsonNode) entry = compose_entry (snap, instance, name, at);
 
   g_autoptr (JsonBuilder) b = json_builder_new ();
   json_builder_begin_array (b);
-  json_builder_add_value (b, json_node_ref (entry)); /* newest first (§13.6) */
+  json_builder_add_value (b, json_node_ref (entry)); /* newest first */
   guint kept = 1;
   if (existing != NULL)
     {
@@ -395,7 +395,7 @@ record_locked (MkHistory *self, JsonObject *snap, const char *instance,
           JsonObject *e = json_array_get_object_element (existing, i);
           if (e == NULL)
             continue;
-          /* Age trim (§13.8.2): drop anything older than the cutoff. A stamp we
+          /* Age trim: drop anything older than the cutoff. A stamp we
            * can't parse is kept rather than silently dropped. */
           const char *eat =
             json_object_get_string_member_with_default (e, "at", NULL);
@@ -427,12 +427,12 @@ record_locked (MkHistory *self, JsonObject *snap, const char *instance,
  * @self: the history log.
  * @instance: the instance config key.
  * @name: the instance display label, or NULL.
- * @snapshot: the canonical player_state() now-playing object (§5.4/§13.3).
+ * @snapshot: the canonical player_state() now-playing object.
  *
- * The write path (§13.9.1). See the header for the contract. Does the cheap
- * pre-lock checks (§13.5.1 "is anything loaded"), then serialises the whole
- * read-modify-write under an exclusive flock on a sidecar lock file (§13.7) so
- * concurrent servers can't lose each other's appends. Best-effort (§13.9.2):
+ * The write path. See the header for the contract. Does the cheap
+ * pre-lock checks ("is anything loaded"), then serialises the whole
+ * read-modify-write under an exclusive flock on a sidecar lock file so
+ * concurrent servers can't lose each other's appends. Best-effort:
  * every failure path warns to stderr and returns FALSE rather than propagating,
  * so a logging hiccup never fails the originating tool call.
  *
@@ -444,7 +444,7 @@ mk_history_record (MkHistory *self, const char *instance, const char *name,
 {
   g_return_val_if_fail (self != NULL, FALSE);
 
-  /* §13.5.1: nothing to record unless something is loaded. Cheap, pre-lock. */
+  /* Nothing to record unless something is loaded. Cheap, pre-lock. */
   if (snapshot == NULL || !JSON_NODE_HOLDS_OBJECT (snapshot))
     return FALSE;
   JsonObject *snap = json_node_get_object (snapshot);
@@ -461,7 +461,7 @@ mk_history_record (MkHistory *self, const char *instance, const char *name,
       return FALSE;
     }
 
-  /* Serialize the read-modify-write on a sidecar lock (§13.7.1): a stable inode
+  /* Serialize the read-modify-write on a sidecar lock: a stable inode
    * the atomic rename() can't swap out from under us. */
   g_autofree char *lockpath = g_strconcat (self->path, ".lock", NULL);
   int lockfd = g_open (lockpath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
@@ -491,7 +491,7 @@ mk_history_record (MkHistory *self, const char *instance, const char *name,
   return appended;
 }
 
-/* ---- read path (§13.10.1) ------------------------------------------------ */
+/* ---- read path ----------------------------------------------------------- */
 
 /**
  * in_window:
@@ -501,7 +501,7 @@ mk_history_record (MkHistory *self, const char *instance, const char *name,
  *
  * Tests whether @e's `at` timestamp falls within [@since, @until]. An entry
  * whose `at` is missing or not parseable as ISO-8601 is treated as in-range —
- * kept, not silently dropped, mirroring the age-trim's rule (§13.8.2): we never
+ * kept, not silently dropped, mirroring the age-trim's rule: we never
  * hide data we merely failed to understand.
  *
  * @return TRUE if @e is within the window (or its stamp is unparseable).
@@ -560,8 +560,8 @@ parse_bound (const char *value, const char *label, GDateTime **out,
  *           file is missing/empty.
  * @error: return location for a GError.
  *
- * Reads and parses the log under a **shared** flock on the sidecar lock
- * (§13.7.1) — it excludes a writer's exclusive lock so we never parse a
+ * Reads and parses the log under a **shared** flock on the sidecar
+ * lock — it excludes a writer's exclusive lock so we never parse a
  * half-rewritten file, but lets concurrent reads proceed. The lock is held only
  * across the load: json_parser_load_from_file() pulls the whole file into
  * memory, so once it returns the tree is ours and the lock can drop. A missing
@@ -635,8 +635,8 @@ load_locked (MkHistory *self, JsonParser **parser, JsonArray **entries,
  * @total: out; set to the number of matches before the limit, or NULL.
  * @error: return location for a GError.
  *
- * The read path (§13.10.1). See the header for the contract. Parses the bounds,
- * loads the log under a shared lock, then walks it newest-first (§13.6) keeping
+ * The read path. See the header for the contract. Parses the bounds, loads
+ * the log under a shared lock, then walks it newest-first keeping
  * entries whose `instance` matches and whose `at` lies in [@since, @until],
  * collecting at most @limit of them — so the result is the newest matches. The
  * walk keeps counting matches past the cap to report @total, from which the

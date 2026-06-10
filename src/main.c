@@ -4,8 +4,7 @@
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
  * Entry point. Loads configuration, builds the Kodi client, tool table, and MCP
- * dispatcher, then runs the stdio transport until stdin EOF (see ../TODO.md
- * §11).
+ * dispatcher, then runs the stdio transport until stdin EOF.
  */
 
 #include "config.h"
@@ -24,7 +23,7 @@
  * @user_data: the MkMcp dispatcher.
  *
  * Adapts mk_mcp_dispatch() to the MkStdioDispatch callback signature, so the
- * transport can route each message into the MCP method dispatch (§3.3).
+ * transport can route each message into the MCP method dispatch.
  *
  * @return the response envelope to send, or NULL for notifications.
  */

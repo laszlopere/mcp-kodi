@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
- * One client per process. Each call is made against a named config instance
- * (§7), resolved to scheme/host/auth/insecure, and POSTed as JSON-RPC 2.0 to
- * <scheme>://<host>/jsonrpc. See ../TODO.md §4.
+ * One client per process. Each call is made against a named config instance,
+ * resolved to scheme/host/auth/insecure, and POSTed as JSON-RPC 2.0 to
+ * <scheme>://<host>/jsonrpc.
  */
 
 #ifndef MK_KODI_H

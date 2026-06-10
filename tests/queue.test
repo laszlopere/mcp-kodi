@@ -1,21 +1,21 @@
 #!/bin/sh
-# Functional test for the `queue` tool — TODO.md §11.6.7.
+# Functional test for the `queue` tool.
 #
 # Drives the real mcp-kodi binary over its MCP stdio transport against a live
 # Kodi. `queue` appends an item behind the already-playing one (Playlist.Add,
 # or Playlist.Insert at position+1 for next:true) so playback continues into
 # it; it never builds or starts a playlist itself. This test discovers two
 # playable leaves from the target library (via `search`), starts the first as a
-# single play (which auto-creates the one-item playlist, §13.2.2), queues the
+# single play (Player.Open auto-creates the one-item playlist), queues the
 # second behind it — by library id, then by file with next:true — and asserts
 # against Kodi's own Playlist.GetItems that the queue grew as requested while
 # the playing item never changed. Queueing onto a paused player works too,
 # and a pause -> play round-trip on the grown playlist must resume the same
-# item with every queued entry intact (play means "continue", §11.6.1.1 —
-# never a queue clear). The payoff is verified end-to-end: a seek to the
+# item with every queued entry intact (play means "continue" — never a
+# queue clear). The payoff is verified end-to-end: a seek to the
 # final seconds of the playing item must auto-advance playback into the
 # queued "play next" item with no further call. Cleanup then runs through
-# the `stop` tool, which per §11.6.1.3 must also clear the playlist it
+# the `stop` tool, which by contract must also clear the playlist it
 # stopped — asserted too — so no media keeps running and no queue lingers.
 #
 # Caller mistakes are exercised thoroughly: every malformed argument set, the
@@ -24,7 +24,7 @@
 # accepted usage. A library id whose media type does not match the playing
 # playlist is refused by the server before the add (Kodi 19.4 would accept the
 # foreign item silently); a foreign *file* still passes through, since a
-# file's media type is unknowable up front (§11.6.7).
+# file's media type is unknowable up front.
 #
 # Since real playback may be audible on a real device, the test reads the
 # volume at startup, lowers it to 2% for the run, and restores the original on
@@ -190,7 +190,7 @@ is_true "unknown instance -> carries a setup hint" \
 
 # ===========================================================================
 # 2. Nothing playing: stop any active player, then queueing must refuse with
-#    the "nothing queueable is playing" error (§11.6.7 step 2) and point the
+#    the "nothing queueable is playing" error and point the
 #    caller at starting playback first.
 # ===========================================================================
 active=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
@@ -312,8 +312,8 @@ eq "the appended item stays last" \
 # 6. Cross-type queueing: an item whose media type does NOT match the playing
 #    playlist (a movie onto the audio queue, or a song onto the video queue).
 #    Kodi 19.4 would accept the foreign item silently (confirmed live), so the
-#    server refuses a mismatched library id itself, before the add (§11.6.7
-#    step 3) — and the queue must not grow. A `file` is exempt: its media type
+#    server refuses a mismatched library id itself, before the add — and
+#    the queue must not grow. A `file` is exempt: its media type
 #    is unknowable up front, so a foreign file still passes through and lands
 #    in the queue — for files, matching stays the caller's job. Needs one leaf
 #    of the other type; a single-type library skips it.
@@ -358,7 +358,7 @@ fi
 # ===========================================================================
 # 7. Pause → play on the grown playlist: resume must be non-destructive. The
 #    play Button means "continue", never "start over" — unlike stop it must
-#    NOT touch the queue (§11.6.1.1 vs §11.6.1.3) — so after a pause/resume
+#    NOT touch the queue — so after a pause/resume
 #    round-trip the same item is playing and every queued entry survives.
 #    Guards against a playlist clear ever creeping into play/pause.
 # ===========================================================================
@@ -395,7 +395,7 @@ eq "every queued entry survived the pause/resume" "$((before + 1))" \
 # 8. Auto-advance — the payoff the queue tool exists for: when the playing
 #    item ends, Kodi continues into the queued one BY ITSELF. Seek to the
 #    final seconds of the current item, then poll until the player has rolled
-#    over the queue boundary. The next entry (position 1) is the §5 "play
+#    over the queue boundary. The next entry (position 1) is section 5's "play
 #    next" insert — the same file as the current one, deliberately, so the
 #    playlist *position* is the discriminator, not the file. The interactive
 #    raw-RPC baseline for this is functional/scenarios/queue-next-episode.txt.
@@ -434,7 +434,7 @@ eq "what plays now is the play-next insert" "$file1" \
        | jq -r '.result.item.file')"
 
 # ===========================================================================
-# 9. Cleanup via the `stop` tool — which also asserts its §11.6.1.3 contract:
+# 9. Cleanup via the `stop` tool — which also asserts its contract:
 #    stop ends playback AND clears the playlist it was consuming, so the
 #    queue this test grew must be gone afterwards with no explicit
 #    Playlist.Clear. The volume guard's EXIT trap then restores the volume.

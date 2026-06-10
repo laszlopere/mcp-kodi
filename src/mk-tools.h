@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
- * The MCP tool surface (§5): a static table of tools, each with a JSON Schema
- * `inputSchema` and a handler that drives the Kodi client (§4). `tools/list`
- * renders the table; `tools/call` dispatches by name and shapes the result —
- * tool-level failures become `isError` results, not protocol errors (§3.4).
- * Per-tool handlers land incrementally (see ../TODO.md §11.6.1+); until a
- * handler is wired, its tool returns a clean "not implemented" result.
+ * The MCP tool surface: a static table of tools, each with a JSON Schema
+ * `inputSchema` and a handler that drives the Kodi client (mk-kodi).
+ * `tools/list` renders the table; `tools/call` dispatches by name and shapes
+ * the result — tool-level failures become `isError` results, not protocol
+ * errors. Per-tool handlers land incrementally; until a handler is wired, its
+ * tool returns a clean "not implemented" result.
  */
 
 #ifndef MK_TOOLS_H
@@ -44,15 +44,15 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (MkTools, mk_tools_free)
 guint mk_tools_count (MkTools *self);
 
 /* Build the `tools/list` array: one `{ name, description, inputSchema }` object
- * per tool (§3.3.4, §5.2). Returns a newly allocated JSON array node (free with
+ * per tool. Returns a newly allocated JSON array node (free with
  * json_node_unref()); the caller wraps it as `{ "tools": <array> }`. */
 JsonNode *mk_tools_list (MkTools *self);
 
-/* Dispatch a `tools/call` (§3.3.5). @arguments is the call's "arguments" object
+/* Dispatch a `tools/call`. @arguments is the call's "arguments" object
  * (may be NULL). On a known tool — whether it succeeds or fails — returns the
  * result object `{ "content": [ { "type": "text", "text": "<json>" } ],
  * "isError": <bool> }`: a handler failure is shaped as an `isError` result with
- * the detail as JSON text (§3.4) — `{ "error": "<message>" }`, and for a
+ * the detail as JSON text — `{ "error": "<message>" }`, and for a
  * server↔player communication failure also `"category"` + a setup `"hint"` —
  * never a NULL/error return. Returns NULL with
  * @error set to MK_TOOLS_ERROR_UNKNOWN_TOOL only when @name is not in the table,

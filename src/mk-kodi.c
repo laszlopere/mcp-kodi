@@ -1,4 +1,4 @@
-/* mcp-kodi — Kodi JSON-RPC client over libsoup. See mk-kodi.h and ../TODO.md §4.
+/* mcp-kodi — Kodi JSON-RPC client over libsoup. See mk-kodi.h.
  *
  * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
@@ -19,7 +19,7 @@
 struct _MkKodi
 {
   MkConfig    *config;  /* borrowed; must outlive the client */
-  SoupSession *session; /* owned; reused across all instances (§4.3) */
+  SoupSession *session; /* owned; reused across all instances */
   gint64       next_id; /* JSON-RPC request id counter */
 };
 
@@ -29,7 +29,7 @@ G_DEFINE_QUARK (mk-kodi-error-quark, mk_kodi_error)
  * mk_kodi_new:
  * @config: the configuration to resolve instances against; borrowed, not owned.
  *
- * Creates a client with one SoupSession reused for every instance (§4.3).
+ * Creates a client with one SoupSession reused for every instance.
  *
  * @return a newly allocated MkKodi; free with mk_kodi_free().
  */
@@ -70,7 +70,7 @@ mk_kodi_free (MkKodi *self)
  * @user_data: unused.
  *
  * Accepts an otherwise-untrusted certificate. Connected only to messages bound
- * for an instance configured `insecure` (§4.3), so acceptance is scoped to that
+ * for an instance configured `insecure`, so acceptance is scoped to that
  * instance's host rather than applied session-wide.
  *
  * @return TRUE, always, to accept the certificate.
@@ -94,7 +94,7 @@ accept_certificate_cb (SoupMessage          *msg,
  * @method: the JSON-RPC method name.
  * @params: the params value, or NULL to omit the member; borrowed (copied in).
  *
- * Serialises a JSON-RPC 2.0 request object (§4.1).
+ * Serialises a JSON-RPC 2.0 request object.
  *
  * @return a newly allocated JSON string; free with g_free().
  */
@@ -131,7 +131,7 @@ build_request (gint64 id, const char *method, JsonNode *params)
  *
  * Parses a JSON-RPC reply: surfaces an "error" member as MK_KODI_ERROR_RPC
  * (with Kodi's code and message), and on success returns a copy of the "result"
- * member (§4.5). A reply with neither member is a protocol error.
+ * member. A reply with neither member is a protocol error.
  *
  * @return a newly allocated "result" JsonNode (free with json_node_unref()), or
  *         NULL with @error set.
@@ -196,9 +196,9 @@ parse_response (const char *data, gsize size, GError **error)
  *
  * Resolves @instance to its scheme/host/auth/insecure, POSTs a JSON-RPC 2.0
  * request to <scheme>://<host>/jsonrpc with `application/json` and (when
- * configured) preemptive HTTP Basic auth, then parses the reply (§4.2, §4.4,
- * §4.5). For an instance marked `insecure`, the message accepts the self-signed
- * certificate (§4.3). The send is synchronous.
+ * configured) preemptive HTTP Basic auth, then parses the reply. For an
+ * instance marked `insecure`, the message accepts the self-signed
+ * certificate. The send is synchronous.
  *
  * @return the "result" as a newly allocated JsonNode (free with
  *         json_node_unref()), or NULL with @error set.

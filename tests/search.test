@@ -1,5 +1,5 @@
 #!/bin/sh
-# Functional test for the `search` tool — TODO.md §11.6.4.1 / §5.10.
+# Functional test for the `search` tool.
 #
 # Drives the real mcp-kodi binary over its MCP stdio transport against a live
 # Kodi, exercising `search` across all three media types (music / tv-show /
@@ -98,7 +98,7 @@ is_true () { # desc jq-bool-string
   if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi
 }
 
-# Invariants every successful search result must hold (§5.10 response shape).
+# Invariants every successful search result must hold (the response shape).
 check_invariants () { # body type expected-offset label
   b=$1; t=$2; off=$3; p=$4
   eq   "$p — type is \"$t\""        "$t"  "$(g "$b" '.type')"

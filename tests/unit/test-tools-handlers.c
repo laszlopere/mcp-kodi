@@ -886,7 +886,7 @@ case_button_play (void)
 
 /* Stop on an active player resolves the consumed playlist BEFORE the keypress
  * and clears exactly that one after it, so no queued items linger (Kodi's own
- * stop leaves the queue intact, §11.6.1.3). */
+ * stop leaves the queue intact). */
 static void
 case_stop_clears_playlist (void)
 {
@@ -1154,7 +1154,7 @@ case_handler_failure_shaped (void)
   free_tools (tools, cfg, kodi);
 }
 
-/* ---- volume (relative Knob, §11.6.2.1) ------------------------------------ */
+/* ---- volume (relative Knob) ------------------------------------------------ */
 
 /* Number of recorded Kodi calls this case. */
 static guint

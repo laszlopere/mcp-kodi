@@ -1,5 +1,6 @@
 # transport: start a video, then pause / play / stop it.
-# Pause/play/stop use Input.ExecuteAction — the current §11.6.1 button behaviour.
+# Pause/play/stop use Input.ExecuteAction — the current button behaviour
+# (argument-free remote keypresses, no playerid).
 # Format: '# title', then a raw JSON-RPC request line, then '[state] observation'.
 
 # start a video

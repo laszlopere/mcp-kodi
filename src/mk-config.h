@@ -6,7 +6,7 @@
  * Loads the server's multi-instance config from
  * ${XDG_CONFIG_HOME:-~/.config}/mcp-kodi/config.json, applies environment
  * overrides to the default instance, and writes the effective config back
- * atomically. See ../TODO.md §7.
+ * atomically.
  */
 
 #ifndef MK_CONFIG_H
@@ -21,8 +21,8 @@ G_BEGIN_DECLS
  * reference; NULL when unset. host is "host[:port]"; auth is "user:pass" for
  * HTTP Basic (or NULL); scheme is "http"/"https"; insecure accepts a
  * self-signed cert (curl -k). allow_rpc opts this box into the generic `rpc`
- * escape hatch (§7.7, §11.6.6): off by default, set only by hand-editing the
- * config file — never written by the `instances` tool. */
+ * escape hatch: off by default, set only by hand-editing the config file —
+ * never written by the `instances` tool. */
 typedef struct _MkInstance MkInstance;
 struct _MkInstance
 {

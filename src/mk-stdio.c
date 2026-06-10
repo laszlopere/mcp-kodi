@@ -1,5 +1,4 @@
-/* mcp-kodi — newline-delimited JSON-RPC transport. See mk-stdio.h and
- * ../TODO.md §3.
+/* mcp-kodi — newline-delimited JSON-RPC transport. See mk-stdio.h.
  *
  * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
@@ -48,7 +47,7 @@ add_id_member (JsonBuilder *b, JsonNode *id)
  * @id: the request id to echo; borrowed, or NULL for a null id.
  * @result: the result payload; ownership transferred.
  *
- * Builds a JSON-RPC 2.0 success response (§3.3.5).
+ * Builds a JSON-RPC 2.0 success response.
  *
  * @return a newly allocated response node; free with json_node_unref().
  */
@@ -69,10 +68,10 @@ mk_jsonrpc_result (JsonNode *id, JsonNode *result)
 /**
  * mk_jsonrpc_error:
  * @id: the request id to echo; borrowed, or NULL for a null id.
- * @code: the JSON-RPC error code (§3.4).
+ * @code: the JSON-RPC error code.
  * @message: the error message; copied.
  *
- * Builds a JSON-RPC 2.0 error response (§3.4).
+ * Builds a JSON-RPC 2.0 error response.
  *
  * @return a newly allocated response node; free with json_node_unref().
  */
@@ -103,7 +102,7 @@ mk_jsonrpc_error (JsonNode *id, int code, const char *message)
  * @message: the response node to send; borrowed.
  *
  * Serialises @message compactly and writes it as one newline-terminated line on
- * stdout (§3.1). A write failure is logged to stderr; the protocol stream stays
+ * stdout. A write failure is logged to stderr; the protocol stream stays
  * line-framed.
  */
 static void
@@ -142,7 +141,7 @@ mk_stdio_write_message (MkStdio *self, JsonNode *message)
  * @line: one input line (without its terminating newline); borrowed.
  *
  * Parses @line as a JSON-RPC message and routes it: a JSON syntax error becomes
- * a `-32700` response (id null, §3.4); a parsed message goes to the dispatch
+ * a `-32700` response (id null); a parsed message goes to the dispatch
  * callback, whose non-NULL response is written back. Blank lines are ignored.
  */
 static void
@@ -181,7 +180,7 @@ mk_stdio_process_line (MkStdio *self, const char *line)
  * @user_data: the MkStdio transport.
  *
  * Completes one async line read, processes the line, and queues the next read.
- * NULL line with no error is EOF → quit the loop cleanly (§3.2); a read error
+ * NULL line with no error is EOF → quit the loop cleanly; a read error
  * is logged and also ends the loop.
  */
 static void
@@ -264,8 +263,8 @@ mk_stdio_free (MkStdio *self)
  * mk_stdio_run:
  * @self: the transport.
  *
- * Queues the first async read and runs the main loop until stdin reaches EOF
- * (§3.2), then returns.
+ * Queues the first async read and runs the main loop until stdin reaches EOF,
+ * then returns.
  */
 void
 mk_stdio_run (MkStdio *self)

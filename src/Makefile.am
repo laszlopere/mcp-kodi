@@ -9,7 +9,7 @@ mcp_kodi_SOURCES = \
 	mk-stdio.c   mk-stdio.h \
 	mk-mcp.c     mk-mcp.h
 
-# Module sources are added here as they land (see ../TODO.md §6):
+# Module sources are added here as they land:
 #	mk-state.c  mk-state.h
 
 mcp_kodi_CFLAGS = $(MCP_KODI_CFLAGS) -Wall -Wextra

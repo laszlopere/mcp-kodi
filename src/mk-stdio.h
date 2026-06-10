@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
  *
- * The MCP stdio transport (§3.1, §3.2): a GMainLoop with an async read on
+ * The MCP stdio transport: a GMainLoop with an async read on
  * stdin, framing one JSON-RPC 2.0 message per line. Each parsed message is
  * handed to a dispatch callback whose returned response (if any) is serialised
  * back as a single line on stdout. Logging goes to stderr only; stdout stays
- * pure protocol. EOF on stdin quits the loop. See ../TODO.md §3.
+ * pure protocol. EOF on stdin quits the loop.
  */
 
 #ifndef MK_STDIO_H
@@ -18,7 +18,7 @@
 
 G_BEGIN_DECLS
 
-/* JSON-RPC 2.0 error codes (§3.4). */
+/* JSON-RPC 2.0 error codes. */
 #define MK_JSONRPC_PARSE_ERROR      (-32700)
 #define MK_JSONRPC_INVALID_REQUEST  (-32600)
 #define MK_JSONRPC_METHOD_NOT_FOUND (-32601)
@@ -41,8 +41,8 @@ typedef struct _MkStdio MkStdio;
 /* Handle one successfully parsed incoming JSON-RPC message. @message is borrowed
  * (valid only for the duration of the call). Return a response node to write
  * (ownership transferred to the transport, which serialises and frames it), or
- * NULL to write nothing — used for notifications, which never get a reply
- * (§3.5). */
+ * NULL to write nothing — used for notifications, which never get a
+ * reply. */
 typedef JsonNode *(*MkStdioDispatch) (JsonNode *message, gpointer user_data);
 
 /* Create the transport bound to stdin/stdout. @dispatch is invoked for each

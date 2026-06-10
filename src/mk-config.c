@@ -1,4 +1,4 @@
-/* mcp-kodi — configuration loader/saver. See mk-config.h and ../TODO.md §7.
+/* mcp-kodi — configuration loader/saver. See mk-config.h.
  *
  * SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Laszlo Pere <laszlopere@gmail.com>
@@ -39,7 +39,7 @@ G_DEFINE_QUARK (mk-config-error-quark, mk_config_error)
  * @auth: HTTP Basic credentials as "user:pass", or NULL for none.
  * @scheme: URL scheme ("http"/"https"); NULL defaults to "https".
  * @insecure: TRUE to accept a self-signed TLS certificate (curl -k).
- * @allow_rpc: TRUE to opt this instance into the `rpc` escape hatch (§7.7).
+ * @allow_rpc: TRUE to opt this instance into the `rpc` escape hatch.
  *
  * Allocates a new instance, duplicating all string arguments.
  *
@@ -234,7 +234,7 @@ mk_config_set_instance (MkConfig *self, const char *name, MkInstance *inst)
  * @self: the config.
  * @name: instance name to remove.
  *
- * Removes the instance stored under @name, freeing it. The default name (§7) is
+ * Removes the instance stored under @name, freeing it. The default name is
  * left untouched; the caller is responsible for not leaving @self->default_name
  * pointing at a removed instance.
  *
@@ -311,7 +311,7 @@ instance_from_object (JsonObject *o)
  * Parses a config file into @self. A file with an "instances" member is read as
  * the version-2 shape (named instances + optional "default"); any other object
  * is read as a version-1 flat file and stored as a single instance named
- * "default" (§7.6).
+ * "default" (the pre-instances back-compat shape).
  *
  * @return TRUE on success; FALSE with @error set on parse or structural error.
  */
@@ -372,7 +372,8 @@ load_file (MkConfig *self, const char *path, GError **error)
     }
   else
     {
-      /* version 1 (§7.6): a flat host/auth/… file → one instance "default". */
+      /* version-1 back-compat: a flat host/auth/… file → one instance
+       * "default". */
       mk_config_set_instance (self, "default", instance_from_object (obj));
       mk_config_set_default (self, "default");
     }
@@ -407,7 +408,7 @@ curl_opts_insecure (const char *opts)
  * @self: the config to modify.
  *
  * Applies KODI_HOST/KODI_AUTH/KODI_SCHEME and the -k flag in KODI_CURL_OPTS to
- * the default instance only (§7.3). If no relevant variable is set this is a
+ * the default instance only. If no relevant variable is set this is a
  * no-op. With no config file loaded, this creates one implicit instance named
  * "default" and makes it the default.
  */
@@ -460,7 +461,7 @@ apply_env_overrides (MkConfig *self)
  * @error: return location for a GError, or NULL.
  *
  * Loads configuration: reads @path if it exists, then applies environment
- * overrides to the default instance (§7.3). Resolves the default instance name,
+ * overrides to the default instance. Resolves the default instance name,
  * choosing the sole instance when exactly one is configured and none was named.
  * Fails with MK_CONFIG_ERROR_NOT_CONFIGURED when neither a file nor environment
  * provides any instance.
@@ -524,7 +525,7 @@ mk_config_load (const char *path, GError **error)
  * Renders the config as pretty-printed JSON in the version-2 shape, with
  * instances emitted in sorted key order, the "name" (display label) and "auth"
  * members each omitted when the instance has none. "allow_rpc" is emitted only
- * when set, so a hand-enabled escape hatch (§7.7) survives a save while a box
+ * when set, so a hand-enabled escape hatch survives a save while a box
  * that never opted in stays clean.
  *
  * @return a newly allocated JSON string; free with g_free().
@@ -636,7 +637,7 @@ write_all (int fd, const char *data, gsize len, GError **error)
  * @path: destination path, or NULL to use mk_config_default_path().
  * @error: return location for a GError, or NULL.
  *
- * Writes @self to @path atomically (§7.4): creates the parent directory 0700,
+ * Writes @self to @path atomically: creates the parent directory 0700,
  * writes a 0600 temp file in the same directory, fsync()s it, then rename()s it
  * over the target. Always written in the version-2 shape. The temp file is
  * removed if any step fails.

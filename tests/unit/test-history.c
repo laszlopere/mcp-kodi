@@ -122,7 +122,7 @@ case_record_then_read (void)
   MK_CHECK (e != NULL);
   if (e != NULL)
     {
-      /* the snapshot's `type` is recorded under `kind` (§13.4.1) */
+      /* the snapshot's `type` is recorded under `kind` */
       MK_CHECK_STR_EQ (json_object_get_string_member (e, "kind"), "audio");
       MK_CHECK_STR_EQ (json_object_get_string_member (e, "media"), "song");
       MK_CHECK_INT_EQ (json_object_get_int_member (e, "id"), 42);
@@ -136,7 +136,7 @@ case_record_then_read (void)
       MK_CHECK_INT_EQ (json_object_get_int_member (e, "track"), 3);
       /* an `at` stamp is always written */
       MK_CHECK (json_object_has_member (e, "at"));
-      /* state/time/totaltime are deliberately NOT stored (§13.4) */
+      /* state/time/totaltime are deliberately NOT stored */
       MK_CHECK (!json_object_has_member (e, "state"));
     }
 
@@ -158,7 +158,7 @@ case_dedup_same_item (void)
     " \"file\": \"/music/x.mp3\", \"title\": \"X\" }");
 
   MK_CHECK (mk_history_record (h, "box", "Box", s1));
-  /* the same item, same instance, re-observed → skipped (§13.5.2) */
+  /* the same item, same instance, re-observed → skipped */
   MK_CHECK (!mk_history_record (h, "box", "Box", s2));
 
   gint64 total = -1;
@@ -176,7 +176,7 @@ case_nothing_loaded_skips (void)
   char *dir, *path = make_history_path (&dir);
   g_autoptr (MkHistory) h = mk_history_new (path);
 
-  /* stopped → nothing playing (§13.5.1) */
+  /* stopped → nothing playing, nothing to record */
   g_autoptr (JsonNode) stopped = snap (
     "{ \"state\": \"stopped\", \"type\": \"audio\","
     " \"file\": \"/music/y.mp3\", \"id\": 5 }");
@@ -222,7 +222,7 @@ case_newest_first (void)
     mk_history_read (h, NULL, NULL, NULL, 0, &total, NULL);
   MK_CHECK_INT_EQ (arr_len (out), 2);
   MK_CHECK_INT_EQ (total, 2);
-  /* most recently recorded item comes first (§13.6) */
+  /* most recently recorded item comes first */
   MK_CHECK_STR_EQ (json_object_get_string_member (arr_obj (out, 0), "title"),
                    "B");
   MK_CHECK_STR_EQ (json_object_get_string_member (arr_obj (out, 1), "title"),
@@ -247,7 +247,7 @@ case_cross_instance (void)
   MK_CHECK (mk_history_record (h, "box1", "Box One", s1));
   MK_CHECK (mk_history_record (h, "box2", "Box Two", s2));
 
-  /* NULL → the whole cross-instance log (§13.1) */
+  /* NULL → the whole cross-instance log */
   gint64 total = -1;
   g_autoptr (JsonNode) all =
     mk_history_read (h, NULL, NULL, NULL, 0, &total, NULL);
@@ -354,7 +354,7 @@ case_window_filtering (void)
   MK_CHECK_INT_EQ (arr_len (in), 1);
   MK_CHECK_INT_EQ (t_in, 1);
 
-  /* a malformed bound is a hard error (§13.10), unlike the missing-file case */
+  /* a malformed bound is a hard error, unlike missing-file */
   GError *err = NULL;
   g_autoptr (JsonNode) bad =
     mk_history_read (h, NULL, "not-a-timestamp", NULL, 0, NULL, &err);

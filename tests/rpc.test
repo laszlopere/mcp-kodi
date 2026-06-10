@@ -1,10 +1,10 @@
 #!/bin/sh
-# Functional test for the `rpc` escape hatch — TODO.md §11.6.6 / §7.7.
+# Functional test for the `rpc` escape hatch.
 #
 # Drives the real mcp-kodi binary over its MCP stdio transport against a live
 # Kodi. `rpc` is the passthrough: it sends any JSON-RPC method and returns
 # Kodi's raw `result` unshaped — but only for an instance that has opted in via
-# the hand-edit-only `allow_rpc` config flag (§7.7). This test exercises both
+# the hand-edit-only `allow_rpc` config flag. This test exercises both
 # sides of that gate:
 #   - an opted-in instance: ping/echo come back verbatim, a Kodi error becomes a
 #     tool error, and bad arguments are clean tool errors;
@@ -17,7 +17,7 @@
 # the whole point of the hand-edit-only design.
 #
 # Because `allow_rpc` is deliberately not settable via environment overrides
-# (§7.3) — the only way to grant it is by editing the config file — the test
+# — the only way to grant it is by editing the config file — the test
 # writes its own temp config.json files (opted-in and not) under a private
 # XDG_CONFIG_HOME and points the server at them, rather than driving the server
 # from KODI_* env like the other tests do.
@@ -104,7 +104,7 @@ OFF="$WORK/off"; write_config "$OFF" false
 
 # A single config holding BOTH boxes as the deployment really runs them: the
 # local test Kodi opted into rpc (and default), the remote remote not. remote
-# carries NO allow_rpc key at all — absent means disabled (§7.7), the real
+# carries NO allow_rpc key at all — absent means disabled, the real
 # production posture — and a dummy auth, since the gate refuses it pre-network.
 BOTH="$WORK/both"
 mkdir -p "$BOTH/mcp-kodi"
@@ -172,7 +172,7 @@ contains () { # desc haystack needle
 echo "rpc functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
 
 # ===========================================================================
-# 1. The gate (§7.7): an instance that has NOT opted in refuses rpc, before any
+# 1. The gate: an instance that has NOT opted in refuses rpc, before any
 #    Kodi call, with an error that points the user at allow_rpc.
 # ===========================================================================
 echo "-- gate: disabled instance"
@@ -191,7 +191,7 @@ b=$(rpc_off '{"method":"JSONRPC.Ping"}')
 eq "rpc still disabled after a set attempt" true "$(res_err "$b")"
 
 # ===========================================================================
-# 2. The hatch itself (§11.6.6), on an opted-in instance.
+# 2. The hatch itself, on an opted-in instance.
 # ===========================================================================
 echo "-- opted-in instance"
 
@@ -209,7 +209,7 @@ pb=$(res_body "$b")
 is_true "raw result carries version.major"     "$(j "$pb" '(.version.major // 0) > 0')"
 is_true "raw result carries a muted boolean"   "$(j "$pb" '(.muted | type) == "boolean"')"
 
-# 2c. A Kodi-side error surfaces as a tool error (§3.4/§4.5), not a crash.
+# 2c. A Kodi-side error surfaces as a tool error (isError:true), not a crash.
 b=$(rpc_on '{"method":"NoSuch.Method"}')
 eq       "unknown method -> tool error"  true "$(res_err "$b")"
 contains "error mentions Kodi"           "$(g "$(res_body "$b")" '.error')" "Kodi error"

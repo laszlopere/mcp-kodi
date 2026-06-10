@@ -1,5 +1,5 @@
 #!/bin/sh
-# Functional test for the `playfile` tool — TODO.md §11.6.5 / §5.10.
+# Functional test for the `playfile` tool.
 #
 # Drives the real mcp-kodi binary over its MCP stdio transport against a live
 # Kodi. `playfile` opens one file by path with Player.Open and returns the
@@ -120,7 +120,7 @@ eq "empty file -> tool error" true "$(res_err "$b")"
 
 # ===========================================================================
 # 2. Discover a real playable file via `search` — the tool whose result row's
-#    `file` is exactly the playfile input (§5.10). Prefer a movie; fall back to
+#    `file` is exactly the playfile input. Prefer a movie; fall back to
 #    a song so the test runs against an audio-only library too.
 # ===========================================================================
 file=""
@@ -170,7 +170,7 @@ is_true "snapshot carries a non-empty totaltime" \
 if [ "$kind" = movie ]; then
   eq    "video file selects the video player"  video "$(g "$pb" '.type')"
 fi
-# Library enrichment: a scanned file gets a human label/title back (§5.10).
+# Library enrichment: a scanned file gets a human label/title back.
 is_true "snapshot carries a label"            "$(j "$pb" 'has("label") and (.label|length>0)')"
 
 # Kodi independently agrees a player is now active.

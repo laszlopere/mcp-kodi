@@ -1,0 +1,124 @@
+mcp-kodi — TODO
+
+Tasks only: [x] done, [ ] pending or on hold. Numbering is carried over from
+the original TODO.md spec (see git history) so existing references stay
+valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
+12.x.y" points there.
+
+[ ] 4.6 Document the server-side setup for end users — enabling Kodi's
+    JSON-RPC web server and fronting it with the Caddy HTTPS reverse proxy
+    (tls internal, self-signed) — in docs/kodi-server-setup.md.
+
+[x] 11.1 Spec — the original TODO.md design document (now in git history).
+
+[x] 11.2 Autotools scaffold (configure.ac, Makefile.am, autogen.sh, src
+    skeleton). Deps: glib-2.0 >= 2.80, gobject, gio, json-glib-1.0 >= 1.8,
+    libsoup-3.0 >= 3.4; -Wall -Wextra during dev.
+
+[x] 11.3 Config load + save, multi-instance (mk-config).
+    ~/.config/mcp-kodi/config.json: named instances map + one default;
+    KODI_HOST/KODI_AUTH/KODI_SCHEME env overrides for the default instance;
+    atomic save (temp + fsync + rename), dir 0700 / file 0600; version-1
+    flat-file back-compat.
+
+[x] 11.4 Kodi JSON-RPC client, per-instance (mk-kodi). POST to
+    <scheme>://<host>/jsonrpc with HTTP Basic auth; one shared SoupSession;
+    per-instance self-signed-cert acceptance (insecure flag, per host, not
+    blanket); Kodi's error member surfaces as a tool error.
+
+[x] 11.5 MCP stdio transport + dispatch (mk-stdio, mk-mcp).
+    Newline-delimited JSON-RPC 2.0 on stdin/stdout, logging to stderr only;
+    GMainLoop + async line reads, EOF quits; initialize / initialized / ping
+    / tools/list / tools/call; tool failures return isError results, never
+    protocol errors; no response to notifications.
+
+[ ] 11.6 Design tool tables
+    [ ] 11.6.1 Buttons — argument-free actions, modeled as remote keypresses
+        via Input.ExecuteAction (no playerid, no active-player resolution)
+        [x] 11.6.1.1 play
+        [x] 11.6.1.2 pause
+        [x] 11.6.1.3 stop — Kodi's stop leaves the queue intact, so the
+            handler also clears the stopped playlist (resolve playlistid
+            before the keypress, Playlist.Clear after); the one Button that
+            resolves the active player
+        [x] 11.6.1.4 mute — Application.SetMute {mute:true}
+        [x] 11.6.1.5 unmute — Application.SetMute {mute:false}
+        [x] 11.6.1.6 noop — fires no action, returns the player_state()
+            snapshot only; a reachability + state probe
+    [x] 11.6.2 Knobs — adjust a scalar
+        [x] 11.6.2.1 volume — relative only, signed step; 0 = read-only
+            probe; resolves the step against the live level, writes a
+            clamped absolute SetVolume; returns {volume, muted, min:0,
+            max:100}
+    [x] 11.6.3 instances — manage the server's own config (no Kodi call);
+        every action returns the instance list, credentials never leave the
+        server (auth reported as has_auth)
+        [x] 11.6.3.1 get — list instances + which is default; allow_rpc
+            read-only
+        [x] 11.6.3.2 set — upsert by key, omitted fields keep their value,
+            persists atomically; cannot write allow_rpc (hand-edit only)
+        [x] 11.6.3.3 remove — refuses to delete the current default
+    [ ] 11.6.4 Search tools — resolve the library by name down to playable
+        leaf files; no Kodi state change (more to come)
+        [x] 11.6.4.1 search — {type: music|tv-show|movie, artist?, title?,
+            season?, number?, limit?, offset?, count?} down to leaf-file
+            rows {file, <id>, label}; descends to album/season only when
+            named, so wide queries are one Kodi call; always reports total;
+            substring title hitting several containers makes total a sum
+            and offset best-effort
+    [x] 11.6.5 playfile — play one file via Player.Open {item:{file}}
+        (KODI-API 12.10.9); any path, in-library or not; auto-selects the
+        audio/video player; Kodi enriches a scanned file back to its
+        library item; returns the player_state() snapshot
+    [x] 11.6.6 rpc — generic escape hatch: any method, returns Kodi's raw
+        result verbatim (unshaped); gated per instance by allow_rpc in the
+        config, granted only by hand-editing config.json — the model can
+        never enable it itself
+    [x] 11.6.7 queue — append (or insert-next at current+1) into the
+        already-playing queue; caller starts playback first; playlistid < 0
+        means nothing queueable (tool error); refuses a library id whose
+        kind mismatches the active player (Kodi accepts it silently);
+        remove action deferred; clear → dropplaylists, list → getplaylist
+    [x] 11.6.8 getplaylist — read the current queue via Playlist.GetItems:
+        rows {<type>id|file, label, type} + position of the now-playing
+        item; explicit type arg reads an inactive playlist too; empty/none
+        is an empty list, not an error (tests/getplaylist.test)
+    [x] 11.6.9 dropplaylists — Playlist.Clear on all three playlists
+        (audio 0 / video 1 / picture 2); clearing the active one leaves the
+        current item playing, so it never interrupts playback
+        (tests/dropplaylists.test)
+
+[ ] 11.7 Prompts / resources — on hold, not shipping now; tools are the
+    whole server surface, initialize advertises only {tools:{}}. Revisit
+    once more of the tool surface lands.
+
+[ ] 11.8 Playback state file, per-instance (mk-state). One file per
+    instance under ~/.local/state/mcp-kodi/instances/<name>.json:
+    last_played + last episode per show, written on play/random/handoff,
+    atomic; seeds resume / next-episode / handoff; missing file = empty
+    state.
+
+[ ] 11.9 Playback history, global append-only log (mk-history) — see
+    13.9 / 13.10. One cross-instance log at
+    ~/.local/state/mcp-kodi/history.json; capture is call-driven only (no
+    polling, no monitoring loop), so it records what the assistant caused
+    or observed, not a complete audit.
+
+[ ] 11.10 Build clean, test against live Kodi, write README
+
+[ ] 13.9 mk-history module
+    [x] 13.9.1 mk_history_record — write path: flock-serialized
+        read-modify-write (never bare last-write-wins), dedup (append only
+        a newly observed item, so pause/volume churn is ignored), trim by
+        count and age, atomic write; wired from player_state() so every
+        playback-affecting tool feeds it; best-effort — a history failure
+        never fails the tool call
+
+[x] 13.10 History read path + tool (tests/history.test)
+    [x] 13.10.1 mk_history_read — read primitive: shared lock, walks
+        newest-first, instance/since/until window + limit, reports the
+        total before the limit; missing file = zero entries, not an error
+    [x] 13.10.2 history tool — ISO-8601 since/until window over the log,
+        newest-first; instance omitted means all boxes (inverts the
+        default-instance convention — the log is cross-instance by
+        nature); limit defaults to 50 with a truncated flag
