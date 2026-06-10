@@ -5,7 +5,7 @@ the original TODO.md spec (see git history) so existing references stay
 valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
 12.x.y" points there.
 
-[ ] 4.6 Document the server-side setup for end users — enabling Kodi's
+[x] 4.6 Document the server-side setup for end users — enabling Kodi's
     JSON-RPC web server and fronting it with the Caddy HTTPS reverse proxy
     (tls internal, self-signed) — in docs/kodi-server-setup.md.
 
