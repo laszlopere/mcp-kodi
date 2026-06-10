@@ -1,0 +1,296 @@
+#!/bin/sh
+# Functional test for the `queue` tool — TODO.md §11.6.7.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi. `queue` appends an item behind the already-playing one (Playlist.Add,
+# or Playlist.Insert at position+1 for next:true) so playback continues into
+# it; it never builds or starts a playlist itself. This test discovers two
+# playable leaves from the target library (via `search`), starts the first as a
+# single play (which auto-creates the one-item playlist, §13.2.2), queues the
+# second behind it — by library id, then by file with next:true — and asserts
+# against Kodi's own Playlist.GetItems that the queue grew as requested while
+# the playing item never changed. It then stops and clears, leaving no media
+# running.
+#
+# Caller mistakes are exercised thoroughly: every malformed argument set, the
+# nothing-playing refusal, an unconfigured instance, and a nonexistent library
+# id must each return a tool error whose message names the mistake and the
+# accepted usage.
+#
+# Since real playback may be audible on a real device, the test reads the
+# volume at startup, lowers it to 2% for the run, and restores the original on
+# every exit (EXIT trap).
+#
+# Library-agnostic: it picks whatever movies or songs the library actually
+# holds, so it passes against any *populated* library rather than assuming
+# titles. The raw-RPC baseline for the auto-advance behaviour itself lives in
+# functional/scenarios/queue-next-episode.txt.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#   - at least two playable movies or songs in the library (else playback SKIPs)
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+KODI_HOST=${KODI_HOST:-127.0.0.1:8080}
+KODI_AUTH=${KODI_AUTH:-kodi:kodi}
+KODI_SCHEME=${KODI_SCHEME:-http}
+export KODI_HOST KODI_AUTH KODI_SCHEME
+
+SKIP=77
+
+skip () { echo "SKIP: $*"; exit $SKIP; }
+
+# ---- dependencies ---------------------------------------------------------
+
+command -v jq   >/dev/null 2>&1 || skip "jq not found"
+command -v curl >/dev/null 2>&1 || skip "curl not found"
+
+# Locate the mcp-kodi binary: the automake build tree first ($top_builddir is
+# exported by `make check`), then fallbacks for running the script by hand.
+find_binary () {
+  for c in \
+    "${top_builddir:-}/src/mcp-kodi" \
+    "$(dirname "$0")/../src/mcp-kodi" \
+    "./src/mcp-kodi" \
+    "src/mcp-kodi"
+  do
+    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# ---- talking to Kodi directly (for verification + the liveness gate) ------
+
+kodi_rpc () { # method params-json  ->  raw JSON-RPC response
+  curl -s -m 20 -u "$KODI_AUTH" -H 'Content-Type: application/json' \
+    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" \
+    "$KODI_SCHEME://$KODI_HOST/jsonrpc"
+}
+
+pong=$(kodi_rpc JSONRPC.Ping '{}' | jq -r '.result // empty' 2>/dev/null)
+[ "$pong" = "pong" ] || skip "Kodi not reachable at $KODI_SCHEME://$KODI_HOST"
+
+# ---- volume guard ----------------------------------------------------------
+# The test starts real playback on a possibly real device, so remember the
+# current volume, run quietly at 2%, and restore the original on every exit.
+vol0=$(kodi_rpc Application.GetProperties '{"properties":["volume"]}' \
+        | jq -r '.result.volume // empty')
+restore_volume () {
+  [ -n "$vol0" ] && kodi_rpc Application.SetVolume "{\"volume\":$vol0}" >/dev/null 2>&1
+}
+trap restore_volume EXIT
+[ -n "$vol0" ] && kodi_rpc Application.SetVolume '{"volume":2}' >/dev/null 2>&1
+
+# ---- talking to the server under test (MCP over stdio) --------------------
+
+# Feed `initialize` + one `tools/call`, echo back the tool result object for
+# request id 2 (`{ content:[{type,text}], isError }`). The server reads
+# newline-delimited JSON and exits on EOF, so one invocation per call keeps
+# every assertion isolated.
+mcp_tool () { # name arguments-json  ->  tool result object
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
+    | "$MCP" 2>/dev/null \
+    | jq -c 'select(.id==2) | .result'
+}
+
+queue    () { mcp_tool queue    "$1"; }        # arguments-json -> result object
+playfile () { mcp_tool playfile "$1"; }
+search   () { mcp_tool search   "$1"; }
+res_err  () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
+res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
+jargs    () { jq -cn "$@"; }                   # build an arguments object safely
+g        () { printf '%s' "$1" | jq -r "$2"; } # body, filter -> scalar
+j        () { printf '%s' "$1" | jq    "$2"; } # body, filter -> json/bool
+
+# ---- assertions -----------------------------------------------------------
+
+PASS=0
+FAIL=0
+ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
+
+eq () { # desc expected actual
+  if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi
+}
+is_true () { # desc jq-bool-string
+  if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi
+}
+contains () { # desc needle haystack
+  case "$3" in
+    *"$2"*) ok "$1";;
+    *)      no "$1" "wanted [$2] in [$3]";;
+  esac
+}
+
+# A queue call that must fail: assert isError:true and that the error message
+# guides the caller — it names what was wrong and what to do instead.
+queue_err () { # desc arguments-json expected-message-fragment
+  b=$(queue "$2")
+  eq "$1 -> tool error" true "$(res_err "$b")"
+  contains "$1 -> message guides the caller" "$3" "$(g "$(res_body "$b")" '.error')"
+}
+
+echo "queue functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ---- the volume guard took hold: Kodi reports the quiet test level ---------
+echo "-- volume guard (was: ${vol0:-unknown}%)"
+eq "volume lowered to 2% for the test run" 2 \
+   "$(kodi_rpc Application.GetProperties '{"properties":["volume"]}' \
+       | jq -r '.result.volume')"
+
+# ===========================================================================
+# 1. Argument errors first (no playback needed): each mistake a caller can
+#    make is a clean tool error (isError:true) whose message names the
+#    offending argument and the accepted usage — and none reaches Kodi.
+# ===========================================================================
+echo "-- errors / edges"
+
+queue_err "neither id nor file"   '{}' \
+          'exactly one of "id" (with "type") or "file"'
+queue_err "empty file"            '{"file":""}' \
+          'exactly one of "id" (with "type") or "file"'
+queue_err "both id and file"      '{"id":5,"file":"/v/a.mkv"}' \
+          'exactly one of "id" (with "type") or "file"'
+queue_err "id without type"       '{"id":5}' \
+          'needs "type" naming its kind (song/episode/movie)'
+queue_err "id with unknown type"  '{"id":5,"type":"album"}' \
+          'needs "type" naming its kind (song/episode/movie)'
+
+# An unconfigured instance is a communication failure: the error carries the
+# no_instance category and a setup hint, so the AI can help fix the config.
+b=$(queue '{"instance":"no-such-box","file":"/v/a.mkv"}')
+eq "unknown instance -> tool error" true "$(res_err "$b")"
+eq "unknown instance -> category no_instance" no_instance \
+   "$(g "$(res_body "$b")" '.category')"
+is_true "unknown instance -> carries a setup hint" \
+        "$(j "$(res_body "$b")" 'has("hint") and (.hint|length>0)')"
+
+# ===========================================================================
+# 2. Nothing playing: stop any active player, then queueing must refuse with
+#    the "nothing queueable is playing" error (§11.6.7 step 2) and point the
+#    caller at starting playback first.
+# ===========================================================================
+active=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+[ -n "$active" ] && kodi_rpc Player.Stop "{\"playerid\":$active}" >/dev/null 2>&1
+sleep 1
+
+queue_err "queue with nothing playing" '{"file":"/no/such/file.mkv"}' \
+          'nothing queueable is playing'
+b=$(queue '{"file":"/no/such/file.mkv"}')
+contains "nothing-playing error suggests play/playfile" "play" \
+         "$(g "$(res_body "$b")" '.error')"
+
+# ===========================================================================
+# 3. Discover TWO playable leaves of the same type via `search`. Prefer
+#    movies; fall back to songs so the test runs against an audio-only
+#    library too.
+# ===========================================================================
+kind=""
+b=$(res_body "$(search '{"type":"movie","limit":2}')")
+if [ "$(j "$b" '.returned >= 2')" = true ]; then
+  kind=movie idkey=movieid
+else
+  # Need an artist to drill music to song leaves; pick the first one Kodi lists.
+  artist=$(kodi_rpc AudioLibrary.GetArtists '{"limits":{"start":0,"end":1}}' \
+            | jq -r '.result.artists[0].artist // empty')
+  if [ -n "$artist" ]; then
+    b=$(res_body "$(search "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:2}')")")
+    if [ "$(j "$b" '.returned >= 2')" = true ]; then
+      kind=song idkey=songid
+    fi
+  fi
+fi
+
+if [ -z "$kind" ]; then
+  echo "   (library holds fewer than two movies or songs — queueing assertions skipped)"
+  echo "------------------------------------------------------------"
+  printf 'queue functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+  [ "$FAIL" -eq 0 ] || exit 1
+  exit 0
+fi
+
+file1=$(g "$b" '.rows[0].file')
+file2=$(g "$b" '.rows[1].file')
+id2=$(g "$b" ".rows[1].$idkey")
+
+# ===========================================================================
+# 4. Start the first leaf as a single play, queue the second behind it by
+#    library id, and verify against Kodi's own playlist.
+# ===========================================================================
+echo "-- queueing ($kind)"
+echo "   (playing: $file1)"
+echo "   (queueing: $file2)"
+
+b=$(playfile "$(jargs --arg f "$file1" '{file:$f}')")
+eq "playfile starts the first leaf" false "$(res_err "$b")"
+
+b=$(queue "$(jargs --arg t "$kind" --argjson i "$id2" '{type:$t,id:$i}')")
+eq "queue by library id is not an error" false "$(res_err "$b")"
+qb=$(res_body "$b")
+eq "snapshot still plays the FIRST leaf (playback unchanged)" \
+   "$file1" "$(g "$qb" '.file')"
+eq "snapshot state is playing" playing "$(g "$qb" '.state')"
+
+# Kodi independently agrees: the active player's playlist now holds both, the
+# queued file last.
+playerid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+plid=$(kodi_rpc Player.GetProperties \
+        "{\"playerid\":$playerid,\"properties\":[\"playlistid\"]}" \
+        | jq -r '.result.playlistid')
+items=$(kodi_rpc Playlist.GetItems \
+        "{\"playlistid\":$plid,\"properties\":[\"file\"]}")
+eq "playlist holds two items"  2       "$(printf '%s' "$items" | jq -r '.result.items | length')"
+eq "queued file sits last"     "$file2" "$(printf '%s' "$items" | jq -r '.result.items[-1].file')"
+
+# A library id that does not exist: Kodi itself refuses the well-formed add,
+# which must surface as a tool error — and the playlist must not grow.
+b=$(queue "$(jargs --arg t "$kind" '{type:$t,id:999999999}')")
+eq "nonexistent library id -> tool error" true "$(res_err "$b")"
+eq "playlist unchanged after the refused add" 2 \
+   "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
+       | jq -r '.result.items | length')"
+
+# ===========================================================================
+# 5. next:true inserts right after the now-playing item, not at the end:
+#    re-queue the first leaf's file as "play next" and check it lands at
+#    position+1 while the tail keeps the previously queued file.
+# ===========================================================================
+b=$(queue "$(jargs --arg f "$file1" '{file:$f,next:true}')")
+eq "queue next:true is not an error" false "$(res_err "$b")"
+
+pos=$(kodi_rpc Player.GetProperties \
+       "{\"playerid\":$playerid,\"properties\":[\"position\"]}" \
+       | jq -r '.result.position')
+items=$(kodi_rpc Playlist.GetItems \
+        "{\"playlistid\":$plid,\"properties\":[\"file\"]}")
+eq "playlist holds three items" 3 "$(printf '%s' "$items" | jq -r '.result.items | length')"
+eq "next:true lands right after the playing item" \
+   "$file1" "$(printf '%s' "$items" | jq -r ".result.items[$((pos + 1))].file")"
+eq "the appended item stays last" \
+   "$file2" "$(printf '%s' "$items" | jq -r '.result.items[-1].file')"
+
+# ===========================================================================
+# 6. Cleanup — stop playback and clear the playlist the test grew, leaving
+#    the player in the safe neutral state. The volume guard's EXIT trap then
+#    restores the original volume.
+# ===========================================================================
+now=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+[ -n "$now" ] && kodi_rpc Player.Stop "{\"playerid\":$now}" >/dev/null 2>&1
+kodi_rpc Playlist.Clear "{\"playlistid\":$plid}" >/dev/null 2>&1
+
+# ---- tally ----------------------------------------------------------------
+echo "------------------------------------------------------------"
+printf 'queue functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+exit 0

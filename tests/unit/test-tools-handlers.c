@@ -267,6 +267,187 @@ case_playfile (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* ---- queue ----------------------------------------------------------------- */
+
+/* The happy path: an episode is playing off video playlist 1, and queueing the
+ * next one by library id appends it there — Playlist.Add, never Insert — then
+ * returns the (unchanged) player-state snapshot. One Player.GetProperties
+ * response serves both the handler's playlistid/position read and the
+ * snapshot's speed/time read; each ignores the other's fields. */
+static void
+case_queue_append (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 1, \"type\": \"video\" } ]");
+  stub_kodi_set_response (
+    "Player.GetProperties",
+    "{ \"playlistid\": 1, \"position\": 0, \"speed\": 1,"
+    "  \"time\": { \"hours\": 0, \"minutes\": 1, \"seconds\": 0,"
+    "              \"milliseconds\": 0 },"
+    "  \"totaltime\": { \"hours\": 0, \"minutes\": 30, \"seconds\": 2,"
+    "                   \"milliseconds\": 0 } }");
+  stub_kodi_set_response ("Playlist.Add", "\"OK\"");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"The End\", \"file\": \"/v/rd-1x01.avi\","
+    "  \"label\": \"The End\", \"type\": \"episode\", \"id\": 30584 } }");
+
+  g_autoptr (JsonNode) an =
+    args_node ("{ \"type\": \"episode\", \"id\": 30585 }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "queue", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      /* playback unchanged: the snapshot still shows the current episode. */
+      MK_CHECK_STR_EQ (json_object_get_string_member (p, "state"), "playing");
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "id"), 30584);
+    }
+
+  /* resolve the player, read its playlist, append — no Insert. */
+  MK_CHECK (called ("Player.GetActivePlayers"));
+  MK_CHECK (called ("Player.GetProperties"));
+  MK_CHECK (called ("Playlist.Add"));
+  MK_CHECK (!called ("Playlist.Insert"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* next:true inserts at position+1 (Playlist.Insert, never Add), so the item
+ * plays right after the current one; a `file` item works in place of an id. */
+static void
+case_queue_next_inserts (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 1, \"type\": \"video\" } ]");
+  stub_kodi_set_response ("Player.GetProperties",
+                          "{ \"playlistid\": 1, \"position\": 3, \"speed\": 1 }");
+  stub_kodi_set_response ("Playlist.Insert", "\"OK\"");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"Now\", \"file\": \"/v/now.mkv\","
+    "  \"type\": \"episode\", \"id\": 7 } }");
+
+  g_autoptr (JsonNode) an =
+    args_node ("{ \"file\": \"/v/next.mkv\", \"next\": true }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "queue", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+
+  MK_CHECK (called ("Playlist.Insert"));
+  MK_CHECK (!called ("Playlist.Add"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* The one "nothing queueable is playing" error covers both no active player
+ * (empty GetActivePlayers) and non-playlist playback (playlistid -1, live
+ * TV/streams); neither path may reach Playlist.Add. */
+static void
+case_queue_nothing_playing (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  /* No active player at all. */
+  stub_kodi_set_response ("Player.GetActivePlayers", "[]");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"file\": \"/v/next.mkv\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "queue", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL); /* tool error, not a protocol error */
+
+  gboolean is_error = FALSE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      const char *msg = json_object_get_string_member (
+        json_node_get_object (payload), "error");
+      MK_CHECK (msg != NULL && strstr (msg, "nothing queueable") != NULL);
+    }
+  MK_CHECK (!called ("Playlist.Add"));
+
+  /* Non-playlist playback: a player is active but reports playlistid -1. */
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 1, \"type\": \"video\" } ]");
+  stub_kodi_set_response ("Player.GetProperties", "{ \"playlistid\": -1 }");
+
+  g_autoptr (JsonNode) res2 =
+    mk_tools_call (tools, "queue", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+  is_error = FALSE;
+  g_autoptr (JsonNode) payload2 = envelope_payload (res2, &is_error);
+  MK_CHECK (is_error);
+  MK_CHECK (!called ("Playlist.Add"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* Argument validation: exactly one of id/file, and id needs a known type —
+ * each rejected before any Kodi call. */
+static void
+case_queue_bad_args (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  static const char *const bad[] = {
+    "{}",                                          /* neither id nor file */
+    "{ \"id\": 5, \"file\": \"/v/a.mkv\" }",       /* both */
+    "{ \"id\": 5 }",                               /* id without type */
+    "{ \"id\": 5, \"type\": \"album\" }",          /* unknown type */
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad); i++)
+    {
+      g_autoptr (JsonNode) an = args_node (bad[i]);
+      GError *error = NULL;
+      g_autoptr (JsonNode) res =
+        mk_tools_call (tools, "queue", json_node_get_object (an), &error);
+
+      MK_CHECK (error == NULL);
+      gboolean is_error = FALSE;
+      g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+      (void) payload;
+      MK_CHECK (is_error);
+      g_clear_error (&error);
+    }
+
+  /* none of them reached Kodi. */
+  MK_CHECK (!called ("Player.GetActivePlayers"));
+
+  free_tools (tools, cfg, kodi);
+}
+
 /* ---- transport button (play) ---------------------------------------------- */
 
 static void
@@ -637,6 +818,10 @@ main (int argc, char **argv)
     { "search-movie",            case_search_movie },
     { "search-music",            case_search_music },
     { "playfile",                case_playfile },
+    { "queue-append",            case_queue_append },
+    { "queue-next-inserts",      case_queue_next_inserts },
+    { "queue-nothing-playing",   case_queue_nothing_playing },
+    { "queue-bad-args",          case_queue_bad_args },
     { "button-play",             case_button_play },
     { "mute",                    case_mute },
     { "unmute",                  case_unmute },

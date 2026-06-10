@@ -2105,6 +2105,195 @@ handler_playfile (MkTools *self, const MkToolDef *def, JsonObject *args,
   return player_state (self, instance, error);
 }
 
+/* ---- queue (§11.6.7) -------------------------------------------------------
+ *
+ * Continuous playback: append to the **already-playing** queue. The caller must
+ * start playback first — a single `play`/`playfile` auto-creates the one-item
+ * playlist (§13.2.2) — so this tool never builds or starts a playlist itself; it
+ * only adds behind (or right after) whatever is playing now.
+ */
+
+/* The library id kinds `queue` accepts for its `type`/`id` pair — one per
+ * `search` media type (§11.6.4.1), each mapping to Kodi's `<type>id` item key. */
+static const char *const mk_queue_types[] = { "song", "episode", "movie", NULL };
+
+/**
+ * schema_queue:
+ * @self: the table (used to name the configured instances).
+ *
+ * Schema for the `queue` tool (§11.6.7): the optional `instance`, the item to
+ * queue as either a `type` + `id` pair (a library item from a `search` row) or
+ * a `file` path, and the optional `next` flag (insert right after the current
+ * item instead of appending). The one-of-`id`/`file` rule is enforced in the
+ * handler so the schema stays a flat property list.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_queue (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_instance (b, self, FALSE);
+  prop_enum (b, "type", mk_queue_types,
+             "Kind of library id passed in `id` — picks the item key "
+             "(songid/episodeid/movieid). Required with `id`; not used with "
+             "`file`.");
+  prop_typed (b, "id", "integer",
+              "Library id of the item to queue — the `songid`/`episodeid`/"
+              "`movieid` of a `search` result row, matching `type`. Give "
+              "exactly one of `id` or `file`.");
+  prop_typed (b, "file", "string",
+              "Path of the file to queue — the `file` field of a `search` "
+              "result row; any path Kodi can reach works. Give exactly one of "
+              "`id` or `file`.");
+  prop_typed (b, "next", "boolean",
+              "When true, insert the item right after the one now playing "
+              "(\"play next\") instead of appending to the end of the queue.");
+
+  schema_end (b, NULL);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_queue:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments; `type`+`id` or `file` name the item, optional
+ *        `next`/`instance`.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `queue` tool (§11.6.7): appends an item to the playlist behind
+ * the **already-playing** item, so playback continues into it. Never builds or
+ * starts a playlist — the caller starts playback first (`play`/`playfile`,
+ * which auto-creates the one-item playlist, §13.2.2). Three steps:
+ *
+ *   1. `Player.GetActivePlayers` → the active playerid.
+ *   2. `Player.GetProperties { playerid, ["playlistid","position"] }`. No
+ *      active player, or `playlistid < 0` (live TV / streams play outside any
+ *      playlist) → the one "nothing queueable is playing" tool error.
+ *   3. `Playlist.Add { playlistid, item }` to append — or `Playlist.Insert`
+ *      at `position + 1` when `next` is true, so the item plays right after
+ *      the current one.
+ *
+ * The item is `{ "<type>id": id }` for a library item or `{ "file": path }`
+ * for a path; matching the playlist's media type (audio vs video) is the
+ * caller's job. Playback itself is untouched, so the returned player_state()
+ * snapshot shows the still-playing current item — a same-item duplicate the
+ * history dedup drops (§13.5) — and no settle delay is needed.
+ *
+ * @return the player-state snapshot (playback unchanged), or NULL with @error
+ *         set (bad arguments, nothing queueable playing, or a call failure).
+ */
+static JsonNode *
+handler_queue (MkTools *self, const MkToolDef *def, JsonObject *args,
+               GError **error)
+{
+  (void) def;
+  const char *instance = arg_instance (args);
+  const char *type = arg_str (args, "type", NULL);
+  const char *file = arg_str (args, "file", NULL);
+  gint64 id = 0;
+  gboolean have_id = arg_int (args, "id", &id);
+  gboolean have_file = file != NULL && file[0] != '\0';
+
+  if (have_id == have_file)
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "queue: give exactly one of \"id\" (with \"type\") or "
+                   "\"file\"");
+      return NULL;
+    }
+  if (have_id)
+    {
+      gboolean known = FALSE;
+      for (gsize i = 0; mk_queue_types[i] != NULL; i++)
+        known = known || g_strcmp0 (type, mk_queue_types[i]) == 0;
+      if (!known)
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "queue: \"id\" needs \"type\" naming its kind "
+                       "(song/episode/movie)");
+          return NULL;
+        }
+    }
+
+  /* Step 1: the active player. An empty list means nothing is playing — the
+   * same "nothing queueable" condition as a negative playlistid below. */
+  g_autoptr (JsonNode) active =
+    mk_kodi_call (self->kodi, instance, "Player.GetActivePlayers", NULL, error);
+  if (active == NULL)
+    return NULL;
+  JsonArray *players =
+    JSON_NODE_HOLDS_ARRAY (active) ? json_node_get_array (active) : NULL;
+  gint64 playlistid = -1, position = -1;
+  if (players != NULL && json_array_get_length (players) > 0)
+    {
+      JsonObject *p0 = json_array_get_object_element (players, 0);
+      gint64 playerid =
+        json_object_get_int_member_with_default (p0, "playerid", 0);
+
+      /* Step 2: the playlist the player is consuming, and where it sits in it
+       * (the insert point for `next`). */
+      static const char *const fields[] = { "playlistid", "position", NULL };
+      g_autoptr (JsonNode) pparams = player_props (playerid, fields);
+      g_autoptr (JsonNode) pres = mk_kodi_call (self->kodi, instance,
+                                                "Player.GetProperties", pparams,
+                                                error);
+      if (pres == NULL)
+        return NULL;
+      JsonObject *props = json_node_get_object (pres);
+      playlistid =
+        json_object_get_int_member_with_default (props, "playlistid", -1);
+      position =
+        json_object_get_int_member_with_default (props, "position", -1);
+    }
+  if (playlistid < 0)
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "queue: nothing queueable is playing — start playback "
+                   "first (play/playfile), then queue behind it");
+      return NULL;
+    }
+
+  /* Step 3: append, or insert right after the current item. */
+  gboolean next = arg_bool (args, "next");
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "playlistid");
+  json_builder_add_int_value (b, playlistid);
+  if (next)
+    {
+      json_builder_set_member_name (b, "position");
+      json_builder_add_int_value (b, position + 1);
+    }
+  json_builder_set_member_name (b, "item");
+  json_builder_begin_object (b);
+  if (have_file)
+    {
+      json_builder_set_member_name (b, "file");
+      json_builder_add_string_value (b, file);
+    }
+  else
+    {
+      g_autofree char *idkey = g_strdup_printf ("%sid", type);
+      json_builder_set_member_name (b, idkey);
+      json_builder_add_int_value (b, id);
+    }
+  json_builder_end_object (b);
+  json_builder_end_object (b);
+  g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+  g_autoptr (JsonNode) added =
+    mk_kodi_call (self->kodi, instance, next ? "Playlist.Insert" : "Playlist.Add",
+                  params, error);
+  if (added == NULL)
+    return NULL;
+
+  return player_state (self, instance, error);
+}
+
 /* ---- rpc (§11.6.6) --------------------------------------------------------
  *
  * The escape hatch: send any JSON-RPC method to a box and return Kodi's raw
@@ -2637,6 +2826,36 @@ static const MkToolDef mk_tool_defs[] = {
                 "Player.Open auto-selects the audio/video player. Works for any "
                 "reachable path, in-library or not.",
     schema_playfile, handler_playfile, NULL },
+
+  /**
+   * queue (Playback tool):
+   *
+   * Append an item behind the already-playing one, so playback continues into
+   * it (§11.6.7). Requires something to be playing: a single `play`/`playfile`
+   * auto-creates the one-item playlist (§13.2.2), so this tool never builds or
+   * starts a playlist itself — no active player, or non-playlist playback
+   * (live TV / streams), is the one "nothing queueable is playing" error. The
+   * item is a `search` row's library id (`type` + `id`) or `file` path;
+   * `next: true` inserts it right after the current item instead of appending.
+   * Matching the playlist's media type (audio vs video) is the caller's job.
+   *
+   * Call:  Player.GetActivePlayers → Player.GetProperties (playlistid,
+   *        position) → Playlist.Add, or Playlist.Insert at position+1 for
+   *        `next` — then player_state() (playback unchanged).
+   * @param type: "song" | "episode" | "movie"; required with `id`.
+   * @param id: library id of the item to queue (give `id` or `file`).
+   * @param file: path of the file to queue (give `id` or `file`).
+   * @param next (optional): insert right after the current item.
+   * @param instance (optional): name of the Kodi instance to target; omitted
+   *        uses the configured default (§5.1).
+   * @return the player-state snapshot (player_state()), unchanged by the add —
+   *         the current item keeps playing with the new one queued behind it.
+   */
+  { "queue", "Queue an item behind the one now playing, for continuous "
+             "playback: a `search` row's library id (type+id) or a file path; "
+             "next:true plays it right after the current item. Something must "
+             "already be playing (start with play/playfile).",
+    schema_queue, handler_queue, NULL },
 
   /* ---- History tool — read back the local playback log; no Kodi call
    *      (§13.10). ---- */

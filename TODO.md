@@ -551,12 +551,13 @@ Everything below this section is original design for *this* project.
     the model cannot grant itself the hatch. An instance without the flag returns
     a clean tool error naming the instance and the flag; the schema lists which
     configured instances currently permit `rpc`.
-    [ ] 11.6.7 queue — continuous playback. Appends to the **already-playing**
+    [x] 11.6.7 queue — continuous playback. Appends to the **already-playing**
     queue; the caller must start playback first (a single `play`/`playfile` auto-
     creates the one-item playlist, §13.2.2), so the tool never builds or starts a
     playlist itself. `{instance?, type?, id?|file?, next?}`.
       1. `Player.GetActivePlayers` → the active `playerid`.
-      2. `Player.GetProperties {playerid,["playlistid"]}`. **`playlistid < 0` →
+      2. `Player.GetProperties {playerid,["playlistid","position"]}`.
+         **`playlistid < 0` →
          tool error** "nothing queueable is playing" — one check covering both no
          active player and non-playlist playback (live TV / streams). The live
          playback names its own playlist (audio 0 / video 1); nothing to guess.
@@ -862,12 +863,12 @@ Everything below this section is original design for *this* project.
     [ ] 12.10.22 zoom — Zoom current picture (`Player.Zoom`)
 
   [ ] 12.11 Playlist
-    [ ] 12.11.1 add — Add item(s) to playlist (`Playlist.Add`)
+    [x] 12.11.1 add — Add item(s) to playlist (`Playlist.Add`) — the `queue` tool's append (§11.6.7)
     [ ] 12.11.2 clear — Clear playlist (`Playlist.Clear`)
     [ ] 12.11.3 items — Get all items from playlist (`Playlist.GetItems`)
     [ ] 12.11.4 playlists — Returns all existing playlists (`Playlist.GetPlaylists`)
     [ ] 12.11.5 properties — Retrieves the values of the given properties (`Playlist.GetProperties`)
-    [ ] 12.11.6 insert — Insert item(s) into playlist. Does not work for picture playlists (aka slideshows). (`Playlist.Insert`)
+    [x] 12.11.6 insert — Insert item(s) into playlist. Does not work for picture playlists (aka slideshows). (`Playlist.Insert`) — the `queue` tool's `next: true` (§11.6.7)
     [ ] 12.11.7 remove — Remove item from playlist. Does not work for picture playlists (aka slideshows). (`Playlist.Remove`)
     [ ] 12.11.8 swap — Swap items in the playlist. Does not work for picture playlists (aka slideshows). (`Playlist.Swap`)
 
