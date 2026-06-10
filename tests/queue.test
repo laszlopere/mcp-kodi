@@ -9,11 +9,14 @@
 # single play (which auto-creates the one-item playlist, §13.2.2), queues the
 # second behind it — by library id, then by file with next:true — and asserts
 # against Kodi's own Playlist.GetItems that the queue grew as requested while
-# the playing item never changed. A pause -> play round-trip on the grown
-# playlist must resume the same item with every queued entry intact (play
-# means "continue", §11.6.1.1 — never a queue clear). Cleanup then runs
-# through the `stop` tool, which per §11.6.1.3 must also clear the playlist
-# it stopped — asserted too — so no media keeps running and no queue lingers.
+# the playing item never changed. Queueing onto a paused player works too,
+# and a pause -> play round-trip on the grown playlist must resume the same
+# item with every queued entry intact (play means "continue", §11.6.1.1 —
+# never a queue clear). The payoff is verified end-to-end: a seek to the
+# final seconds of the playing item must auto-advance playback into the
+# queued "play next" item with no further call. Cleanup then runs through
+# the `stop` tool, which per §11.6.1.3 must also clear the playlist it
+# stopped — asserted too — so no media keeps running and no queue lingers.
 #
 # Caller mistakes are exercised thoroughly: every malformed argument set, the
 # nothing-playing refusal, an unconfigured instance, and a nonexistent library
@@ -244,6 +247,26 @@ echo "   (queueing: $file2)"
 b=$(playfile "$(jargs --arg f "$file1" '{file:$f}')")
 eq "playfile starts the first leaf" false "$(res_err "$b")"
 
+# Resolve the player and the playlist Kodi says it is consuming — the queue
+# every following section verifies against.
+playerid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+plid=$(kodi_rpc Player.GetProperties \
+        "{\"playerid\":$playerid,\"properties\":[\"playlistid\"]}" \
+        | jq -r '.result.playlistid')
+
+# next:true while the playing item is the LAST entry (here: the only one, the
+# auto-created single-play playlist): position+1 points past the end, which
+# Kodi must take as an append, not an error — the item lands at the end,
+# ready to play next.
+b=$(queue "$(jargs --arg t "$kind" --argjson i "$id2" '{type:$t,id:$i,next:true}')")
+eq "next:true on a last-item playlist is not an error" false "$(res_err "$b")"
+items=$(kodi_rpc Playlist.GetItems \
+        "{\"playlistid\":$plid,\"properties\":[\"file\"]}")
+eq "the insert past the end landed as an append" 2 \
+   "$(printf '%s' "$items" | jq -r '.result.items | length')"
+eq "the play-next item sits at the end" "$file2" \
+   "$(printf '%s' "$items" | jq -r '.result.items[-1].file')"
+
 b=$(queue "$(jargs --arg t "$kind" --argjson i "$id2" '{type:$t,id:$i}')")
 eq "queue by library id is not an error" false "$(res_err "$b")"
 qb=$(res_body "$b")
@@ -251,22 +274,18 @@ eq "snapshot still plays the FIRST leaf (playback unchanged)" \
    "$file1" "$(g "$qb" '.file')"
 eq "snapshot state is playing" playing "$(g "$qb" '.state')"
 
-# Kodi independently agrees: the active player's playlist now holds both, the
-# queued file last.
-playerid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
-plid=$(kodi_rpc Player.GetProperties \
-        "{\"playerid\":$playerid,\"properties\":[\"playlistid\"]}" \
-        | jq -r '.result.playlistid')
+# Kodi independently agrees: the appended item joined behind, the queued
+# file last.
 items=$(kodi_rpc Playlist.GetItems \
         "{\"playlistid\":$plid,\"properties\":[\"file\"]}")
-eq "playlist holds two items"  2       "$(printf '%s' "$items" | jq -r '.result.items | length')"
+eq "playlist holds three items" 3       "$(printf '%s' "$items" | jq -r '.result.items | length')"
 eq "queued file sits last"     "$file2" "$(printf '%s' "$items" | jq -r '.result.items[-1].file')"
 
 # A library id that does not exist: Kodi itself refuses the well-formed add,
 # which must surface as a tool error — and the playlist must not grow.
 b=$(queue "$(jargs --arg t "$kind" '{type:$t,id:999999999}')")
 eq "nonexistent library id -> tool error" true "$(res_err "$b")"
-eq "playlist unchanged after the refused add" 2 \
+eq "playlist unchanged after the refused add" 3 \
    "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
        | jq -r '.result.items | length')"
 
@@ -283,7 +302,7 @@ pos=$(kodi_rpc Player.GetProperties \
        | jq -r '.result.position')
 items=$(kodi_rpc Playlist.GetItems \
         "{\"playlistid\":$plid,\"properties\":[\"file\"]}")
-eq "playlist holds three items" 3 "$(printf '%s' "$items" | jq -r '.result.items | length')"
+eq "playlist holds four items" 4 "$(printf '%s' "$items" | jq -r '.result.items | length')"
 eq "next:true lands right after the playing item" \
    "$file1" "$(printf '%s' "$items" | jq -r ".result.items[$((pos + 1))].file")"
 eq "the appended item stays last" \
@@ -319,7 +338,7 @@ if [ -n "$otherid" ]; then
   queue_err "mismatched library id" \
             "$(jargs --arg t "$othertype" --argjson i "$otherid" '{type:$t,id:$i}')" \
             'does not match the playing'
-  eq "queue unchanged after the refused mismatch" 3 \
+  eq "queue unchanged after the refused mismatch" 4 \
      "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
          | jq -r '.result.items | length')"
 
@@ -328,7 +347,7 @@ if [ -n "$otherid" ]; then
     b=$(queue "$(jargs --arg f "$otherfile" '{file:$f}')")
     eq "a foreign file is NOT refused (type unknowable; caller's job)" \
        false "$(res_err "$b")"
-    eq "the foreign file joined the queue" 4 \
+    eq "the foreign file joined the queue" 5 \
        "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
            | jq -r '.result.items | length')"
   fi
@@ -352,17 +371,70 @@ eq "pause is not an error" false "$(res_err "$b")"
 eq "pause reports the paused state" paused "$(g "$(res_body "$b")" '.state')"
 eq "pause keeps the current item loaded" "$file1" "$(g "$(res_body "$b")" '.file')"
 
+# Queueing onto a PAUSED player must work like onto a playing one: the player
+# is still active, so its playlist resolves — pausing to decide what comes
+# next is the natural moment to queue. The snapshot honestly reports paused.
+b=$(queue "$(jargs --arg t "$kind" --argjson i "$id2" '{type:$t,id:$i}')")
+eq "queue onto a paused player is not an error" false "$(res_err "$b")"
+eq "queue-while-paused snapshot reports paused" paused \
+   "$(g "$(res_body "$b")" '.state')"
+eq "the item queued while paused joined the queue" "$((before + 1))" \
+   "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
+       | jq -r '.result.items | length')"
+
 b=$(play_t '{}')
 eq "play (resume) is not an error" false "$(res_err "$b")"
 eq "play resumes the playing state" playing "$(g "$(res_body "$b")" '.state')"
 eq "resume continues the SAME item" "$file1" "$(g "$(res_body "$b")" '.file')"
 
-eq "every queued entry survived the pause/resume" "$before" \
+eq "every queued entry survived the pause/resume" "$((before + 1))" \
    "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
        | jq -r '.result.items | length')"
 
 # ===========================================================================
-# 8. Cleanup via the `stop` tool — which also asserts its §11.6.1.3 contract:
+# 8. Auto-advance — the payoff the queue tool exists for: when the playing
+#    item ends, Kodi continues into the queued one BY ITSELF. Seek to the
+#    final seconds of the current item, then poll until the player has rolled
+#    over the queue boundary. The next entry (position 1) is the §5 "play
+#    next" insert — the same file as the current one, deliberately, so the
+#    playlist *position* is the discriminator, not the file. The interactive
+#    raw-RPC baseline for this is functional/scenarios/queue-next-episode.txt.
+# ===========================================================================
+echo "-- auto-advance into the queued item"
+
+total=$(kodi_rpc Player.GetProperties \
+         "{\"playerid\":$playerid,\"properties\":[\"totaltime\"]}" \
+         | jq -r '.result.totaltime | .hours*3600 + .minutes*60 + .seconds')
+target=$((total - 5))
+[ "$target" -lt 0 ] && target=0
+kodi_rpc Player.Seek \
+  "{\"playerid\":$playerid,\"value\":{\"time\":{\"hours\":$((target / 3600)),\"minutes\":$(((target % 3600) / 60)),\"seconds\":$((target % 60)),\"milliseconds\":0}}}" \
+  >/dev/null 2>&1
+
+# Up to ~20 s for the last seconds to play out and the next item to start.
+pos=""
+i=0
+while [ "$i" -lt 20 ]; do
+  pos=$(kodi_rpc Player.GetProperties \
+         "{\"playerid\":$playerid,\"properties\":[\"position\"]}" \
+         | jq -r '.result.position // empty')
+  [ "x$pos" = "x1" ] && break
+  sleep 1
+  i=$((i + 1))
+done
+
+eq "playback auto-advanced to the queued item (position 1)" 1 "$pos"
+is_true "the player is still actively playing" \
+        "$(kodi_rpc Player.GetProperties \
+            "{\"playerid\":$playerid,\"properties\":[\"speed\"]}" \
+            | jq -r '.result.speed != 0')"
+eq "what plays now is the play-next insert" "$file1" \
+   "$(kodi_rpc Player.GetItem \
+       "{\"playerid\":$playerid,\"properties\":[\"file\"]}" \
+       | jq -r '.result.item.file')"
+
+# ===========================================================================
+# 9. Cleanup via the `stop` tool — which also asserts its §11.6.1.3 contract:
 #    stop ends playback AND clears the playlist it was consuming, so the
 #    queue this test grew must be gone afterwards with no explicit
 #    Playlist.Clear. The volume guard's EXIT trap then restores the volume.
