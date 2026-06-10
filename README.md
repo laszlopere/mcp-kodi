@@ -16,38 +16,67 @@ evening's lineup, pick up where you left off last night, adapt on the fly, and
 surface things you'd never have found yourself. We're aiming for something
 genuinely new — a mind-blowingly different way to live with your media player.
 
-> **Status — early, but already remarkable (v0.2.0dev).** The set of dedicated,
-> purpose-built tools is deliberately small. What makes the current build
-> capable well beyond that list is the **`rpc` escape hatch** (see below): an
-> opt-in passthrough to *any* Kodi JSON-RPC method. Between the handful of
-> first-class tools and that escape hatch, an assistant can already drive nearly
-> everything Kodi exposes — remarkable enough that we decided to publish early
-> rather than wait for the full vision to land. Expect frequent releases.
+> **Status — early, but already remarkable (v0.2.0dev).** A growing set of
+> dedicated, purpose-built tools covers transport, volume, search, queue
+> management, and playback history. What makes the build capable *beyond* that
+> list is the **`rpc` escape hatch** (see below): an opt-in passthrough to *any*
+> Kodi JSON-RPC method. Between the first-class tools and that escape hatch, an
+> assistant can already drive nearly everything Kodi exposes — remarkable enough
+> that we decided to publish early rather than wait for the full vision to land.
+> Expect frequent releases.
 
 ---
 
 ## What it can do
 
 Each tool targets a configured Kodi box by key (`instance`); omit it and the
-configured `default` box is used.
+configured `default` box is used (with one exception: `history` spans **all**
+boxes when `instance` is omitted).
 
-| Tool          | What it does |
-|---------------|--------------|
-| `play`        | Press **Play** on the remote — resume or begin playback on the target box. |
-| `pause`       | Press **Pause** — pause the active player. |
-| `stop`        | Press **Stop** — stop the active player. |
-| `mute`        | Mute the box's audio output. |
-| `unmute`      | Unmute the box's audio output. |
-| `noop`        | Report the player state without changing anything — a reachability + state probe. |
-| `searchmedia` | Find playable **leaf files** by name across `music` / `tv-show` / `movie`, with paging (`limit`/`offset`) and a total count. Resolves the library by name, so the assistant acts by title, not numeric id. Media items only — people lookups live in `contributors`. |
-| `playfile`    | Play one file by path (typically a `searchmedia` result's `file`). Kodi auto-selects the audio/video player. Works for any reachable path, in-library or not. |
-| `instances`   | Read or modify the server's own instance config (`get`/`set`/`remove`). Makes no Kodi call; never returns stored passwords. |
-| `rpc`         | **Escape hatch** — send a raw JSON-RPC method to Kodi and return its reply unchanged. Off by default; opt-in per instance (see below). |
+**Transport & audio**
 
-Transport tools (`play`/`pause`/`stop`) and `noop` return a small player-state
-snapshot — `{ "state": "playing"|"paused"|"stopped", "file", "label", "title",
-"time", "totaltime" }` — so the assistant always sees the effect of its action.
-`mute`/`unmute` return `{ "muted", "volume" }`.
+| Tool       | What it does |
+|------------|--------------|
+| `play`     | Press **Play** on the remote — resume or begin playback on the target box. |
+| `pause`    | Press **Pause** — pause the active player. |
+| `stop`     | Press **Stop** — stop the active player **and clear the playlist it was consuming**, so no queued items linger. |
+| `volume`   | Adjust the volume by a **relative** signed step (percentage points); step `0`/omitted just reads. Never an absolute level, so the assistant can't blast or silence the box by guessing. Returns volume, mute state, and the `0`–`100` bounds. |
+| `mute`     | Mute the box's audio output. |
+| `unmute`   | Unmute the box's audio output. |
+| `noop`     | Report the player state without changing anything — a reachability + state probe. |
+
+**Search & discovery**
+
+| Tool           | What it does |
+|----------------|--------------|
+| `searchmedia`  | Find playable **leaf files** by name across `music` / `tv-show` / `movie`, with paging (`limit`/`offset`) and a total count. Movie/tv-show queries can also filter by `actor`/`director`. Resolves the library by name, so the assistant acts by title, not numeric id. Media items only — people lookups live in `contributors`. |
+| `contributors` | Find or list **people** — bands, solo artists, composers, actors, directors — by optional name substring and/or `type`. Each row says where the name yields hits (`albums`/`songs`/`movies`/`tvshows`); feed the exact name back into `searchmedia` to drill. |
+
+**Playback & queue**
+
+| Tool            | What it does |
+|-----------------|--------------|
+| `playfile`      | Play one file by path (typically a `searchmedia` result's `file`). Kodi auto-selects the audio/video player. Works for any reachable path, in-library or not. A file missing from disk (stale library entry) is reported as an error. |
+| `queue`         | Append an item behind the one now playing (a `searchmedia` library id `type`+`id`, or a `file` path); `next: true` inserts it right after the current item. Something must already be playing. A file missing from disk is refused. |
+| `getplaylist`   | Read a queue without changing it — the active player's playlist, or a named one (`audio`/`video`/`picture`), plus the now-playing position. Read-only; an empty queue is an empty list. |
+| `dropplaylists` | Empty **all** queues (audio, video, picture) in one call. The current item keeps playing — only the items queued behind it are removed. Not undoable; inspect with `getplaylist` first if the content matters. |
+
+**Bookkeeping & escape hatch**
+
+| Tool        | What it does |
+|-------------|--------------|
+| `history`   | List recently played items from the **local** playback log, written as a side effect of every playback-affecting call. Optional ISO-8601 `since`/`until` window and `limit`. Reads only the local log — no Kodi call, so it works even when no box is reachable. Omitted `instance` returns **all** boxes. |
+| `instances` | Read or modify the server's own instance config (`get`/`set`/`remove`). Makes no Kodi call; never returns stored passwords. |
+| `rpc`       | **Escape hatch** — send a raw JSON-RPC method to Kodi and return its reply unchanged. Off by default; opt-in per instance (see below). |
+
+Most action tools return a small player-state snapshot — `{ "state":
+"playing"|"paused"|"stopped", "file", "label", "title", "time", "totaltime" }` —
+so the assistant always sees the effect of its action: this covers
+`play`/`pause`/`stop`, `playfile`, `queue`, `dropplaylists`, and `noop`. The
+audio tools `volume`/`mute`/`unmute` return `{ "muted", "volume" }` (`volume`
+also adds the `min`/`max` bounds). The read tools (`searchmedia`,
+`contributors`, `getplaylist`, `history`) return their own paged result
+envelopes.
 
 ### The `rpc` escape hatch
 
