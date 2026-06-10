@@ -9,9 +9,11 @@
 # single play (which auto-creates the one-item playlist, §13.2.2), queues the
 # second behind it — by library id, then by file with next:true — and asserts
 # against Kodi's own Playlist.GetItems that the queue grew as requested while
-# the playing item never changed. Cleanup runs through the `stop` tool, which
-# per §11.6.1.3 must also clear the playlist it stopped — asserted too — so
-# no media keeps running and no queue lingers.
+# the playing item never changed. A pause -> play round-trip on the grown
+# playlist must resume the same item with every queued entry intact (play
+# means "continue", §11.6.1.1 — never a queue clear). Cleanup then runs
+# through the `stop` tool, which per §11.6.1.3 must also clear the playlist
+# it stopped — asserted too — so no media keeps running and no queue lingers.
 #
 # Caller mistakes are exercised thoroughly: every malformed argument set, the
 # nothing-playing refusal, an unconfigured instance, and a nonexistent library
@@ -112,6 +114,8 @@ queue    () { mcp_tool queue    "$1"; }        # arguments-json -> result object
 playfile () { mcp_tool playfile "$1"; }
 search   () { mcp_tool search   "$1"; }
 stop_t   () { mcp_tool stop     "$1"; }
+pause_t  () { mcp_tool pause    "$1"; }
+play_t   () { mcp_tool play     "$1"; }
 res_err  () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
 res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
 jargs    () { jq -cn "$@"; }                   # build an arguments object safely
@@ -333,7 +337,32 @@ else
 fi
 
 # ===========================================================================
-# 7. Cleanup via the `stop` tool — which also asserts its §11.6.1.3 contract:
+# 7. Pause → play on the grown playlist: resume must be non-destructive. The
+#    play Button means "continue", never "start over" — unlike stop it must
+#    NOT touch the queue (§11.6.1.1 vs §11.6.1.3) — so after a pause/resume
+#    round-trip the same item is playing and every queued entry survives.
+#    Guards against a playlist clear ever creeping into play/pause.
+# ===========================================================================
+echo "-- pause -> play keeps the queue"
+before=$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
+          | jq -r '.result.items | length')
+
+b=$(pause_t '{}')
+eq "pause is not an error" false "$(res_err "$b")"
+eq "pause reports the paused state" paused "$(g "$(res_body "$b")" '.state')"
+eq "pause keeps the current item loaded" "$file1" "$(g "$(res_body "$b")" '.file')"
+
+b=$(play_t '{}')
+eq "play (resume) is not an error" false "$(res_err "$b")"
+eq "play resumes the playing state" playing "$(g "$(res_body "$b")" '.state')"
+eq "resume continues the SAME item" "$file1" "$(g "$(res_body "$b")" '.file')"
+
+eq "every queued entry survived the pause/resume" "$before" \
+   "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
+       | jq -r '.result.items | length')"
+
+# ===========================================================================
+# 8. Cleanup via the `stop` tool — which also asserts its §11.6.1.3 contract:
 #    stop ends playback AND clears the playlist it was consuming, so the
 #    queue this test grew must be gone afterwards with no explicit
 #    Playlist.Clear. The volume guard's EXIT trap then restores the volume.
