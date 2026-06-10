@@ -2263,19 +2263,30 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
 
 /* ---- contributors ----------------------------------------------------------
  *
- * Find *people* by name — bands, solo artists, composers, actors, directors —
+ * Find or list *people* — bands, solo artists, composers, actors, directors —
  * instead of media. Each row is `{ name, in: [containers] }`: the exact name IS
  * the follow-up handle (`search` takes names, and Kodi's person filters are
  * name-only — no id-based filter exists), and `in` lists where feeding it back
  * will hit (albums/songs for music people, movies/tvshows for cast and crew),
  * so the caller knows where to drill next without Kodi-specific knowledge.
  *
+ * Both arguments are optional: `name` substring-matches, `type` narrows to one
+ * contributor kind, and omitting both enumerates the whole merged people set —
+ * the node matching is app-side anyway (see below), so an empty needle costs
+ * the same as a one-letter one. The `band` type is SYNTHESIZED: Kodi's native
+ * group/person notion (the MusicBrainz-fed `artisttype`/`gender` artist
+ * properties) is empty on real tag-scraped libraries (verified live), so
+ * "band" means album-level artist (`albumartistsonly: true`) — headline
+ * artists incl. solo ones, the set "list my bands" actually wants — TODO
+ * 11.6.4.4.
+ *
  * Music people come from one server-filtered `AudioLibrary.GetArtists` call
  * (KODI-API 12.3.6; `allroles` folds in composers, conductors, lyricists —
- * 12.3.15). Actors and directors have no Get* method at all, so they are
- * enumerated through the virtual `videodb://` nodes with `Files.GetDirectory`
- * (KODI-API 12.5.1) — those listings take sort and limits but NO filter, so
- * name matching is app-side over the paged labels. Hits from every source are
+ * 12.3.15; the `composer` type is a server-side `{role is "Composer"}` rule).
+ * Actors and directors have no Get* method at all, so they are enumerated
+ * through the virtual `videodb://` nodes with `Files.GetDirectory` (KODI-API
+ * 12.5.1) — those listings take sort and limits but NO filter, so name
+ * matching is app-side over the paged labels. Hits from every source are
  * merged case-insensitively into one row per person.
  */
 
@@ -2290,6 +2301,28 @@ enum
   MK_CONTRIB_SONGS   = 1 << 1,
   MK_CONTRIB_MOVIES  = 1 << 2,
   MK_CONTRIB_TVSHOWS = 1 << 3,
+};
+
+/* Contributor kinds the optional `type` argument can narrow to. ANY (no
+ * `type`) spans every source; the rest pick the matching subset. */
+enum
+{
+  MK_CONTRIB_TYPE_ANY = 0,
+  MK_CONTRIB_TYPE_BAND,     /* album-level music artists (synthesized) */
+  MK_CONTRIB_TYPE_COMPOSER, /* role "Composer" music contributors */
+  MK_CONTRIB_TYPE_ACTOR,    /* movie + tv-show cast nodes */
+  MK_CONTRIB_TYPE_DIRECTOR, /* movie directors node */
+};
+
+static const struct
+{
+  const char *name;
+  guint       type;
+} mk_contrib_types[] = {
+  { "band",     MK_CONTRIB_TYPE_BAND     },
+  { "composer", MK_CONTRIB_TYPE_COMPOSER },
+  { "actor",    MK_CONTRIB_TYPE_ACTOR    },
+  { "director", MK_CONTRIB_TYPE_DIRECTOR },
 };
 
 static const struct
@@ -2377,15 +2410,22 @@ contrib_row_cmp (gconstpointer a, gconstpointer b)
  * contrib_music:
  * @self: the tool table.
  * @instance: target instance, or NULL for the default.
- * @name: the person-name substring to match (case-insensitive).
+ * @type: MK_CONTRIB_TYPE_ANY, _BAND or _COMPOSER — which music people to ask
+ *        Kodi for.
+ * @name: the person-name substring to match (case-insensitive), or "" to
+ *        match everyone (no name rule is sent).
  * @index: casefolded name → row lookup, fed to contrib_add().
  * @rows: the row store, fed to contrib_add().
  * @error: return location for a GError, or NULL.
  *
  * Collects the matching music people in one server-filtered
- * `AudioLibrary.GetArtists` call: `allroles: true` folds in artists known only
- * as composers/conductors/lyricists (KODI-API 12.3.15) and `albumartistsonly:
- * false` keeps song-only artists regardless of the GUI setting. Every hit
+ * `AudioLibrary.GetArtists` call. ANY: `allroles: true` folds in artists known
+ * only as composers/conductors/lyricists (KODI-API 12.3.15) and
+ * `albumartistsonly: false` keeps song-only artists regardless of the GUI
+ * setting. BAND: `albumartistsonly: true` instead — the album-level artists,
+ * Kodi's closest notion of a band (TODO 11.6.4.4). COMPOSER: a server-side
+ * `{role is "Composer"}` rule (needs `allroles: true`), and-combined with the
+ * name rule when both apply (verified live, KODI-API 12.3.15). Every hit
  * drills to `songs`; only an `isalbumartist` also drills to `albums` (a
  * GetAlbums artist filter finds nothing for the rest).
  *
@@ -2393,18 +2433,25 @@ contrib_row_cmp (gconstpointer a, gconstpointer b)
  *         call failure.
  */
 static gboolean
-contrib_music (MkTools *self, const char *instance, const char *name,
-               GHashTable *index, GPtrArray *rows, GError **error)
+contrib_music (MkTools *self, const char *instance, guint type,
+               const char *name, GHashTable *index, GPtrArray *rows,
+               GError **error)
 {
   static const char *const props[] = { "isalbumartist", NULL };
 
+  MkFilterRule rules[2];
+  gsize nrules = 0;
+  if (type == MK_CONTRIB_TYPE_COMPOSER)
+    nrules = append_rule (rules, nrules, "role", "is", "Composer");
+  nrules = append_rule (rules, nrules, "artist", "contains", name);
+
   g_autoptr (JsonBuilder) pb = json_builder_new ();
   json_builder_begin_object (pb);
-  add_field_filter (pb, "artist", "contains", name);
+  add_filter_rules (pb, rules, nrules);
   json_builder_set_member_name (pb, "albumartistsonly");
-  json_builder_add_boolean_value (pb, FALSE);
+  json_builder_add_boolean_value (pb, type == MK_CONTRIB_TYPE_BAND);
   json_builder_set_member_name (pb, "allroles");
-  json_builder_add_boolean_value (pb, TRUE);
+  json_builder_add_boolean_value (pb, type != MK_CONTRIB_TYPE_BAND);
   add_properties (pb, props);
   add_sort (pb, "artist");
   json_builder_end_object (pb);
@@ -2440,7 +2487,8 @@ contrib_music (MkTools *self, const char *instance, const char *name,
  * @instance: target instance, or NULL for the default.
  * @directory: the virtual people node to enumerate (a videodb:// path).
  * @in: the container bit a hit in this node drills to.
- * @name: the person-name substring to match (case-insensitive).
+ * @name: the person-name substring to match (case-insensitive), or "" to
+ *        match every label (an empty needle occurs in any haystack).
  * @index: casefolded name → row lookup, fed to contrib_add().
  * @rows: the row store, fed to contrib_add().
  * @error: return location for a GError, or NULL.
@@ -2555,21 +2603,31 @@ build_contributors_result (GPtrArray *rows, gint64 offset, gint64 limit,
  * schema_contributors:
  * @self: the table (used to name the configured instances).
  *
- * Schema for the `contributors` tool: the required `name` plus the
- * paging controls.
+ * Schema for the `contributors` tool: the optional `name` and `type` filters
+ * plus the paging controls. Everything is optional — no arguments at all means
+ * "enumerate every contributor", paged.
  *
  * @return a newly allocated schema node.
  */
 static JsonNode *
 schema_contributors (MkTools *self)
 {
+  static const char *const types[] =
+    { "band", "composer", "actor", "director", NULL };
+
   g_autoptr (JsonBuilder) b = json_builder_new ();
   schema_begin (b);
 
   prop_instance (b, self, FALSE);
   prop_typed (b, "name", "string",
               "Person name to look for (substring, case-insensitive): a band, "
-              "solo artist, composer, actor, or director.");
+              "solo artist, composer, actor, or director. Omit to list "
+              "everyone (of `type` when given).");
+  prop_enum (b, "type", types,
+             "Contributor kind to list. band = album-level music artist "
+             "(closest Kodi gets to a band — includes headline solo artists); "
+             "composer/actor/director are literal. Omit for all kinds. "
+             "\"List all bands\" = {type: \"band\"} with no name.");
   prop_typed (b, "limit", "integer",
               "Max rows to return (default 50, max 500). Page with offset.");
   prop_typed (b, "offset", "integer",
@@ -2577,8 +2635,7 @@ schema_contributors (MkTools *self)
   prop_typed (b, "count", "boolean",
               "When true, return only the total match count (zero rows).");
 
-  static const char *const required[] = { "name", NULL };
-  schema_end (b, required);
+  schema_end (b, NULL);
   return json_builder_get_root (b);
 }
 
@@ -2586,16 +2643,18 @@ schema_contributors (MkTools *self)
  * handler_contributors:
  * @self: the tool table.
  * @def: this tool's row (unused).
- * @args: the call arguments; `name` is required.
+ * @args: the call arguments; both `name` and `type` are optional.
  * @error: return location for a GError, or NULL.
  *
  * Implements the `contributors` tool: collects the matching people from the
- * music library (contrib_music()) and the three video people nodes
- * (contrib_node() over videodb://movies/actors/, videodb://movies/directors/,
- * videodb://tvshows/actors/), merges them case-insensitively, sorts by name,
- * and pages the merged set. Makes no Kodi state change.
+ * sources `type` selects — the music library (contrib_music(); ANY, band,
+ * composer) and the video people nodes (contrib_node(); ANY walks all three,
+ * actor the two cast nodes, director videodb://movies/directors/) — merges
+ * them case-insensitively, sorts by name, and pages the merged set. An empty
+ * or missing `name` matches everyone, so `{type: "band"}` lists all bands and
+ * `{}` enumerates every contributor. Makes no Kodi state change.
  *
- * @return the contributors-result node, or NULL with @error set (missing name
+ * @return the contributors-result node, or NULL with @error set (unknown type
  *         or a call failure).
  */
 static JsonNode *
@@ -2606,20 +2665,36 @@ handler_contributors (MkTools *self, const MkToolDef *def, JsonObject *args,
   {
     const char *directory;
     guint       in;
+    guint       type; /* the one non-ANY type that includes this node */
   } nodes[] = {
-    { "videodb://movies/actors/",    MK_CONTRIB_MOVIES  },
-    { "videodb://movies/directors/", MK_CONTRIB_MOVIES  },
-    { "videodb://tvshows/actors/",   MK_CONTRIB_TVSHOWS },
+    { "videodb://movies/actors/",    MK_CONTRIB_MOVIES,
+      MK_CONTRIB_TYPE_ACTOR },
+    { "videodb://movies/directors/", MK_CONTRIB_MOVIES,
+      MK_CONTRIB_TYPE_DIRECTOR },
+    { "videodb://tvshows/actors/",   MK_CONTRIB_TVSHOWS,
+      MK_CONTRIB_TYPE_ACTOR },
   };
 
   (void) def;
   const char *instance = arg_instance (args);
-  const char *name = arg_str (args, "name", NULL);
-  if (name == NULL || name[0] == '\0')
+  const char *name = arg_str (args, "name", "");
+
+  guint type = MK_CONTRIB_TYPE_ANY;
+  const char *type_str = arg_str (args, "type", NULL);
+  if (type_str != NULL)
     {
-      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                   "contributors: \"name\" is required");
-      return NULL;
+      gsize t = 0;
+      while (t < G_N_ELEMENTS (mk_contrib_types)
+             && g_strcmp0 (type_str, mk_contrib_types[t].name) != 0)
+        t++;
+      if (t == G_N_ELEMENTS (mk_contrib_types))
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "contributors: unknown type \"%s\" "
+                       "(use band/composer/actor/director)", type_str);
+          return NULL;
+        }
+      type = mk_contrib_types[t].type;
     }
 
   gint64 limit = MK_SEARCH_DEFAULT_LIMIT, offset = 0, v = 0;
@@ -2636,11 +2711,14 @@ handler_contributors (MkTools *self, const MkToolDef *def, JsonObject *args,
     g_ptr_array_new_with_free_func (contrib_row_free);
   g_autoptr (GHashTable) index = g_hash_table_new (g_str_hash, g_str_equal);
 
-  if (!contrib_music (self, instance, name, index, rows, error))
-    return NULL;
+  if (type == MK_CONTRIB_TYPE_ANY || type == MK_CONTRIB_TYPE_BAND
+      || type == MK_CONTRIB_TYPE_COMPOSER)
+    if (!contrib_music (self, instance, type, name, index, rows, error))
+      return NULL;
   for (gsize n = 0; n < G_N_ELEMENTS (nodes); n++)
-    if (!contrib_node (self, instance, nodes[n].directory, nodes[n].in, name,
-                       index, rows, error))
+    if ((type == MK_CONTRIB_TYPE_ANY || type == nodes[n].type)
+        && !contrib_node (self, instance, nodes[n].directory, nodes[n].in,
+                          name, index, rows, error))
       return NULL;
 
   g_ptr_array_sort (rows, contrib_row_cmp);
@@ -4122,25 +4200,34 @@ static const MkToolDef mk_tool_defs[] = {
   /**
    * contributors (Search tool):
    *
-   * Find *people* by name — bands, solo artists, composers, actors, directors —
-   * not media. Answers "do we have anything with X" across the whole library
-   * and hands back the exact names to feed into `search`: names are the only
-   * follow-up handle (Kodi's person filters are name-only; no id-based filter
-   * exists), so rows carry no person ids. Each row's `in` lists the containers
-   * where that name yields hits — `albums`/`songs` for music people (`albums`
-   * only when the artist is an album artist), `movies`/`tvshows` for actors and
-   * directors — so the caller knows where to drill next without Kodi-specific
-   * knowledge. Hits from every source are merged case-insensitively into one
-   * row per person, sorted by name.
+   * Find or list *people* — bands, solo artists, composers, actors,
+   * directors — not media. Answers "do we have anything with X" and "what
+   * bands do we have" across the whole library and hands back the exact names
+   * to feed into `search`: names are the only follow-up handle (Kodi's person
+   * filters are name-only; no id-based filter exists), so rows carry no person
+   * ids. Each row's `in` lists the containers where that name yields hits —
+   * `albums`/`songs` for music people (`albums` only when the artist is an
+   * album artist), `movies`/`tvshows` for actors and directors — so the caller
+   * knows where to drill next without Kodi-specific knowledge. Hits from every
+   * source are merged case-insensitively into one row per person, sorted by
+   * name. The `band` type is synthesized from `isalbumartist` — Kodi's native
+   * group/person fields are empty on tag-scraped libraries (TODO 11.6.4.4).
    *
-   * Call:  AudioLibrary.GetArtists { filter: artist contains name, allroles,
-   *        albumartistsonly: false } for the music people (KODI-API 12.3.6 /
-   *        12.3.15), then Files.GetDirectory over the virtual people nodes
-   *        videodb://movies/actors/, videodb://movies/directors/ and
-   *        videodb://tvshows/actors/ (KODI-API 12.5.1) — those listings take no
-   *        filter, so they are paged and matched app-side.
+   * Call:  AudioLibrary.GetArtists for the music people (KODI-API 12.3.6 /
+   *        12.3.15) — filter: artist contains name and/or role is "Composer"
+   *        (type composer); albumartistsonly: true for type band, else false
+   *        with allroles — then Files.GetDirectory over the virtual people
+   *        nodes videodb://movies/actors/, videodb://movies/directors/ and
+   *        videodb://tvshows/actors/ (KODI-API 12.5.1) — those listings take
+   *        no filter, so they are paged and matched app-side. `type` skips the
+   *        sources that cannot hold it (band/composer: no node walks; actor/
+   *        director: no music call).
    *
-   * @param name (required): person name (substring, case-insensitive).
+   * @param name (optional): person name (substring, case-insensitive);
+   *        omitted matches everyone.
+   * @param type (optional): band|composer|actor|director — one contributor
+   *        kind; omitted spans all of them. {type: "band"} alone lists every
+   *        band.
    * @param limit|offset|count: paging and count-only controls over the merged
    *        row set.
    * @param instance (optional): the Kodi instance whose library to search;
@@ -4148,8 +4235,10 @@ static const MkToolDef mk_tool_defs[] = {
    * @return `{ "total", "returned", "offset", "truncated", "rows": [ { "name",
    *         "in": [ "albums"|"songs"|"movies"|"tvshows" ] } ] }`.
    */
-  { "contributors", "Find contributors by name (bands, solo artists, "
-                    "composers, actors, directors): rows {name, in: "
+  { "contributors", "Find or list contributors (bands, solo artists, "
+                    "composers, actors, directors): optional name substring, "
+                    "optional type (band/composer/actor/director) — e.g. "
+                    "{type: \"band\"} lists all bands. Rows {name, in: "
                     "[albums|songs|movies|tvshows]} say where each name yields "
                     "hits — feed the exact name back into `search` to drill.",
     schema_contributors, handler_contributors, NULL },
