@@ -1,0 +1,277 @@
+#!/bin/sh
+# Functional test for the `dropplaylists` tool — TODO.md §11.6.9.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi. `dropplaylists` empties the queues: Playlist.Clear on each of Kodi's
+# three fixed playlists (audio 0 / video 1 / picture 2) in one call, so no
+# queued items remain anywhere, returning the player_state() snapshot. The
+# §11.6.9 contract under test: clearing the ACTIVE playlist leaves the current
+# item playing — only the queue behind it is emptied — so the tool never
+# interrupts playback.
+#
+# The test drops on an idle box first (clearing empty playlists is a clean
+# no-op reporting "stopped"), then builds real queues — playback of one leaf
+# with a second queued behind it (the active playlist), plus an item seeded
+# into the OTHER playlist by raw RPC — and drops them all: the tool's own
+# snapshot must still show the first leaf playing, Kodi must independently
+# agree the player survived, and every playlist must read back empty, both
+# through `getplaylist` and through Kodi's own Playlist.GetItems.
+#
+# Caller mistakes: an unconfigured instance must return a tool error naming
+# the mistake (the schema has no other arguments to get wrong).
+#
+# Since real playback may be audible on a real device, the test reads the
+# volume at startup, lowers it to 2% for the run, and restores the original on
+# every exit (EXIT trap).
+#
+# Library-agnostic: it picks whatever movies or songs the library actually
+# holds, so it passes against any *populated* library rather than assuming
+# titles.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#   - at least two playable movies or songs in the library (else playback SKIPs)
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+KODI_HOST=${KODI_HOST:-127.0.0.1:8080}
+KODI_AUTH=${KODI_AUTH:-kodi:kodi}
+KODI_SCHEME=${KODI_SCHEME:-http}
+export KODI_HOST KODI_AUTH KODI_SCHEME
+
+SKIP=77
+
+skip () { echo "SKIP: $*"; exit $SKIP; }
+
+# ---- dependencies ---------------------------------------------------------
+
+command -v jq   >/dev/null 2>&1 || skip "jq not found"
+command -v curl >/dev/null 2>&1 || skip "curl not found"
+
+# Locate the mcp-kodi binary: the automake build tree first ($top_builddir is
+# exported by `make check`), then fallbacks for running the script by hand.
+find_binary () {
+  for c in \
+    "${top_builddir:-}/src/mcp-kodi" \
+    "$(dirname "$0")/../src/mcp-kodi" \
+    "./src/mcp-kodi" \
+    "src/mcp-kodi"
+  do
+    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# ---- talking to Kodi directly (for verification + the liveness gate) ------
+
+kodi_rpc () { # method params-json  ->  raw JSON-RPC response
+  curl -s -m 20 -u "$KODI_AUTH" -H 'Content-Type: application/json' \
+    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" \
+    "$KODI_SCHEME://$KODI_HOST/jsonrpc"
+}
+
+pong=$(kodi_rpc JSONRPC.Ping '{}' | jq -r '.result // empty' 2>/dev/null)
+[ "$pong" = "pong" ] || skip "Kodi not reachable at $KODI_SCHEME://$KODI_HOST"
+
+# ---- volume guard ----------------------------------------------------------
+# The test starts real playback on a possibly real device, so remember the
+# current volume, run quietly at 2%, and restore the original on every exit.
+vol0=$(kodi_rpc Application.GetProperties '{"properties":["volume"]}' \
+        | jq -r '.result.volume // empty')
+restore_volume () {
+  [ -n "$vol0" ] && kodi_rpc Application.SetVolume "{\"volume\":$vol0}" >/dev/null 2>&1
+}
+trap restore_volume EXIT
+[ -n "$vol0" ] && kodi_rpc Application.SetVolume '{"volume":2}' >/dev/null 2>&1
+
+# ---- talking to the server under test (MCP over stdio) --------------------
+
+# Feed `initialize` + one `tools/call`, echo back the tool result object for
+# request id 2 (`{ content:[{type,text}], isError }`). The server reads
+# newline-delimited JSON and exits on EOF, so one invocation per call keeps
+# every assertion isolated.
+mcp_tool () { # name arguments-json  ->  tool result object
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
+    | "$MCP" 2>/dev/null \
+    | jq -c 'select(.id==2) | .result'
+}
+
+drop     () { mcp_tool dropplaylists "$1"; }   # arguments-json -> result object
+getpl    () { mcp_tool getplaylist   "$1"; }
+queue    () { mcp_tool queue         "$1"; }
+playfile () { mcp_tool playfile      "$1"; }
+search   () { mcp_tool search        "$1"; }
+stop_t   () { mcp_tool stop          "$1"; }
+res_err  () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
+res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
+jargs    () { jq -cn "$@"; }                   # build an arguments object safely
+g        () { printf '%s' "$1" | jq -r "$2"; } # body, filter -> scalar
+j        () { printf '%s' "$1" | jq    "$2"; } # body, filter -> json/bool
+
+# Kodi's own item count for one fixed playlist id — the independent check that
+# a drop really emptied it.
+kodi_count () { # playlistid -> item count
+  kodi_rpc Playlist.GetItems "{\"playlistid\":$1}" \
+    | jq -r '.result.items | length'
+}
+
+# ---- assertions -----------------------------------------------------------
+
+PASS=0
+FAIL=0
+ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
+
+eq () { # desc expected actual
+  if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi
+}
+is_true () { # desc jq-bool-string
+  if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi
+}
+
+echo "dropplaylists functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ---- the volume guard took hold: Kodi reports the quiet test level ---------
+echo "-- volume guard (was: ${vol0:-unknown}%)"
+eq "volume lowered to 2% for the test run" 2 \
+   "$(kodi_rpc Application.GetProperties '{"properties":["volume"]}' \
+       | jq -r '.result.volume')"
+
+# ===========================================================================
+# 1. Caller mistakes: an unconfigured instance is a clean tool error with the
+#    no_instance category and a setup hint, so the AI can help fix the config.
+#    (The schema has no other arguments to get wrong.)
+# ===========================================================================
+echo "-- errors / edges"
+
+b=$(drop '{"instance":"no-such-box"}')
+eq "unknown instance -> tool error" true "$(res_err "$b")"
+eq "unknown instance -> category no_instance" no_instance \
+   "$(g "$(res_body "$b")" '.category')"
+is_true "unknown instance -> carries a setup hint" \
+        "$(j "$(res_body "$b")" 'has("hint") and (.hint|length>0)')"
+
+# ===========================================================================
+# 2. Idle drop: with nothing playing and every playlist already empty, the
+#    drop is a clean no-op — not an error, reporting "stopped" — and all three
+#    playlists stay empty.
+# ===========================================================================
+echo "-- idle drop"
+
+active=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+[ -n "$active" ] && kodi_rpc Player.Stop "{\"playerid\":$active}" >/dev/null 2>&1
+sleep 1
+for plid in 0 1 2; do
+  kodi_rpc Playlist.Clear "{\"playlistid\":$plid}" >/dev/null 2>&1
+done
+
+b=$(drop '{}')
+eq "idle drop -> not an error" false "$(res_err "$b")"
+eq "idle drop -> reports stopped" stopped "$(g "$(res_body "$b")" '.state')"
+for plid in 0 1 2; do
+  eq "playlist $plid still empty after the idle drop" 0 "$(kodi_count $plid)"
+done
+
+# ===========================================================================
+# 3. Discover TWO playable leaves of the same type via `search`. Prefer
+#    movies; fall back to songs so the test runs against an audio-only
+#    library too.
+# ===========================================================================
+kind=""
+b=$(res_body "$(search '{"type":"movie","limit":2}')")
+if [ "$(j "$b" '.returned >= 2')" = true ]; then
+  kind=movie pltype=video activeid=1 otherid=0 other=audio
+else
+  # Need an artist to drill music to song leaves; pick the first one Kodi lists.
+  artist=$(kodi_rpc AudioLibrary.GetArtists '{"limits":{"start":0,"end":1}}' \
+            | jq -r '.result.artists[0].artist // empty')
+  if [ -n "$artist" ]; then
+    b=$(res_body "$(search "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:2}')")")
+    if [ "$(j "$b" '.returned >= 2')" = true ]; then
+      kind=song pltype=audio activeid=0 otherid=1 other=video
+    fi
+  fi
+fi
+
+if [ -z "$kind" ]; then
+  echo "   (library holds fewer than two movies or songs — playback assertions skipped)"
+  echo "------------------------------------------------------------"
+  printf 'dropplaylists functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+  [ "$FAIL" -eq 0 ] || exit 1
+  exit 0
+fi
+
+file1=$(g "$b" '.rows[0].file')
+file2=$(g "$b" '.rows[1].file')
+
+# ===========================================================================
+# 4. Drop real queues: play the first leaf with the second queued behind it
+#    (the active playlist, 2 items) and seed the OTHER playlist with one item
+#    by raw RPC (no player attached). One drop must empty all of them — the
+#    plural contract — while the current item keeps playing: the tool's own
+#    snapshot still names it, and Kodi independently confirms the player
+#    survived (§11.6.9).
+# ===========================================================================
+echo "-- dropping live queues ($kind)"
+echo "   (playing: $file1)"
+echo "   (queued:  $file2)"
+
+b=$(playfile "$(jargs --arg f "$file1" '{file:$f}')")
+eq "playfile starts the first leaf" false "$(res_err "$b")"
+b=$(queue "$(jargs --arg f "$file2" '{file:$f}')")
+eq "queue appends the second leaf" false "$(res_err "$b")"
+kodi_rpc Playlist.Add \
+  "$(jargs --argjson p "$otherid" --arg f "$file1" '{playlistid:$p,item:{file:$f}}')" \
+  >/dev/null 2>&1
+
+eq "the active $pltype playlist holds both items" 2 "$(kodi_count $activeid)"
+eq "the inactive $other playlist holds the seeded item" 1 "$(kodi_count $otherid)"
+
+b=$(drop '{}')
+eq "the drop is not an error" false "$(res_err "$b")"
+body=$(res_body "$b")
+eq "the snapshot still shows the item playing" playing "$(g "$body" '.state')"
+eq "the snapshot still names the playing file" "$file1" "$(g "$body" '.file')"
+
+# Kodi independently agrees: the player survived the clear, still on file1...
+plid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+is_true "Kodi still reports an active player" \
+        "$(test -n "$plid" && echo true || echo false)"
+if [ -n "$plid" ]; then
+  eq "Kodi still plays the first leaf" "$file1" \
+     "$(kodi_rpc Player.GetItem "{\"playerid\":$plid,\"properties\":[\"file\"]}" \
+         | jq -r '.result.item.file')"
+fi
+
+# ...and every playlist is empty, read both ways.
+for plid in 0 1 2; do
+  eq "Kodi playlist $plid emptied by the drop" 0 "$(kodi_count $plid)"
+done
+for t in audio video picture; do
+  b=$(getpl "{\"type\":\"$t\"}")
+  eq "getplaylist sees the $t playlist empty" 0 "$(g "$(res_body "$b")" '.total')"
+done
+
+# ===========================================================================
+# 5. Cleanup via the `stop` tool; the volume guard's EXIT trap then restores
+#    the volume.
+# ===========================================================================
+echo "-- cleanup"
+b=$(stop_t '{}')
+eq "stop is not an error" false "$(res_err "$b")"
+
+# ---- tally ----------------------------------------------------------------
+echo "------------------------------------------------------------"
+printf 'dropplaylists functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+exit 0

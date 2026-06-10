@@ -746,6 +746,101 @@ case_getplaylist_named_idle (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* ---- dropplaylists ---------------------------------------------------------- */
+
+/* Count how many times the stub recorded a call to METHOD. */
+static guint
+called_count (const char *method)
+{
+  guint n = 0;
+  if (stub_kodi_methods == NULL)
+    return 0;
+  for (guint i = 0; i < stub_kodi_methods->len; i++)
+    if (strcmp (g_ptr_array_index (stub_kodi_methods, i), method) == 0)
+      n++;
+  return n;
+}
+
+/* The happy path: Playlist.Clear fired on ALL THREE fixed playlists (audio 0 /
+ * video 1 / picture 2) before anything else, then the player_state() snapshot —
+ * which still shows the current item playing, since clearing the active
+ * playlist removes only the queue behind it. */
+static void
+case_dropplaylists (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Playlist.Clear", "\"OK\"");
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 0, \"type\": \"audio\" } ]");
+  stub_kodi_set_response ("Player.GetProperties", "{ \"speed\": 1 }");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"Song\", \"file\": \"/s/a.flac\","
+    "  \"type\": \"song\", \"id\": 5 } }");
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "dropplaylists", NULL, &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_STR_EQ (json_object_get_string_member (p, "state"), "playing");
+      MK_CHECK_STR_EQ (json_object_get_string_member (p, "file"), "/s/a.flac");
+    }
+
+  /* One clear per fixed playlist, all before the state snapshot. */
+  MK_CHECK_INT_EQ (called_count ("Playlist.Clear"), 3);
+  if (stub_kodi_methods != NULL && stub_kodi_methods->len >= 3)
+    for (guint i = 0; i < 3; i++)
+      MK_CHECK_STR_EQ (g_ptr_array_index (stub_kodi_methods, i),
+                       "Playlist.Clear");
+  MK_CHECK (called ("Player.GetActivePlayers"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* A failing clear aborts the rest: the first Playlist.Clear error surfaces as
+ * the tool error, no further clear is attempted, and no state snapshot is
+ * taken. */
+static void
+case_dropplaylists_clear_fails (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_error ("Playlist.Clear");
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "dropplaylists", NULL, &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = FALSE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    MK_CHECK (json_object_has_member (json_node_get_object (payload),
+                                      "error"));
+
+  MK_CHECK_INT_EQ (called_count ("Playlist.Clear"), 1);
+  MK_CHECK (!called ("Player.GetActivePlayers"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
 /* ---- transport button (play) ---------------------------------------------- */
 
 static void
@@ -1199,6 +1294,8 @@ main (int argc, char **argv)
     { "getplaylist-type-wins",   case_getplaylist_type_wins },
     { "getplaylist-no-playback", case_getplaylist_nothing_playing },
     { "getplaylist-named-idle",  case_getplaylist_named_idle },
+    { "dropplaylists",           case_dropplaylists },
+    { "dropplaylists-fails",     case_dropplaylists_clear_fails },
     { "button-play",             case_button_play },
     { "stop-clears-playlist",    case_stop_clears_playlist },
     { "stop-nothing-playing",    case_stop_nothing_playing },
