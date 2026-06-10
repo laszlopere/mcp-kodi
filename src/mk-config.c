@@ -407,10 +407,22 @@ curl_opts_insecure (const char *opts)
  * apply_env_overrides:
  * @self: the config to modify.
  *
- * Applies KODI_HOST/KODI_AUTH/KODI_SCHEME and the -k flag in KODI_CURL_OPTS to
- * the default instance only. If no relevant variable is set this is a
- * no-op. With no config file loaded, this creates one implicit instance named
- * "default" and makes it the default.
+ * Applies KODI_HOST/KODI_AUTH/KODI_SCHEME and the -k flag in KODI_CURL_OPTS.
+ * If no relevant variable is set this is a no-op.
+ *
+ * KODI_HOST names a different box than any the config does, so it does NOT
+ * borrow a configured instance's identity: it would be wrong for the history
+ * log to attribute a play here to "Living Room TV" just because that was the
+ * file's default. Instead KODI_HOST supersedes the configured boxes entirely —
+ * this process then talks to exactly one, synthetic, **unlabelled** instance
+ * keyed #MK_CONFIG_ENV_INSTANCE, made the default. Its auth/scheme/insecure
+ * fall back to the former default's values when only the host is redirected
+ * (KODI_AUTH/KODI_SCHEME absent), so pointing at a sibling box keeps working;
+ * the rpc opt-in is never inherited.
+ *
+ * Without KODI_HOST the target box is unchanged — only its connection is
+ * tweaked — so its identity stands and the override is applied in place to the
+ * default instance (creating one named "default" when no file was loaded).
  */
 static void
 apply_env_overrides (MkConfig *self)
@@ -424,6 +436,31 @@ apply_env_overrides (MkConfig *self)
   if (host == NULL && auth == NULL && scheme == NULL && opts == NULL)
     return;
 
+  /* KODI_HOST redirects to a box the config does not name: build a fresh,
+   * unlabelled identity for it rather than masquerading as the configured
+   * default, and let it supersede the configured boxes outright. */
+  if (host != NULL)
+    {
+      MkInstance *base = self->default_name
+                           ? g_hash_table_lookup (self->instances,
+                                                  self->default_name)
+                           : NULL;
+      MkInstance *env = mk_instance_new (
+        NULL, /* no display label — this is an ad-hoc target, not a named box */
+        host,
+        auth != NULL ? auth : (base ? base->auth : NULL),
+        scheme != NULL ? scheme : (base ? base->scheme : NULL),
+        insecure || (base != NULL && base->insecure),
+        FALSE /* never inherit the rpc escape-hatch opt-in */);
+      /* env (built above) already holds copies of any borrowed @base strings,
+       * so the configured instances can now go. */
+      g_hash_table_remove_all (self->instances);
+      mk_config_set_instance (self, MK_CONFIG_ENV_INSTANCE, env);
+      mk_config_set_default (self, MK_CONFIG_ENV_INSTANCE);
+      return;
+    }
+
+  /* Connection-only overrides: same box, applied in place. */
   const char *name = self->default_name ? self->default_name : "default";
   MkInstance *inst = g_hash_table_lookup (self->instances, name);
   if (inst == NULL)
@@ -434,11 +471,6 @@ apply_env_overrides (MkConfig *self)
   if (self->default_name == NULL)
     mk_config_set_default (self, name);
 
-  if (host != NULL)
-    {
-      g_free (inst->host);
-      inst->host = g_strdup (host);
-    }
   if (auth != NULL)
     {
       g_free (inst->auth);

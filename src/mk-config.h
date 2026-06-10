@@ -5,7 +5,8 @@
  *
  * Loads the server's multi-instance config from
  * ${XDG_CONFIG_HOME:-~/.config}/mcp-kodi/config.json, applies environment
- * overrides to the default instance, and writes the effective config back
+ * overrides (KODI_HOST redirecting to a synthetic instance, KODI_AUTH/SCHEME
+ * tweaking the default in place), and writes the effective config back
  * atomically.
  */
 
@@ -23,6 +24,11 @@ G_BEGIN_DECLS
  * self-signed cert (curl -k). allow_rpc opts this box into the generic `rpc`
  * escape hatch: off by default, set only by hand-editing the config file —
  * never written by the `instances` tool. */
+/* Config key of the synthetic instance KODI_HOST redirects to: an env override
+ * names a box the config does not, so its play is logged under this neutral key
+ * (with no display label) rather than masquerading as a configured instance. */
+#define MK_CONFIG_ENV_INSTANCE "env"
+
 typedef struct _MkInstance MkInstance;
 struct _MkInstance
 {
@@ -68,9 +74,11 @@ void      mk_config_free (MkConfig *self);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (MkConfig, mk_config_free)
 
 /* Load config: read PATH (NULL → mk_config_default_path()) if it exists, then
- * apply KODI_HOST/KODI_AUTH/KODI_SCHEME and -k in KODI_CURL_OPTS to the default
- * instance. With no file and no env this fails with NOT_CONFIGURED. Returns a
- * new MkConfig or NULL with ERROR set. */
+ * apply KODI_HOST/KODI_AUTH/KODI_SCHEME and -k in KODI_CURL_OPTS. KODI_HOST
+ * supersedes the configured boxes with a single synthetic MK_CONFIG_ENV_INSTANCE
+ * target; KODI_AUTH/KODI_SCHEME alone tweak the default instance in place. With
+ * no file and no env this fails with NOT_CONFIGURED. Returns a new MkConfig or
+ * NULL with ERROR set. */
 MkConfig *mk_config_load (const char *path, GError **error);
 
 /* Write the effective config to PATH (NULL → default) atomically: dir created

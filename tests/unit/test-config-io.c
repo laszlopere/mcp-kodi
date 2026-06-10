@@ -158,12 +158,13 @@ case_env_overrides_no_file (void)
   g_autoptr (MkConfig) got = mk_config_load (path, &err);
   MK_CHECK (got != NULL);
   MK_CHECK (err == NULL);
-  /* One implicit instance named "default", made the default. */
+  /* One synthetic, unlabelled instance keyed "env", made the default. */
   MK_CHECK_INT_EQ (mk_config_instance_count (got), 1);
-  MK_CHECK_STR_EQ (mk_config_get_default (got), "default");
+  MK_CHECK_STR_EQ (mk_config_get_default (got), MK_CONFIG_ENV_INSTANCE);
 
   MkInstance *inst = mk_config_get_instance (got, NULL);
   MK_CHECK (inst != NULL);
+  MK_CHECK (inst->name == NULL); /* no display label: not a named box */
   MK_CHECK_STR_EQ (inst->host, "192.168.1.50:8080");
   MK_CHECK_STR_EQ (inst->auth, "env-user:env-pass");
   MK_CHECK_STR_EQ (inst->scheme, "https");
@@ -195,16 +196,25 @@ case_env_overrides_default_instance (void)
   MK_CHECK (mk_config_save (cfg, path, &err));
   MK_CHECK (err == NULL);
 
-  /* ... then load with KODI_HOST set: only the default instance's host is
-   * overridden; auth/scheme (no env) keep their file values. */
+  /* ... then load with KODI_HOST set: it redirects to a box "home" does not
+   * name, so the configured instance is superseded by a synthetic, unlabelled
+   * "env" default. The host comes from the env; auth/scheme (no env of their
+   * own) fall back to the former default's file values so a sibling-box
+   * redirect keeps working — but the "Home" label is NOT borrowed. */
   g_setenv ("KODI_HOST", "override-host:2000", TRUE);
 
   g_autoptr (MkConfig) got = mk_config_load (path, &err);
   MK_CHECK (got != NULL);
   MK_CHECK (err == NULL);
 
-  MkInstance *inst = mk_config_get_instance (got, "home");
+  /* The configured instance is gone; only the env target remains. */
+  MK_CHECK_INT_EQ (mk_config_instance_count (got), 1);
+  MK_CHECK (mk_config_get_instance (got, "home") == NULL);
+  MK_CHECK_STR_EQ (mk_config_get_default (got), MK_CONFIG_ENV_INSTANCE);
+
+  MkInstance *inst = mk_config_get_instance (got, NULL);
   MK_CHECK (inst != NULL);
+  MK_CHECK (inst->name == NULL); /* the "Home" label is not borrowed */
   MK_CHECK_STR_EQ (inst->host, "override-host:2000");
   MK_CHECK_STR_EQ (inst->auth, "file-user:file-pass");
   MK_CHECK_STR_EQ (inst->scheme, "http");
