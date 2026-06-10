@@ -199,7 +199,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         newest-first; instance omitted means all boxes (inverts the
         default-instance convention — the log is cross-instance by
         nature); limit defaults to 50 with a truncated flag
-    [ ] 11.9.4 Strengthen the merge for live monitoring. Today
+    [x] 11.9.4 Strengthen the merge for live monitoring. Today
         mk_history_record dedups against only the instance's single
         newest entry, and entries are ordered by arrival (prepend), not
         by observation time. A future live-monitoring feature means
@@ -211,9 +211,14 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         Match the incoming observation against a recent per-instance
         time window instead of the single newest entry, insert by the
         observation's `at` timestamp, and on a match merge rather than
-        skip (keep the earliest `at`; consider a last_seen field) — so
+        skip (keep the earliest `at` plus a last_seen field) — so
         recording stays idempotent under concurrent flock-serialized
-        writers.
+        writers. Landed: the instance's newest entry still matches on
+        item identity alone (same continuous playback hours later stays
+        one play, the call-driven semantics), older entries merge only
+        within a 10-minute window of their [at, last_seen] coverage;
+        the observation stamp is taken before the flock; a merge that
+        changes nothing skips the rewrite.
     [ ] 11.9.5 Live monitoring — poll the Kodi instances so the history
         also captures playback not initiated through the MCP server
         (e.g. started from the TV remote). Poll every ~2 minutes by
