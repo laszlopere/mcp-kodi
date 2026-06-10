@@ -435,6 +435,11 @@ case_playfile (void)
   MkTools *tools = make_tools (&cfg, &kodi);
 
   stub_kodi_set_response ("Player.Open", "true");
+  /* the pre-flight disk check finds the file in its folder's listing. */
+  stub_kodi_set_response (
+    "Files.GetDirectory",
+    "{ \"files\": [ { \"file\": \"/m/heat.mkv\", \"filetype\": \"file\","
+    "  \"label\": \"heat.mkv\" } ] }");
   stub_kodi_set_response ("Player.GetActivePlayers",
                           "[ { \"playerid\": 1, \"type\": \"video\" } ]");
   stub_kodi_set_response (
@@ -481,6 +486,203 @@ case_playfile (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* Missing media, layer 1 (TODO 11.12): the folder lists fine but holds no such
+ * file — refused as a tool error BEFORE Player.Open, so a doomed open never
+ * stops whatever is playing now. */
+static void
+case_playfile_missing_file (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "Files.GetDirectory",
+    "{ \"files\": [ { \"file\": \"/m/other.mkv\", \"filetype\": \"file\" } ] }");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"file\": \"/m/gone.mkv\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "playfile", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL); /* tool error, not a protocol error */
+
+  gboolean is_error = FALSE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      const char *msg = json_object_get_string_member (
+        json_node_get_object (payload), "error");
+      MK_CHECK (msg != NULL && strstr (msg, "missing from disk") != NULL);
+      MK_CHECK (msg != NULL && strstr (msg, "/m/gone.mkv") != NULL);
+    }
+  MK_CHECK (called ("Files.GetDirectory"));
+  MK_CHECK (!called ("Player.Open"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* Missing media, layer 1, the other verdict: the folder cannot be listed even
+ * though it sits inside a configured media source (gone, renamed, or its
+ * share unmounted — Kodi answers the listing with an RPC error) — the file
+ * cannot be there either, same refusal. */
+static void
+case_playfile_unlistable_dir (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_error ("Files.GetDirectory");
+  stub_kodi_set_response (
+    "Files.GetSources",
+    "{ \"sources\": [ { \"file\": \"/m/\", \"label\": \"Movies\" } ] }");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"file\": \"/m/gone/heat.mkv\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "playfile", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = FALSE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      const char *msg = json_object_get_string_member (
+        json_node_get_object (payload), "error");
+      MK_CHECK (msg != NULL && strstr (msg, "cannot be listed") != NULL);
+    }
+  MK_CHECK (called ("Files.GetSources"));
+  MK_CHECK (!called ("Player.Open"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* An unlistable folder OUTSIDE the configured media sources convicts nothing:
+ * Files.GetDirectory refuses everything out there, existing or not (verified
+ * live), so the path is merely unverifiable — straight on to Player.Open,
+ * where Kodi disk-checks non-library paths itself. */
+static void
+case_playfile_outside_sources_proceeds (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_error ("Files.GetDirectory");
+  stub_kodi_set_response (
+    "Files.GetSources",
+    "{ \"sources\": [ { \"file\": \"/library/\", \"label\": \"Music\" } ] }");
+  stub_kodi_set_response ("Player.Open", "\"OK\"");
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 0, \"type\": \"audio\" } ]");
+  stub_kodi_set_response ("Player.GetProperties", "{ \"speed\": 1 }");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"Tmp\", \"file\": \"/tmp/track.mp3\","
+    "  \"type\": \"unknown\", \"id\": -1 } }");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"file\": \"/tmp/track.mp3\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "playfile", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  (void) payload;
+  MK_CHECK (!is_error);
+  MK_CHECK (called ("Files.GetSources"));
+  MK_CHECK (called ("Player.Open"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* Missing media, layer 3 (TODO 11.12): the disk check passes and Kodi answers
+ * the open with "OK", yet no player is active after the settle — the open
+ * silently died. The "stopped" snapshot must become a tool error, never a
+ * success. */
+static void
+case_playfile_silent_open_failure (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "Files.GetDirectory",
+    "{ \"files\": [ { \"file\": \"/m/heat.mkv\", \"filetype\": \"file\" } ] }");
+  stub_kodi_set_response ("Player.Open", "\"OK\"");
+  stub_kodi_set_response ("Player.GetActivePlayers", "[]");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"file\": \"/m/heat.mkv\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "playfile", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = FALSE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      const char *msg = json_object_get_string_member (
+        json_node_get_object (payload), "error");
+      MK_CHECK (msg != NULL && strstr (msg, "never started") != NULL);
+    }
+  MK_CHECK (called ("Player.Open"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* A non-filesystem path (a stream URL) is unverifiable on disk: no
+ * Files.GetDirectory probe — that would false-positive on playable URLs —
+ * straight to Player.Open. */
+static void
+case_playfile_skips_url_check (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.Open", "\"OK\"");
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 0, \"type\": \"audio\" } ]");
+  stub_kodi_set_response ("Player.GetProperties", "{ \"speed\": 1 }");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"Stream\","
+    "  \"file\": \"http://radio.example/live.mp3\","
+    "  \"type\": \"unknown\", \"id\": -1 } }");
+
+  g_autoptr (JsonNode) an =
+    args_node ("{ \"file\": \"http://radio.example/live.mp3\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "playfile", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  (void) payload;
+  MK_CHECK (!is_error);
+  MK_CHECK (!called ("Files.GetDirectory"));
+  MK_CHECK (called ("Player.Open"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
 /* ---- queue ----------------------------------------------------------------- */
 
 /* The happy path: an episode is playing off video playlist 1, and queueing the
@@ -509,6 +711,16 @@ case_queue_append (void)
     "Player.GetItem",
     "{ \"item\": { \"title\": \"The End\", \"file\": \"/v/rd-1x01.avi\","
     "  \"label\": \"The End\", \"type\": \"episode\", \"id\": 30584 } }");
+  /* the queued id resolves to its file, which the disk pre-check then finds
+   * in the folder listing. */
+  stub_kodi_set_response (
+    "VideoLibrary.GetEpisodeDetails",
+    "{ \"episodedetails\": { \"episodeid\": 30585,"
+    "  \"file\": \"/v/rd-1x02.avi\" } }");
+  stub_kodi_set_response (
+    "Files.GetDirectory",
+    "{ \"files\": [ { \"file\": \"/v/rd-1x01.avi\", \"filetype\": \"file\" },"
+    "  { \"file\": \"/v/rd-1x02.avi\", \"filetype\": \"file\" } ] }");
 
   g_autoptr (JsonNode) an =
     args_node ("{ \"type\": \"episode\", \"id\": 30585 }");
@@ -529,9 +741,12 @@ case_queue_append (void)
       MK_CHECK_INT_EQ (json_object_get_int_member (p, "id"), 30584);
     }
 
-  /* resolve the player, read its playlist, append — no Insert. */
+  /* resolve the player, read its playlist, disk-check the id's file,
+   * append — no Insert. */
   MK_CHECK (called ("Player.GetActivePlayers"));
   MK_CHECK (called ("Player.GetProperties"));
+  MK_CHECK (called ("VideoLibrary.GetEpisodeDetails"));
+  MK_CHECK (called ("Files.GetDirectory"));
   MK_CHECK (called ("Playlist.Add"));
   MK_CHECK (!called ("Playlist.Insert"));
 
@@ -552,6 +767,11 @@ case_queue_next_inserts (void)
                           "[ { \"playerid\": 1, \"type\": \"video\" } ]");
   stub_kodi_set_response ("Player.GetProperties",
                           "{ \"playlistid\": 1, \"position\": 3, \"speed\": 1 }");
+  /* the pre-flight disk check finds the file in its folder's listing. */
+  stub_kodi_set_response (
+    "Files.GetDirectory",
+    "{ \"files\": [ { \"file\": \"/v/next.mkv\", \"filetype\": \"file\","
+    "  \"label\": \"next.mkv\" } ] }");
   stub_kodi_set_response ("Playlist.Insert", "\"OK\"");
   stub_kodi_set_response (
     "Player.GetItem",
@@ -714,6 +934,132 @@ case_queue_bad_args (void)
   /* none of them reached Kodi. */
   MK_CHECK (!called ("Player.GetActivePlayers"));
 
+  free_tools (tools, cfg, kodi);
+}
+
+/* Missing media (TODO 11.12): a queued library id resolves to a file the disk
+ * no longer has — refused before Playlist.Add, where Kodi would have answered
+ * "OK" and the failure would only surface when playback reached the item. */
+static void
+case_queue_missing_file (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 0, \"type\": \"audio\" } ]");
+  stub_kodi_set_response ("Player.GetProperties",
+                          "{ \"playlistid\": 0, \"position\": 0, \"speed\": 1 }");
+  stub_kodi_set_response (
+    "AudioLibrary.GetSongDetails",
+    "{ \"songdetails\": { \"songid\": 592,"
+    "  \"file\": \"/music/maiden/01 Prowler.mp3\" } }");
+  /* the folder lists, but the song's file is not among the entries. */
+  stub_kodi_set_response (
+    "Files.GetDirectory",
+    "{ \"files\": [ { \"file\": \"/music/maiden/02 Remember.mp3\","
+    "  \"filetype\": \"file\" } ] }");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"type\": \"song\", \"id\": 592 }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "queue", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL); /* tool error, not a protocol error */
+
+  gboolean is_error = FALSE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      const char *msg = json_object_get_string_member (
+        json_node_get_object (payload), "error");
+      MK_CHECK (msg != NULL && strstr (msg, "missing from disk") != NULL);
+      MK_CHECK (msg != NULL && strstr (msg, "01 Prowler.mp3") != NULL);
+    }
+  MK_CHECK (called ("AudioLibrary.GetSongDetails"));
+  MK_CHECK (called ("Files.GetDirectory"));
+  MK_CHECK (!called ("Playlist.Add"));
+  MK_CHECK (!called ("Playlist.Insert"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* An id that is not in the library at all: Kodi answers the details lookup
+ * with a bare RPC error, which becomes a proper "no such item" tool error —
+ * again before any Playlist.Add. */
+static void
+case_queue_unknown_id (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 0, \"type\": \"audio\" } ]");
+  stub_kodi_set_response ("Player.GetProperties",
+                          "{ \"playlistid\": 0, \"position\": 0, \"speed\": 1 }");
+  stub_kodi_set_error ("AudioLibrary.GetSongDetails");
+
+  g_autoptr (JsonNode) an = args_node ("{ \"type\": \"song\", \"id\": 999999 }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "queue", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = FALSE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      const char *msg = json_object_get_string_member (
+        json_node_get_object (payload), "error");
+      MK_CHECK (msg != NULL && strstr (msg, "no song with id 999999") != NULL);
+    }
+  MK_CHECK (!called ("Playlist.Add"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* A queued stream URL is unverifiable on disk: no Files.GetDirectory probe,
+ * straight to Playlist.Add — Kodi stays the authority on what it can reach. */
+static void
+case_queue_skips_url_check (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 0, \"type\": \"audio\" } ]");
+  stub_kodi_set_response ("Player.GetProperties",
+                          "{ \"playlistid\": 0, \"position\": 0, \"speed\": 1 }");
+  stub_kodi_set_response ("Playlist.Add", "\"OK\"");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"Song\", \"file\": \"/s/a.flac\","
+    "  \"type\": \"song\", \"id\": 9 } }");
+
+  g_autoptr (JsonNode) an =
+    args_node ("{ \"file\": \"http://radio.example/live.mp3\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "queue", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  (void) payload;
+  MK_CHECK (!is_error);
+  MK_CHECK (!called ("Files.GetDirectory"));
+  MK_CHECK (called ("Playlist.Add"));
+
+  g_clear_error (&error);
   free_tools (tools, cfg, kodi);
 }
 
@@ -1502,11 +1848,19 @@ main (int argc, char **argv)
     { "contributors-paging",     case_contributors_paging },
     { "contributors-no-name",    case_contributors_missing_name },
     { "playfile",                case_playfile },
+    { "playfile-missing-file",   case_playfile_missing_file },
+    { "playfile-unlistable-dir", case_playfile_unlistable_dir },
+    { "playfile-outside-sources", case_playfile_outside_sources_proceeds },
+    { "playfile-silent-failure", case_playfile_silent_open_failure },
+    { "playfile-skips-url-check", case_playfile_skips_url_check },
     { "queue-append",            case_queue_append },
     { "queue-next-inserts",      case_queue_next_inserts },
     { "queue-type-mismatch",     case_queue_type_mismatch },
     { "queue-nothing-playing",   case_queue_nothing_playing },
     { "queue-bad-args",          case_queue_bad_args },
+    { "queue-missing-file",      case_queue_missing_file },
+    { "queue-unknown-id",        case_queue_unknown_id },
+    { "queue-skips-url-check",   case_queue_skips_url_check },
     { "getplaylist-active",      case_getplaylist_active },
     { "getplaylist-type-wins",   case_getplaylist_type_wins },
     { "getplaylist-no-playback", case_getplaylist_nothing_playing },

@@ -281,11 +281,48 @@ items=$(kodi_rpc Playlist.GetItems \
 eq "playlist holds three items" 3       "$(printf '%s' "$items" | jq -r '.result.items | length')"
 eq "queued file sits last"     "$file2" "$(printf '%s' "$items" | jq -r '.result.items[-1].file')"
 
-# A library id that does not exist: Kodi itself refuses the well-formed add,
-# which must surface as a tool error — and the playlist must not grow.
+# A library id that does not exist: refused at the id→file resolution step
+# of the missing-media pre-check (TODO 11.12) with a "no <kind> with id … in
+# the library" error — and the playlist must not grow.
 b=$(queue "$(jargs --arg t "$kind" '{type:$t,id:999999999}')")
 eq "nonexistent library id -> tool error" true "$(res_err "$b")"
+case "$(g "$(res_body "$b")" '.error')" in
+  *"in the library"*) ok "nonexistent-id error names the library";;
+  *)                  no "nonexistent-id error names the library" \
+                         "$(g "$(res_body "$b")" '.error')";;
+esac
 eq "playlist unchanged after the refused add" 3 \
+   "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
+       | jq -r '.result.items | length')"
+
+# A file the disk does not have (TODO 11.12). Two flavours, both refused with
+# a named, explained error — and the playlist must not grow:
+#   - under the library's own source dir the disk pre-check is authoritative
+#     ("missing from disk"; Kodi itself would answer "OK" for an in-library
+#     path and the failure would only surface when playback reached the item)
+#   - outside the sources it travels on to Playlist.Add, where Kodi
+#     disk-checks it and the bare refusal gets reshaped ("refused to add")
+dir1=${file1%/*}
+b=$(queue "$(jargs --arg f "$dir1/mcp-kodi-no-such-file.mp3" '{file:$f}')")
+eq "missing file in a real source dir -> tool error" true "$(res_err "$b")"
+case "$(g "$(res_body "$b")" '.error')" in
+  *"missing from disk"*) ok "stale-entry error says missing from disk";;
+  *)                     no "stale-entry error says missing from disk" \
+                            "$(g "$(res_body "$b")" '.error')";;
+esac
+eq "playlist unchanged after the refused stale entry" 3 \
+   "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
+       | jq -r '.result.items | length')"
+
+b=$(queue '{"file":"/tmp/mcp-kodi-no-such-file-on-disk.mp3"}')
+eq "missing non-source file -> tool error" true "$(res_err "$b")"
+case "$(g "$(res_body "$b")" '.error')" in
+  *"refused to add"*|*"missing from disk"*)
+     ok "missing-file error names the cause";;
+  *) no "missing-file error names the cause" \
+        "$(g "$(res_body "$b")" '.error')";;
+esac
+eq "playlist unchanged after the refused missing file" 3 \
    "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
        | jq -r '.result.items | length')"
 

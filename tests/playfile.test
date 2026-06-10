@@ -118,6 +118,26 @@ esac
 b=$(playfile '{"file":""}')
 eq "empty file -> tool error" true "$(res_err "$b")"
 
+# Missing media (TODO 11.12), the outside-sources flavour: a nonexistent path
+# outside the configured media sources cannot be verified by listing (Kodi
+# refuses to browse out there), so it travels on to Player.Open where Kodi
+# disk-checks it itself — and that refusal must come back named and explained,
+# not as a bare "Invalid params". (On a box whose sources happen to cover the
+# path, the pre-check catches it instead — "missing from disk".)
+b=$(playfile '{"file":"/tmp/mcp-kodi-no-such-file-on-disk.mp3"}')
+eq "missing non-source file -> tool error" true "$(res_err "$b")"
+case "$(g "$(res_body "$b")" '.error')" in
+  *"refused to open"*|*"missing from disk"*)
+     ok "missing-file error names the cause";;
+  *) no "missing-file error names the cause" \
+        "$(g "$(res_body "$b")" '.error')";;
+esac
+case "$(g "$(res_body "$b")" '.error')" in
+  *"mcp-kodi-no-such-file-on-disk.mp3"*)
+     ok "missing-file error names the file";;
+  *) no "missing-file error names the file";;
+esac
+
 # ===========================================================================
 # 2. Discover a real playable file via `search` — the tool whose result row's
 #    `file` is exactly the playfile input. Prefer a movie; fall back to
@@ -147,6 +167,38 @@ if [ -z "$file" ]; then
   [ "$FAIL" -eq 0 ] || exit 1
   exit 0
 fi
+
+# ===========================================================================
+# 2b. Missing media under a real source (TODO 11.12): fabricate stale-library
+#     paths from the discovered file's own folder — that folder is inside a
+#     configured source, so the disk pre-check is authoritative there. Both
+#     verdicts, neither touching the player:
+#       - the folder lists fine but holds no such file
+#       - the folder itself is gone (cannot be listed despite the source)
+# ===========================================================================
+echo "-- missing media (stale library paths)"
+dir=${file%/*}
+active_before=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result | length')
+
+b=$(playfile "$(jargs --arg f "$dir/mcp-kodi-no-such-file.mp3" '{file:$f}')")
+eq "missing file in a real source dir -> tool error" true "$(res_err "$b")"
+case "$(g "$(res_body "$b")" '.error')" in
+  *"missing from disk"*) ok "stale-entry error says missing from disk";;
+  *)                     no "stale-entry error says missing from disk" \
+                            "$(g "$(res_body "$b")" '.error')";;
+esac
+
+b=$(playfile "$(jargs --arg f "$dir/mcp-kodi-no-such-subdir/x.mp3" '{file:$f}')")
+eq "file in a vanished source subdir -> tool error" true "$(res_err "$b")"
+case "$(g "$(res_body "$b")" '.error')" in
+  *"cannot be listed"*) ok "vanished-folder error explains the folder is gone";;
+  *)                    no "vanished-folder error explains the folder is gone" \
+                           "$(g "$(res_body "$b")" '.error')";;
+esac
+
+# Neither refused request may have touched the player (started or stopped one).
+active=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result | length')
+eq "refused plays left the player untouched" "${active_before:-0}" "${active:-0}"
 
 # Remember what was playing so the test restores it rather than leaving media
 # running on a real device.
