@@ -31,18 +31,18 @@ genuinely new — a mind-blowingly different way to live with your media player.
 Each tool targets a configured Kodi box by key (`instance`); omit it and the
 configured `default` box is used.
 
-| Tool        | What it does |
-|-------------|--------------|
-| `play`      | Press **Play** on the remote — resume or begin playback on the target box. |
-| `pause`     | Press **Pause** — pause the active player. |
-| `stop`      | Press **Stop** — stop the active player. |
-| `mute`      | Mute the box's audio output. |
-| `unmute`    | Unmute the box's audio output. |
-| `noop`      | Report the player state without changing anything — a reachability + state probe. |
-| `search`    | Find playable **leaf files** by name across `music` / `tv-show` / `movie`, with paging (`limit`/`offset`) and a total count. Resolves the library by name, so the assistant acts by title, not numeric id. |
-| `playfile`  | Play one file by path (typically a `search` result's `file`). Kodi auto-selects the audio/video player. Works for any reachable path, in-library or not. |
-| `instances` | Read or modify the server's own instance config (`get`/`set`/`remove`). Makes no Kodi call; never returns stored passwords. |
-| `rpc`       | **Escape hatch** — send a raw JSON-RPC method to Kodi and return its reply unchanged. Off by default; opt-in per instance (see below). |
+| Tool          | What it does |
+|---------------|--------------|
+| `play`        | Press **Play** on the remote — resume or begin playback on the target box. |
+| `pause`       | Press **Pause** — pause the active player. |
+| `stop`        | Press **Stop** — stop the active player. |
+| `mute`        | Mute the box's audio output. |
+| `unmute`      | Unmute the box's audio output. |
+| `noop`        | Report the player state without changing anything — a reachability + state probe. |
+| `searchmedia` | Find playable **leaf files** by name across `music` / `tv-show` / `movie`, with paging (`limit`/`offset`) and a total count. Resolves the library by name, so the assistant acts by title, not numeric id. Media items only — people lookups live in `contributors`. |
+| `playfile`    | Play one file by path (typically a `searchmedia` result's `file`). Kodi auto-selects the audio/video player. Works for any reachable path, in-library or not. |
+| `instances`   | Read or modify the server's own instance config (`get`/`set`/`remove`). Makes no Kodi call; never returns stored passwords. |
+| `rpc`         | **Escape hatch** — send a raw JSON-RPC method to Kodi and return its reply unchanged. Off by default; opt-in per instance (see below). |
 
 Transport tools (`play`/`pause`/`stop`) and `noop` return a small player-state
 snapshot — `{ "state": "playing"|"paused"|"stopped", "file", "label", "title",
@@ -181,7 +181,7 @@ Add a stdio server entry pointing at the binary:
 ```
 
 Once registered, ask your assistant things like *"what's the player doing in the
-living room?"* (`noop`), *"find Pink Floyd's Animals and play it"* (`search` →
+living room?"* (`noop`), *"find Pink Floyd's Animals and play it"* (`searchmedia` →
 `playfile`), or *"mute the bedroom"* (`mute`).
 
 ---

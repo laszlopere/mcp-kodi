@@ -60,7 +60,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         [x] 11.6.3.3 remove — refuses to delete the current default
     [ ] 11.6.4 Search tools — resolve the library by name down to playable
         leaf files; no Kodi state change (more to come)
-        [x] 11.6.4.1 search — {type: music|tv-show|movie, artist?, title?,
+        [x] 11.6.4.1 searchmedia — {type: music|tv-show|movie, artist?, title?,
             season?, number?, limit?, offset?, count?} down to leaf-file
             rows {file, <id>, label}; descends to album/season only when
             named, so wide queries are one Kodi call; always reports total;
@@ -84,11 +84,11 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             those rows carry showtitle instead of a resolved container,
             and season/number are rejected there (they narrow a show).
             tv-show now requires title OR actor OR director
-            (tests/search.test §6, unit search-{movie,tv}-person*)
+            (tests/searchmedia.test §6, unit search-{movie,tv}-person*)
         [x] 11.6.4.3 contributors — find who contributed (bands, solo
             artists, composers, actors, directors), not media:
             rows {name, in: [containers]} + total instead of leaf files;
-            the exact name IS the follow-up handle (search/11.6.4.2 take
+            the exact name IS the follow-up handle (searchmedia/11.6.4.2 take
             names, and Kodi's actor/director filters are name-only — no
             id-based filter exists), so rows carry no person ids until
             some tool can consume them; in lists where the name yields
@@ -129,6 +129,14 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             shape unchanged. (tests/contributors.test §6-7, unit
             contributors-{enumerate-all,band,composer,actor-director,
             bad-type})
+        [x] 11.6.4.5 rename search → searchmedia — the bare name read as
+            the universal entry point, so assistants looked for people/
+            band filters there and never reached contributors (observed
+            live); the name now states the domain (media items vs
+            people), and the two descriptions cross-reference each other
+            both ways. Tool surface only: internal symbols (handler_/
+            schema_search, search_music, unit case names) keep their
+            names. tests/search.test → searchmedia.test
     [x] 11.6.5 playfile — play one file via Player.Open {item:{file}}
         (KODI-API 12.10.9); any path, in-library or not; auto-selects the
         audio/video player; Kodi enriches a scanned file back to its

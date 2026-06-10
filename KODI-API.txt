@@ -383,7 +383,7 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
     [ ] 12.16.5 episodeDetails — Retrieve details about a specific tv show episode (VideoLibrary.GetEpisodeDetails)
     [ ] 12.16.6 episodes — Retrieve all tv show episodes (VideoLibrary.GetEpisodes)
         Person search at the episode level (verified live, Kodi 20.5, used by
-        the search tool §11.6.4.2):
+        the searchmedia tool §11.6.4.2):
         - actor/director are filter fields. Episode cast is the show regulars
           PLUS guest stars (a lead matches every episode: Voyager, actor
           contains "mulgrew" → 169/169), so the episode level answers both
@@ -459,7 +459,7 @@ valid; "TODO 11.x" / "TODO 13.x" point into TODO.txt.
         Rules combine: a composite {"and": [rule, rule, …]} filter is
         accepted wherever a bare rule is (verified live: title contains
         "alien" AND actor contains "weaver" → Alien); same form works on
-        GetTVShows and GetEpisodes. Used by the search tool §11.6.4.2.
+        GetTVShows and GetEpisodes. Used by the searchmedia tool §11.6.4.2.
     [ ] 12.16.13 musicVideoDetails — Retrieve details about a specific music video (VideoLibrary.GetMusicVideoDetails)
     [ ] 12.16.14 musicVideos — Retrieve all music videos (VideoLibrary.GetMusicVideos) — person filter fields: artist and director (List.Filter.Fields.MusicVideos); bridges the music-artist world into video.
     [ ] 12.16.15 recentlyAddedEpisodes — Retrieve all recently added tv episodes (VideoLibrary.GetRecentlyAddedEpisodes)
