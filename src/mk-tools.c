@@ -1169,6 +1169,17 @@ handler_instances (MkTools *self, const MkToolDef *def, JsonObject *args,
  * maps straight onto the tool's `total`/`limit`/`offset`. The one multi-call
  * case — a substring album `title` matching several albums — is collected
  * app-side and flagged `approximate`.
+ *
+ * Video queries can also name a person: optional `actor`/`director` become
+ * server-side `{field, operator: contains}` rules (KODI-API 12.16.12 /
+ * 12.16.21), and-combined with the title rule when both are given. For
+ * tv-shows the person rules go on GetEpisodes, not the show resolve: episode
+ * cast holds the regulars AND the guest stars (verified live — a lead matches
+ * every episode), and show-level director data is empty in practice, so the
+ * episode level is the one place both "show with X" and "episodes with guest
+ * X" work. A person-only tv query (no `title`) skips the show resolve and
+ * filters episodes library-wide in one call; its rows carry `showtitle` so
+ * each hit names its show.
  */
 
 #define MK_SEARCH_DEFAULT_LIMIT 50  /* default leaf cap when `limit` omitted */
@@ -1178,11 +1189,13 @@ handler_instances (MkTools *self, const MkToolDef *def, JsonObject *args,
 /* Leaf-row members forwarded from a Kodi item into a result row, when present.
  * A superset across the three types — copy_member() skips the ones a given item
  * lacks, so one list serves songs, episodes, and movies. `file` is the playfile
- * input; the per-type id (`songid`/`episodeid`/`movieid`) is the library handle. */
+ * input; the per-type id (`songid`/`episodeid`/`movieid`) is the library handle.
+ * `showtitle` appears only on the person-only tv path, where no resolved show
+ * names the container. */
 static const char *const mk_search_row_fields[] = {
   "songid", "episodeid", "movieid", "label", "title", "file",
   "track", "season", "episode", "year", "artist", "album",
-  "duration", "runtime", "firstaired", NULL
+  "duration", "runtime", "firstaired", "showtitle", NULL
 };
 
 /* Song leaf properties requested from AudioLibrary.GetSongs. The `artist`
@@ -1272,6 +1285,91 @@ ci_contains (const char *haystack, const char *needle)
   return g_strstr_len (x, -1, y) != NULL;
 }
 
+/* One field/operator/value filter rule, collected before building so several
+ * can be and-combined into a single Kodi `filter`. */
+typedef struct
+{
+  const char *field;
+  const char *op;
+  const char *value;
+} MkFilterRule;
+
+/**
+ * build_filter_rule:
+ * @b: the builder, positioned where the rule object goes.
+ * @rule: the rule to emit.
+ *
+ * Emits one `{ "field", "operator", "value" }` rule object.
+ */
+static void
+build_filter_rule (JsonBuilder *b, const MkFilterRule *rule)
+{
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "field");
+  json_builder_add_string_value (b, rule->field);
+  json_builder_set_member_name (b, "operator");
+  json_builder_add_string_value (b, rule->op);
+  json_builder_set_member_name (b, "value");
+  json_builder_add_string_value (b, rule->value);
+  json_builder_end_object (b);
+}
+
+/**
+ * add_filter_rules:
+ * @b: the builder, positioned inside a params object.
+ * @rules: the collected rules.
+ * @n: how many rules; 0 adds no filter at all.
+ *
+ * Adds the `"filter"` member: a bare `{ "field", "operator", "value" }` rule
+ * (KODI-API 12.16.12 / 12.3.6) when there is one, or the composite
+ * `{ "and": [ rule, … ] }` form when several must hold at once (verified live
+ * on GetMovies/GetTVShows/GetEpisodes).
+ */
+static void
+add_filter_rules (JsonBuilder *b, const MkFilterRule *rules, gsize n)
+{
+  if (n == 0)
+    return;
+  json_builder_set_member_name (b, "filter");
+  if (n == 1)
+    {
+      build_filter_rule (b, &rules[0]);
+      return;
+    }
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "and");
+  json_builder_begin_array (b);
+  for (gsize i = 0; i < n; i++)
+    build_filter_rule (b, &rules[i]);
+  json_builder_end_array (b);
+  json_builder_end_object (b);
+}
+
+/**
+ * append_rule:
+ * @rules: the rule array being collected.
+ * @n: rules collected so far.
+ * @field: the field name to match (e.g. "title", "actor", "director").
+ * @op: the operator ("contains" for substring, "is" for exact).
+ * @value: the value to match, or NULL/"" to skip the rule.
+ *
+ * Appends a rule when @value is non-empty — the collection step for the
+ * optional search arguments. @value is borrowed; it must outlive the array.
+ *
+ * @return the new rule count.
+ */
+static gsize
+append_rule (MkFilterRule *rules, gsize n, const char *field, const char *op,
+             const char *value)
+{
+  if (value == NULL || value[0] == '\0')
+    return n;
+  rules[n].field = field;
+  rules[n].op = op;
+  rules[n].value = value;
+  return n + 1;
+}
+
 /**
  * add_field_filter:
  * @b: the builder, positioned inside a params object.
@@ -1279,21 +1377,15 @@ ci_contains (const char *haystack, const char *needle)
  * @op: the operator ("contains" for substring, "is" for exact).
  * @value: the value to match (always a string, even for numeric fields).
  *
- * Adds a `"filter": { "field", "operator", "value" }` rule (KODI-API 12.16.12 / 12.3.6).
+ * Adds a single-rule `"filter": { "field", "operator", "value" }` (KODI-API
+ * 12.16.12 / 12.3.6).
  */
 static void
 add_field_filter (JsonBuilder *b, const char *field, const char *op,
                   const char *value)
 {
-  json_builder_set_member_name (b, "filter");
-  json_builder_begin_object (b);
-  json_builder_set_member_name (b, "field");
-  json_builder_add_string_value (b, field);
-  json_builder_set_member_name (b, "operator");
-  json_builder_add_string_value (b, op);
-  json_builder_set_member_name (b, "value");
-  json_builder_add_string_value (b, value);
-  json_builder_end_object (b);
+  MkFilterRule rule = { field, op, value };
+  add_filter_rules (b, &rule, 1);
 }
 
 /**
@@ -1753,6 +1845,8 @@ query_songs (MkTools *self, const char *instance, const char *idkey, gint64 id,
  * @self: the tool table.
  * @instance: target instance, or NULL for the default.
  * @title: movie-title substring, or NULL/"" for all movies.
+ * @actor: cast-member name substring, or NULL/"" for no person filter.
+ * @director: director name substring, or NULL/"" for no person filter.
  * @limit: max rows.
  * @offset: rows to skip.
  * @count: count-only request.
@@ -1760,21 +1854,28 @@ query_songs (MkTools *self, const char *instance, const char *idkey, gint64 id,
  *
  * Resolves the movie type directly: `VideoLibrary.GetMovies` returns the
  * playable `file` with no sublevels, so this is one paged call (KODI-API 12.16.12).
+ * Title and person rules are and-combined server-side.
  *
  * @return the search-result node, or NULL with @error set.
  */
 static JsonNode *
 search_movie (MkTools *self, const char *instance, const char *title,
-              gint64 limit, gint64 offset, gboolean count, GError **error)
+              const char *actor, const char *director, gint64 limit,
+              gint64 offset, gboolean count, GError **error)
 {
   static const char *const props[] = { "title",   "year",      "genre",
                                        "rating",  "runtime",   "playcount",
                                        "file",    NULL };
 
+  MkFilterRule rules[3];
+  gsize nrules = 0;
+  nrules = append_rule (rules, nrules, "title", "contains", title);
+  nrules = append_rule (rules, nrules, "actor", "contains", actor);
+  nrules = append_rule (rules, nrules, "director", "contains", director);
+
   g_autoptr (JsonBuilder) pb = json_builder_new ();
   json_builder_begin_object (pb);
-  if (title != NULL && title[0] != '\0')
-    add_field_filter (pb, "title", "contains", title);
+  add_filter_rules (pb, rules, nrules);
   add_properties (pb, props);
   add_sort (pb, "title");
   add_page_limits (pb, offset, limit, count);
@@ -1796,7 +1897,9 @@ search_movie (MkTools *self, const char *instance, const char *title,
  * search_tv:
  * @self: the tool table.
  * @instance: target instance, or NULL for the default.
- * @title: show-name substring (required).
+ * @title: show-name substring, or NULL/"" for a person-only query.
+ * @actor: cast-member name substring, or NULL/"" for no person filter.
+ * @director: episode-director name substring, or NULL/"" for no person filter.
  * @have_season: whether @season was given.
  * @season: season number to narrow to.
  * @have_number: whether @number was given.
@@ -1809,54 +1912,89 @@ search_movie (MkTools *self, const char *instance, const char *title,
  * Resolves the show (`GetTVShows`) then drills to episode leaves
  * (`GetEpisodes {tvshowid, season?}` plus an exact `episode` filter when a
  * number is given — its value is a string, KODI-API 12.16.21 / 12.16.6). One paged call
- * past the resolve.
+ * past the resolve. The person rules ride the same GetEpisodes call —
+ * episode cast covers regulars and guest stars alike, and per-episode
+ * directors are the only populated director data. Without a @title the
+ * resolve is skipped entirely and one library-wide GetEpisodes call filters
+ * by person, sorted by show; those rows carry `showtitle` instead of a
+ * `resolved` container, and @season/@number make no sense show-less, so they
+ * are rejected.
  *
- * @return the search-result node, or NULL with @error set (missing title or a
- *         call failure); an unresolved show yields a clean zero-total result.
+ * @return the search-result node, or NULL with @error set (no title/actor/
+ *         director, season/number without title, or a call failure); an
+ *         unresolved show yields a clean zero-total result.
  */
 static JsonNode *
 search_tv (MkTools *self, const char *instance, const char *title,
-           gboolean have_season, gint64 season, gboolean have_number,
-           gint64 number, gint64 limit, gint64 offset, gboolean count,
-           GError **error)
+           const char *actor, const char *director, gboolean have_season,
+           gint64 season, gboolean have_number, gint64 number, gint64 limit,
+           gint64 offset, gboolean count, GError **error)
 {
   static const char *const props[] = { "title",      "season",  "episode",
                                        "file",       "firstaired",
                                        "runtime",    NULL };
+  /* The library-wide person path adds `showtitle` — there is no resolved
+   * show to name the container. */
+  static const char *const gprops[] = { "title",      "season",  "episode",
+                                        "file",       "firstaired",
+                                        "runtime",    "showtitle", NULL };
 
-  if (title == NULL || title[0] == '\0')
+  gboolean have_title = (title != NULL && title[0] != '\0');
+  gboolean have_person = (actor != NULL && actor[0] != '\0')
+                         || (director != NULL && director[0] != '\0');
+
+  if (!have_title && !have_person)
     {
       g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                   "search tv-show: \"title\" (show name) is required");
+                   "search tv-show: \"title\" (show name), \"actor\" or "
+                   "\"director\" is required");
+      return NULL;
+    }
+  if (!have_title && (have_season || have_number))
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "search tv-show: \"season\"/\"number\" need a show — "
+                   "give \"title\" too");
       return NULL;
     }
 
   gint64 showid = 0;
   g_autofree char *show = NULL;
-  int r = resolve_container (self, instance, "VideoLibrary.GetTVShows", "title",
-                             title, "tvshows", "tvshowid", &showid, &show, error);
-  if (r < 0)
-    return NULL;
-  if (r == 0)
-    return build_search_result ("tv-show", NULL, NULL, NULL, 0, FALSE, 0, offset,
-                                FALSE, NULL, count);
+  if (have_title)
+    {
+      int r = resolve_container (self, instance, "VideoLibrary.GetTVShows",
+                                 "title", title, "tvshows", "tvshowid", &showid,
+                                 &show, error);
+      if (r < 0)
+        return NULL;
+      if (r == 0)
+        return build_search_result ("tv-show", NULL, NULL, NULL, 0, FALSE, 0,
+                                    offset, FALSE, NULL, count);
+    }
+
+  g_autofree char *ns =
+    have_number ? g_strdup_printf ("%" G_GINT64_FORMAT, number) : NULL;
+  MkFilterRule rules[3];
+  gsize nrules = 0;
+  nrules = append_rule (rules, nrules, "episode", "is", ns);
+  nrules = append_rule (rules, nrules, "actor", "contains", actor);
+  nrules = append_rule (rules, nrules, "director", "contains", director);
 
   g_autoptr (JsonBuilder) pb = json_builder_new ();
   json_builder_begin_object (pb);
-  json_builder_set_member_name (pb, "tvshowid");
-  json_builder_add_int_value (pb, showid);
+  if (have_title)
+    {
+      json_builder_set_member_name (pb, "tvshowid");
+      json_builder_add_int_value (pb, showid);
+    }
   if (have_season)
     {
       json_builder_set_member_name (pb, "season");
       json_builder_add_int_value (pb, season);
     }
-  if (have_number)
-    {
-      g_autofree char *ns = g_strdup_printf ("%" G_GINT64_FORMAT, number);
-      add_field_filter (pb, "episode", "is", ns);
-    }
-  add_properties (pb, props);
-  add_sort (pb, "episode");
+  add_filter_rules (pb, rules, nrules);
+  add_properties (pb, have_title ? props : gprops);
+  add_sort (pb, have_title ? "episode" : "tvshowtitle");
   add_page_limits (pb, offset, limit, count);
   json_builder_end_object (pb);
   g_autoptr (JsonNode) params = json_builder_get_root (pb);
@@ -1869,8 +2007,8 @@ search_tv (MkTools *self, const char *instance, const char *title,
 
   gint64 total = list_total (result);
   g_autoptr (GPtrArray) rows = count ? NULL : collect_items (result, "episodes");
-  return build_search_result ("tv-show", "show", show, "tvshowid", showid, TRUE,
-                              total, offset, FALSE, rows, count);
+  return build_search_result ("tv-show", "show", show, "tvshowid", showid,
+                              have_title, total, offset, FALSE, rows, count);
 }
 
 /**
@@ -2031,10 +2169,19 @@ schema_search (MkTools *self)
   prop_typed (b, "artist", "string",
               "Music only: performer name (substring, case-insensitive). "
               "Resolves the artist; required for music.");
+  prop_typed (b, "actor", "string",
+              "movie/tv-show only: cast-member name (substring, "
+              "case-insensitive). For tv-show it matches episode cast, which "
+              "includes guest stars; combinable with title.");
+  prop_typed (b, "director", "string",
+              "movie/tv-show only: director name (substring, "
+              "case-insensitive). For tv-show it matches per-episode "
+              "directors; combinable with title.");
   prop_typed (b, "title", "string",
               "Container/title to match (substring, case-insensitive): album "
-              "for music, show for tv-show, the movie title for movie. Required "
-              "for tv-show.");
+              "for music, show for tv-show, the movie title for movie. "
+              "tv-show needs title, actor or director; without title the "
+              "person is matched library-wide and rows carry showtitle.");
   prop_typed (b, "season", "integer",
               "tv-show only: season number to narrow the episodes.");
   prop_typed (b, "number", "integer",
@@ -2083,6 +2230,8 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
 
   const char *title = arg_str (args, "title", NULL);
   const char *artist = arg_str (args, "artist", NULL);
+  const char *actor = arg_str (args, "actor", NULL);
+  const char *director = arg_str (args, "director", NULL);
   gint64 season = 0, number = 0, v = 0;
   gboolean have_season = arg_int (args, "season", &season);
   gboolean have_number = arg_int (args, "number", &number);
@@ -2098,10 +2247,11 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
   gboolean count = arg_bool (args, "count");
 
   if (g_str_equal (type, "movie"))
-    return search_movie (self, instance, title, limit, offset, count, error);
+    return search_movie (self, instance, title, actor, director, limit, offset,
+                         count, error);
   if (g_str_equal (type, "tv-show"))
-    return search_tv (self, instance, title, have_season, season, have_number,
-                      number, limit, offset, count, error);
+    return search_tv (self, instance, title, actor, director, have_season,
+                      season, have_number, number, limit, offset, count, error);
   if (g_str_equal (type, "music"))
     return search_music (self, instance, artist, title, have_number, number,
                          limit, offset, count, error);
@@ -3936,8 +4086,11 @@ static const MkToolDef mk_tool_defs[] = {
    *   - music:   GetArtists(artist) → GetSongs {artistid} directly, or
    *              → GetAlbums(+title) → GetSongs {albumid} when an album is named.
    *   - tv-show: GetTVShows(title) → GetEpisodes {tvshowid, season?} (+ episode
-   *              number filter).
-   *   - movie:   GetMovies(title) → file directly (no sublevels).
+   *              number / actor / director filters, and-combined); a
+   *              person-only query (no title) skips the resolve and filters
+   *              GetEpisodes library-wide, rows carrying `showtitle`.
+   *   - movie:   GetMovies(title/actor/director, and-combined) → file directly
+   *              (no sublevels).
    *
    * Always reports `total` (Kodi's full match count); `count: true` returns it
    * with zero rows. `limit`/`offset` page the leaves; the default cap (50)
@@ -3947,8 +4100,13 @@ static const MkToolDef mk_tool_defs[] = {
    *
    * @param type (required): "music" | "tv-show" | "movie".
    * @param artist: music performer (substring); required for music.
-   * @param title: album/show/movie name (substring); required for tv-show.
-   * @param season|number: narrow tv episodes / pin a track or episode.
+   * @param actor|director: movie/tv-show person filter (substring; KODI-API
+   *        12.16.12 / 12.16.21). tv-show matches episode-level cast (guests
+   *        included) / per-episode directors.
+   * @param title: album/show/movie name (substring); tv-show needs at least
+   *        one of title/actor/director.
+   * @param season|number: narrow tv episodes / pin a track or episode (tv
+   *        needs `title` for these).
    * @param limit|offset|count: paging and count-only controls.
    * @param instance (optional): the Kodi instance whose library to search; omitted
    *        uses the configured default.
@@ -3957,7 +4115,8 @@ static const MkToolDef mk_tool_defs[] = {
    *         "title", … } ] }`. Each row's `file` is the `playfile` input.
    */
   { "search", "Find playable files by name: music/tv-show/movie, drilled to "
-              "leaf files with paging (limit/offset) and a total count.",
+              "leaf files with paging (limit/offset) and a total count. "
+              "Movie and tv-show queries can also filter by actor/director.",
     schema_search, handler_search, NULL },
 
   /**
