@@ -1,0 +1,21 @@
+# Keep the host's autotools output out of the container build context so the
+# in-container ./autogen.sh && ./configure starts from a clean tree.
+.git
+autom4te.cache
+build
+build-aux
+m4
+libtool
+config.h
+config.h.in~
+config.log
+config.status
+configure~
+stamp-h1
+compile_commands.json
+**/*.o
+**/*.lo
+**/*.la
+**/.deps
+**/.libs
+src/mcp-kodi

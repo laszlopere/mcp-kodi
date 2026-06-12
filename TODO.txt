@@ -479,3 +479,39 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
 
 [ ] 11.25 Subtitle / audio-track selection for video playback —
     common living-room request, rpc-only today.
+
+[x] 11.26 Glama listing — Dockerfile so the directory health-check passes.
+    Done 2026-06-12. Root-caused the real blocker: the server exited 1 with no
+    config AND no env, but it must boot first so the assistant can register the
+    MCP endpoint before config.json exists. Fixed mk_config_load() to return a
+    valid empty config instead of MK_CONFIG_ERROR_NOT_CONFIGURED; tool *calls*
+    now fail gracefully with no_instance until an instance is configured. So
+    the dummy KODI_HOST/KODI_AUTH hack is gone — the container boots bare.
+    Added: multi-stage Dockerfile (debian:trixie-slim, glib 2.80+) building
+    from source via autogen/configure/make, CMD /app/src/mcp-kodi; glama.json
+    (ownership) + .dockerignore. Verified: bare boot (no config, no env) serves
+    tools/list (16 tools) and a tool call returns a shaped no_instance error;
+    401 unit checks pass. Image build itself untested here (no container
+    runtime on this box) — build it before submitting to confirm trixie
+    runtime package names resolve.
+    Blocks the awesome-mcp-servers PR (punkpeye/awesome-mcp-servers#7921):
+    Glama requires each listed server to start and answer MCP introspection
+    inside a container, then a score badge is added to the PR. The catch:
+    with no config.json AND no env, the server exits 1 ("no Kodi
+    configuration: create .../config.json or set KODI_HOST (and KODI_AUTH)")
+    — so a bare container fails the check before it can introspect. Verified
+    2026-06-12: setting dummy KODI_HOST=127.0.0.1:8080 + KODI_AUTH=kodi:kodi
+    makes it boot, register 16 tools, and answer tools/list with no live
+    Kodi. So the Dockerfile must:
+      - build from source via autotools — Build-Depends (debian/control):
+        build-essential, autoconf, automake, libtool, pkgconf,
+        libglib2.0-dev (>=2.80), libjson-glib-dev (>=1.6),
+        libsoup-3.0-dev (>=3.0); run ./autogen.sh && ./configure && make
+      - ENV KODI_HOST=127.0.0.1:8080 KODI_AUTH=kodi:kodi (dummy, just so it
+        boots; Glama only needs start + introspection, never a real box)
+      - CMD ["/app/src/mcp-kodi"]
+    Also add glama.json at repo root: {"$schema":
+    "https://glama.ai/mcp/schemas/server.json","maintainers":["laszlopere"]}
+    to claim ownership. Skipped for now (2026-06-12) — bytesmith + tmux are
+    PyPI/uvx and pass the check as-is, so they go in the PR first; revisit
+    kodi's Dockerfile to add it back.
