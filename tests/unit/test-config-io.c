@@ -97,7 +97,7 @@ case_save_load_roundtrip (void)
 }
 
 static void
-case_load_missing_not_configured (void)
+case_load_missing_is_empty (void)
 {
   clear_kodi_env ();
 
@@ -108,11 +108,15 @@ case_load_missing_not_configured (void)
   g_autofree char *path = g_build_filename (dir, "config.json", NULL);
   MK_CHECK (!g_file_test (path, G_FILE_TEST_EXISTS));
 
+  /* No file and no env is not an error: the server must still boot so the
+   * assistant can register the MCP endpoint before any config.json exists.
+   * load() returns a valid empty config with no default instance. */
   g_autoptr (MkConfig) got = mk_config_load (path, &err);
-  MK_CHECK (got == NULL);
-  MK_CHECK (err != NULL);
-  MK_CHECK (g_error_matches (err, MK_CONFIG_ERROR,
-                             MK_CONFIG_ERROR_NOT_CONFIGURED));
+  MK_CHECK (got != NULL);
+  MK_CHECK (err == NULL);
+  MK_CHECK (mk_config_instance_count (got) == 0);
+  MK_CHECK (mk_config_get_default (got) == NULL);
+  MK_CHECK (mk_config_get_instance (got, NULL) == NULL);
 
   cleanup (NULL, dir);
 }
@@ -228,7 +232,7 @@ main (int argc, char **argv)
 {
   static const MkTestCase cases[] = {
     { "save-load-roundtrip",            case_save_load_roundtrip },
-    { "load-missing-not-configured",    case_load_missing_not_configured },
+    { "load-missing-is-empty",          case_load_missing_is_empty },
     { "load-invalid-json",              case_load_invalid_json },
     { "env-overrides-no-file",          case_env_overrides_no_file },
     { "env-overrides-default-instance", case_env_overrides_default_instance },

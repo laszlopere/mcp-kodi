@@ -70,9 +70,11 @@ main (int argc, char **argv)
       return 1;
     }
 
+  const char *default_name = mk_config_get_default (cfg);
   g_printerr ("%s %s — config loaded: %u instance(s), default=%s\n",
               PACKAGE_NAME, PACKAGE_VERSION,
-              mk_config_instance_count (cfg), mk_config_get_default (cfg));
+              mk_config_instance_count (cfg),
+              default_name ? default_name : "(none yet)");
 
   g_autoptr (MkKodi) kodi = mk_kodi_new (cfg);
   g_autoptr (MkTools) tools = mk_tools_new (cfg, kodi);

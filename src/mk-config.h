@@ -59,7 +59,7 @@ GQuark mk_config_error_quark (void);
 
 typedef enum
 {
-  MK_CONFIG_ERROR_NOT_CONFIGURED, /* no config file and no env → nothing to use */
+  MK_CONFIG_ERROR_NOT_CONFIGURED, /* reserved; load() no longer fails on this */
   MK_CONFIG_ERROR_PARSE,          /* file is not valid JSON */
   MK_CONFIG_ERROR_INVALID,        /* JSON is valid but structurally wrong */
   MK_CONFIG_ERROR_IO,             /* read/write/rename failure */
@@ -77,8 +77,9 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (MkConfig, mk_config_free)
  * apply KODI_HOST/KODI_AUTH/KODI_SCHEME and -k in KODI_CURL_OPTS. KODI_HOST
  * supersedes the configured boxes with a single synthetic MK_CONFIG_ENV_INSTANCE
  * target; KODI_AUTH/KODI_SCHEME alone tweak the default instance in place. With
- * no file and no env this fails with NOT_CONFIGURED. Returns a new MkConfig or
- * NULL with ERROR set. */
+ * no file and no env this still succeeds with an empty config so the server can
+ * start. Returns a new MkConfig, or NULL with ERROR set on a real failure (bad
+ * JSON, I/O, or a structurally invalid file). */
 MkConfig *mk_config_load (const char *path, GError **error);
 
 /* Write the effective config to PATH (NULL → default) atomically: dir created

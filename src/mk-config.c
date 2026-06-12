@@ -495,8 +495,9 @@ apply_env_overrides (MkConfig *self)
  * Loads configuration: reads @path if it exists, then applies environment
  * overrides to the default instance. Resolves the default instance name,
  * choosing the sole instance when exactly one is configured and none was named.
- * Fails with MK_CONFIG_ERROR_NOT_CONFIGURED when neither a file nor environment
- * provides any instance.
+ * When neither a file nor environment provides any instance, succeeds with a
+ * valid empty config so the server still starts (tool calls then fail with
+ * MK_KODI_ERROR_NO_INSTANCE until an instance is configured).
  *
  * @return a newly allocated MkConfig (free with mk_config_free()), or NULL with
  *         @error set.
@@ -513,13 +514,13 @@ mk_config_load (const char *path, GError **error)
 
   apply_env_overrides (self);
 
+  /* No instances configured (no file and no env) is not an error: the server
+   * must still boot and serve tools/list so the assistant can register the MCP
+   * endpoint before any config.json exists. Return a valid empty config; tool
+   * *calls* then fail gracefully with MK_KODI_ERROR_NO_INSTANCE until an
+   * instance is configured. */
   if (g_hash_table_size (self->instances) == 0)
-    {
-      g_set_error (error, MK_CONFIG_ERROR, MK_CONFIG_ERROR_NOT_CONFIGURED,
-                   "no Kodi configuration: create %s or set KODI_HOST"
-                   " (and KODI_AUTH) in the environment", resolved);
-      return NULL;
-    }
+    return g_steal_pointer (&self);
 
   /* Ensure default names an existing instance. */
   if (self->default_name == NULL)
