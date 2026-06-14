@@ -4658,6 +4658,53 @@ static const MkToolDef mk_tool_defs[] = {
     schema_instance_only, handler_stop, "stop", out_schema_snapshot },
 
   /**
+   * skipnext (Button):
+   *
+   * Press Skip Next on the Kodi remote — advance the active player to the next
+   * item in its playlist (or the next chapter). A remote keypress, not a player
+   * command: no playerid and no active-player resolution. With nothing loaded
+   * the action is a no-op.
+   *
+   * Call:  Input.ExecuteAction { "action": "skipnext" }, then player_state() to
+   *        report the effect.
+   * @param instance (optional): name of the Kodi instance to target; omitted
+   *        uses the configured default.
+   * @return the resulting player-state snapshot (player_state()). With nothing
+   *         loaded the action is a no-op and the reply is `{ "state": "stopped" }`.
+   */
+  { "skipnext", "Press Skip Next (Next track / chapter) on the Kodi remote: "
+                "advance the active player to the next item in its playlist "
+                "(or next chapter). A remote keypress, not a player command; "
+                "with nothing loaded it is a no-op. Returns the player-state "
+                "snapshot { \"state\", \"media\", \"id\", \"title\", "
+                "\"artist\", \"time\", \"totaltime\", … }.",
+    schema_instance_only, handler_button, "skipnext", out_schema_snapshot },
+
+  /**
+   * skipprevious (Button):
+   *
+   * Press Skip Previous on the Kodi remote — go to the previous item in the
+   * playlist, or restart the current item (matching Kodi's own button). A remote
+   * keypress, not a player command: no playerid and no active-player resolution.
+   * With nothing loaded the action is a no-op.
+   *
+   * Call:  Input.ExecuteAction { "action": "skipprevious" }, then player_state()
+   *        to report the effect.
+   * @param instance (optional): name of the Kodi instance to target; omitted
+   *        uses the configured default.
+   * @return the resulting player-state snapshot (player_state()). With nothing
+   *         loaded the action is a no-op and the reply is `{ "state": "stopped" }`.
+   */
+  { "skipprevious", "Press Skip Previous (Previous track / chapter) on the Kodi "
+                    "remote: go to the previous item in the playlist (or "
+                    "restart the current item, matching Kodi's own button). A "
+                    "remote keypress, not a player command; with nothing loaded "
+                    "it is a no-op. Returns the player-state snapshot "
+                    "{ \"state\", \"media\", \"id\", \"title\", \"artist\", "
+                    "\"time\", \"totaltime\", … }.",
+    schema_instance_only, handler_button, "skipprevious", out_schema_snapshot },
+
+  /**
    * mute (Button):
    *
    * Mute the target instance's audio output. Not a remote keypress: sets the

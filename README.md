@@ -45,6 +45,8 @@ boxes when `instance` is omitted).
 | `play`     | Press **Play** on the remote — resume or begin playback on the target box. |
 | `pause`    | Press **Pause** — pause the active player. |
 | `stop`     | Press **Stop** — stop the active player **and clear the playlist it was consuming**, so no queued items linger. |
+| `skipnext` | Press **Skip Next** — advance to the next track/chapter in the active playlist. |
+| `skipprevious` | Press **Skip Previous** — go to the previous track/chapter (or restart the current item). |
 | `volume`   | Adjust the volume by a **relative** signed step (percentage points); step `0`/omitted just reads. Never an absolute level, so the assistant can't blast or silence the box by guessing. Returns volume, mute state, and the `0`–`100` bounds. |
 | `mute`     | Mute the box's audio output. |
 | `unmute`   | Unmute the box's audio output. |

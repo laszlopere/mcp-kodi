@@ -45,6 +45,11 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         [x] 11.6.1.5 unmute — Application.SetMute {mute:false}
         [x] 11.6.1.6 noop — fires no action, returns the player_state()
             snapshot only; a reachability + state probe
+        [x] 11.6.1.7 skipnext — Input.ExecuteAction {action:"skipnext"};
+            advance to the next playlist item / chapter (see 11.18)
+        [x] 11.6.1.8 skipprevious — Input.ExecuteAction
+            {action:"skipprevious"}; previous item, or restart the current
+            one to match Kodi's button (see 11.18)
     [x] 11.6.2 Knobs — adjust a scalar
         [x] 11.6.2.1 volume — relative only, signed step; 0 = read-only
             probe; resolves the step against the live level, writes a
@@ -447,8 +452,16 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     internal symbols (handler_noop, noop_snapshot, the noop-routes-through-
     stub unit case) keep theirs.
 
-[ ] 11.18 skipnext / skipprevious Buttons — "skip this song"; reuse
+[x] 11.18 skipnext / skipprevious Buttons — "skip this song"; reuse
     handler_button via Input.ExecuteAction, cheapest missing remote keys.
+    Done as two data-driven Button rows in mk_tool_defs[] reusing
+    handler_button / schema_instance_only / out_schema_snapshot unchanged —
+    Input.ExecuteAction { "action": "skipnext" | "skipprevious" }, then the
+    player-state snapshot (mirrors play/pause). No new handler code; the tool
+    table is iterated dynamically so no count needed updating. Unit tests
+    (button-skipnext / button-skipprevious) assert the keypress fired AND
+    carried the right action via params_carry(). README transport table +
+    descriptions/outputSchema follow the existing button pattern.
 
 [ ] 11.19 Song search by title — searchmedia music resolves only
     artist→songs / album→songs; "play Hey Jude" without artist context is

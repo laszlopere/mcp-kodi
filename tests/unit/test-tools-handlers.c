@@ -2012,6 +2012,84 @@ case_button_play (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* skipnext fires Input.ExecuteAction carrying the "skipnext" action, then reads
+ * back the post-action snapshot — same shape as play, distinguished only by the
+ * action payload. */
+static void
+case_button_skipnext (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Input.ExecuteAction", "\"OK\"");
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 0, \"type\": \"audio\" } ]");
+  stub_kodi_set_response ("Player.GetProperties", "{ \"speed\": 1 }");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"Next Song\", \"file\": \"/s/b.flac\","
+    "  \"type\": \"song\", \"id\": 6 } }");
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "skipnext", NULL, &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    MK_CHECK_STR_EQ (
+      json_object_get_string_member (json_node_get_object (payload), "state"),
+      "playing");
+
+  /* the keypress fired, and it carried the right action. */
+  MK_CHECK (called ("Input.ExecuteAction"));
+  MK_CHECK (params_carry ("Input.ExecuteAction", "skipnext"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* skipprevious is the mirror of skipnext: the same handler with the
+ * "skipprevious" action payload. */
+static void
+case_button_skipprevious (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Input.ExecuteAction", "\"OK\"");
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 0, \"type\": \"audio\" } ]");
+  stub_kodi_set_response ("Player.GetProperties", "{ \"speed\": 1 }");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"Prev Song\", \"file\": \"/s/a.flac\","
+    "  \"type\": \"song\", \"id\": 5 } }");
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "skipprevious", NULL, &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    MK_CHECK_STR_EQ (
+      json_object_get_string_member (json_node_get_object (payload), "state"),
+      "playing");
+
+  MK_CHECK (called ("Input.ExecuteAction"));
+  MK_CHECK (params_carry ("Input.ExecuteAction", "skipprevious"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
 /* ---- stop: the keypress plus the automatic playlist clear ------------------ */
 
 /* Stop on an active player resolves the consumed playlist BEFORE the keypress
@@ -2520,6 +2598,8 @@ main (int argc, char **argv)
     { "dropplaylists",           case_dropplaylists },
     { "dropplaylists-fails",     case_dropplaylists_clear_fails },
     { "button-play",             case_button_play },
+    { "button-skipnext",         case_button_skipnext },
+    { "button-skipprevious",     case_button_skipprevious },
     { "stop-clears-playlist",    case_stop_clears_playlist },
     { "stop-nothing-playing",    case_stop_nothing_playing },
     { "mute",                    case_mute },
