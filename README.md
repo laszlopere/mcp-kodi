@@ -56,7 +56,7 @@ boxes when `instance` is omitted).
 
 | Tool           | What it does |
 |----------------|--------------|
-| `searchmedia`  | Find playable **leaf files** by name across `music` / `tv-show` / `movie`, with paging (`limit`/`offset`) and a total count. Music `title` matches the **album** — songs cannot be searched by their own name. Movie/tv-show queries can also filter by `actor`/`director`. Resolves the library by name, so the assistant acts by title, not numeric id. Media items only — people lookups live in `contributors`. |
+| `searchmedia`  | Find playable **leaf files** by name across `music` / `tv-show` / `movie`, with paging (`limit`/`offset`) and a total count. Music `title` matches the **album**; the `song` arg matches a track by its **own title** library-wide (*"play Hey Jude"* needs no artist), narrowable by `artist`/`title`/`number`. Movie/tv-show queries can also filter by `actor`/`director`. Resolves the library by name, so the assistant acts by title, not numeric id. Media items only — people lookups live in `contributors`. |
 | `contributors` | Find or list **people** — bands, solo artists, composers, actors, directors — by optional name substring and/or `type`. Each row says where the name yields hits (`albums`/`songs`/`movies`/`tvshows`); feed the exact name back into `searchmedia` to drill. |
 
 **Playback & queue**

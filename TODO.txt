@@ -87,9 +87,10 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             [x] 11.6.4.1.4 songs by partial album title — title is the ALBUM
                 name (AudioLibrary.GetAlbums contains → that album's songs);
                 an album substring spanning several albums sums their songs
-            [ ] 11.6.4.1.5 songs by partial song title — gap: music resolves
-                artist/album only, a song's own title is never filtered;
-                tracked as 11.19
+            [x] 11.6.4.1.5 songs by partial song title — the `song` arg:
+                AudioLibrary.GetSongs with a server-side {title contains} rule,
+                library-wide, narrowable by artist/album/track; no resolved
+                container (§11.19)
         [x] 11.6.4.2 search by person — movie/tv-show queries can name a
             person: optional actor? and director? args become server-side
             {field, operator: contains} rules, and-combined with title?
@@ -480,10 +481,20 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     carried the right action via params_carry(). README transport table +
     descriptions/outputSchema follow the existing button pattern.
 
-[ ] 11.19 Song search by title — searchmedia music resolves only
+[x] 11.19 Song search by title — searchmedia music resolves only
     artist→songs / album→songs; "play Hey Jude" without artist context is
     unresolvable. AudioLibrary.GetSongs takes a server-side title filter;
     add a song/track arg.
+    Done: new `song` arg on searchmedia music. When given it takes a distinct
+    path (query_songs_by_rules) — one AudioLibrary.GetSongs call with an
+    and-combined {title, artist?, album?, tracknumber?} field filter (all
+    valid List.Filter.Fields.Songs), library-wide, server-side paged, sorted
+    by title; no GetArtists/GetAlbums resolve, so rows carry no `resolved`
+    container. artist/title(album)/number narrow rather than resolve. Music
+    now needs artist OR title OR song. Song props omit `artist` so the title
+    filter dodges the GetSongs sort-with-artist slowdown. Unit:
+    search-music-song-only / search-music-song-artist; functional: music/song
+    + music/song+artist in searchmedia.test. Closes 11.6.4.1.5.
 
 [ ] 11.20 seek — no "skip ahead 5 min" / "restart" / "go to 1:12:00".
     Relative signed step like volume, plus an absolute `to` (snapshot

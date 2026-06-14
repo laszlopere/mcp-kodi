@@ -135,7 +135,7 @@ echo "   (player state: $(g "$nbody" '.state'))"
 # 2. Discover real library entities to assert against.
 # ===========================================================================
 song=$(kodi_rpc AudioLibrary.GetSongs \
-         '{"properties":["artist","album","track"],"limits":{"start":0,"end":1}}' \
+         '{"properties":["title","artist","album","track"],"limits":{"start":0,"end":1}}' \
         | jq -c '.result.songs[0] // empty')
 episode=$(kodi_rpc VideoLibrary.GetEpisodes \
          '{"properties":["showtitle","season","episode"],"limits":{"start":0,"end":1}}' \
@@ -144,11 +144,12 @@ movie=$(kodi_rpc VideoLibrary.GetMovies \
          '{"limits":{"start":0,"end":1}}' \
         | jq -r '.result.movies[0].label // empty')
 
-artist=""; album=""; track=""
+artist=""; album=""; track=""; songtitle=""
 if [ -n "$song" ]; then
   artist=$(g "$song" '.artist[0] // ""')
   album=$(g  "$song" '.album // ""')
   track=$(g  "$song" '.track // 0')
+  songtitle=$(g "$song" '.title // ""')
 fi
 show=""; season=""; epnum=""
 if [ -n "$episode" ]; then
@@ -214,6 +215,27 @@ if [ -n "$artist" ]; then
     if [ "$(j "$b" '.returned > 0')" = true ]; then
       eq  "music/track returns only track $track" true \
           "$(jx "$b" --argjson n "$track" 'all(.rows[]; .track == $n)')"
+    fi
+  fi
+
+  # Song title alone (no artist/album) finds the track by its own name (§11.19):
+  # library-wide, server-side, no resolved container.
+  if [ -n "$songtitle" ]; then
+    b=$(res_body "$(searchmedia "$(jargs --arg s "$songtitle" \
+                              '{type:"music",song:$s,limit:50}')")")
+    check_invariants "$b" music 0 "music/song"
+    is_true "music/song finds the song"        "$(j "$b" '.total >= 1')"
+    is_true "music/song has no resolved field"  "$(j "$b" 'has("resolved") | not')"
+    if [ "$(j "$b" '.returned > 0')" = true ]; then
+      is_true "music/song row carries a songid" "$(j "$b" '(.rows[0].songid // 0) > 0')"
+    fi
+
+    # Narrowing the song search by artist still matches.
+    if [ -n "$artist" ]; then
+      b=$(res_body "$(searchmedia "$(jargs --arg s "$songtitle" --arg a "$artist" \
+                                '{type:"music",song:$s,artist:$a,limit:50}')")")
+      check_invariants "$b" music 0 "music/song+artist"
+      is_true "music/song+artist still finds it" "$(j "$b" '.total >= 1')"
     fi
   fi
 else

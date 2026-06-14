@@ -301,8 +301,102 @@ case_search_music_album_only (void)
   free_tools (tools, cfg, kodi);
 }
 
-/* music with neither artist nor title: a clean tool error naming both anchor
- * fields, before any Kodi call. */
+/* music + song only (§11.19): the song's own title anchors the search — one
+ * GetSongs call with a server-side `title contains` rule, library-wide; no
+ * container resolve (no GetArtists/GetAlbums), and no `resolved` in the
+ * envelope. */
+static void
+case_search_music_song_only (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "AudioLibrary.GetSongs",
+    "{ \"songs\": ["
+    "    { \"songid\": 42, \"label\": \"Hey Jude\", \"title\": \"Hey Jude\","
+    "      \"track\": 1, \"album\": \"1\", \"file\": \"/s/heyjude.flac\" } ],"
+    "  \"limits\": { \"total\": 1 } }");
+
+  g_autoptr (JsonNode) an =
+    args_node ("{ \"type\": \"music\", \"song\": \"hey jude\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  MK_CHECK (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload));
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_STR_EQ (json_object_get_string_member (p, "type"), "music");
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 1);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "returned"), 1);
+      /* the song path resolves no container, so `resolved` is absent. */
+      MK_CHECK (!json_object_has_member (p, "resolved"));
+    }
+
+  /* One GetSongs carrying the title rule; neither container resolve fires. */
+  MK_CHECK (params_carry ("AudioLibrary.GetSongs",
+                          "{\"field\":\"title\",\"operator\":\"contains\","
+                          "\"value\":\"hey jude\"}"));
+  MK_CHECK (!called ("AudioLibrary.GetArtists"));
+  MK_CHECK (!called ("AudioLibrary.GetAlbums"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* music + song + artist: still ONE GetSongs call, the song-title and artist
+ * rules and-combined into a composite filter — no GetArtists resolve. */
+static void
+case_search_music_song_artist (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "AudioLibrary.GetSongs",
+    "{ \"songs\": ["
+    "    { \"songid\": 42, \"label\": \"Hey Jude\", \"title\": \"Hey Jude\","
+    "      \"track\": 1, \"album\": \"1\", \"file\": \"/s/heyjude.flac\" } ],"
+    "  \"limits\": { \"total\": 1 } }");
+
+  g_autoptr (JsonNode) an = args_node (
+    "{ \"type\": \"music\", \"song\": \"hey jude\", \"artist\": \"beatles\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+
+  /* Both rules ride the one GetSongs call; the artist is a field rule, not a
+   * GetArtists resolve. */
+  MK_CHECK (params_carry ("AudioLibrary.GetSongs", "\"and\":["));
+  MK_CHECK (params_carry ("AudioLibrary.GetSongs",
+                          "{\"field\":\"title\",\"operator\":\"contains\","
+                          "\"value\":\"hey jude\"}"));
+  MK_CHECK (params_carry ("AudioLibrary.GetSongs",
+                          "{\"field\":\"artist\",\"operator\":\"contains\","
+                          "\"value\":\"beatles\"}"));
+  MK_CHECK (!called ("AudioLibrary.GetArtists"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* music with neither artist nor title nor song: a clean tool error naming the
+ * anchor fields, before any Kodi call. */
 static void
 case_search_music_no_args (void)
 {
@@ -325,7 +419,8 @@ case_search_music_no_args (void)
       const char *msg = json_object_get_string_member (
         json_node_get_object (payload), "error");
       MK_CHECK (msg != NULL && strstr (msg, "artist") != NULL
-                && strstr (msg, "title") != NULL);
+                && strstr (msg, "title") != NULL
+                && strstr (msg, "song") != NULL);
     }
 
   MK_CHECK (!called ("AudioLibrary.GetArtists"));
@@ -2564,6 +2659,8 @@ main (int argc, char **argv)
     { "search-movie",            case_search_movie },
     { "search-music",            case_search_music },
     { "search-music-album-only", case_search_music_album_only },
+    { "search-music-song-only",  case_search_music_song_only },
+    { "search-music-song-artist", case_search_music_song_artist },
     { "search-music-no-args",    case_search_music_no_args },
     { "search-movie-person",     case_search_movie_person },
     { "search-movie-actor-only", case_search_movie_actor_only },

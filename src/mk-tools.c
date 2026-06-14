@@ -2008,6 +2008,45 @@ query_songs (MkTools *self, const char *instance, const char *idkey, gint64 id,
 }
 
 /**
+ * query_songs_by_rules:
+ * @self: the tool table.
+ * @instance: target instance, or NULL for the default.
+ * @rules: the field rules to and-combine (title/artist/album/tracknumber).
+ * @nrules: how many of @rules are populated (must be >= 1).
+ * @offset: paging offset.
+ * @limit: paging limit.
+ * @count: count-only request.
+ * @error: return location for a GError, or NULL.
+ *
+ * Runs `AudioLibrary.GetSongs` matched by a composite field filter rather than a
+ * resolved container id — the song-title path, where a song is found by its own
+ * title (optionally narrowed by artist/album/track) library-wide, sorted by
+ * title, with server-side paging. The shared song properties omit `artist`, so
+ * the title filter keeps the set small enough to dodge the sort-with-artist
+ * slowdown (see the GetSongs note in the project memory).
+ *
+ * @return the Kodi `result` node (free with json_node_unref()), or NULL with
+ *         @error set.
+ */
+static JsonNode *
+query_songs_by_rules (MkTools *self, const char *instance,
+                      const MkFilterRule *rules, gsize nrules, gint64 offset,
+                      gint64 limit, gboolean count, GError **error)
+{
+  g_autoptr (JsonBuilder) pb = json_builder_new ();
+  json_builder_begin_object (pb);
+  add_filter_rules (pb, rules, nrules);
+  add_properties (pb, mk_search_song_props);
+  add_sort (pb, "title");
+  add_page_limits (pb, offset, limit, count);
+  json_builder_end_object (pb);
+  g_autoptr (JsonNode) params = json_builder_get_root (pb);
+
+  return mk_kodi_call (self->kodi, instance, "AudioLibrary.GetSongs", params,
+                       error);
+}
+
+/**
  * search_movie:
  * @self: the tool table.
  * @instance: target instance, or NULL for the default.
@@ -2184,6 +2223,8 @@ search_tv (MkTools *self, const char *instance, const char *title,
  * @instance: target instance, or NULL for the default.
  * @artist: performer substring, or NULL/"" to anchor on the album title.
  * @title: album-name substring, or NULL/"" to span every album.
+ * @song: song-title substring, or NULL/"" — when given, takes the song-title
+ *        path (§11.19) regardless of artist/album.
  * @have_number: whether @number (track) was given.
  * @number: track number to keep.
  * @limit: max rows.
@@ -2191,35 +2232,70 @@ search_tv (MkTools *self, const char *instance, const char *title,
  * @count: count-only request.
  * @error: return location for a GError, or NULL.
  *
- * Resolves the artist, then drills to song leaves. The wide paths — artist-only,
- * or a single matched album, with no track filter — are one paged
- * `GetSongs {artistid|albumid}` call, so `total`/`limit`/`offset` come straight
- * from Kodi. A track filter, or an album substring matching several albums,
- * falls back to fetching the songs and paging app-side; the multi-album case is
- * flagged `approximate`.
+ * When @song is given, songs are matched by their OWN title (§11.6.4.1.5): one
+ * server-side `GetSongs` call with an and-combined `{title, artist?, album?,
+ * tracknumber?}` field filter, library-wide and no container resolve, so
+ * `total`/paging come straight from Kodi and `resolved` is absent. This is the
+ * only path that anchors on the song; artist/album/number narrow it instead of
+ * resolving a container.
  *
- * Without an artist the album title anchors the search instead: it is resolved
- * library-wide to ONE album (`GetAlbums` with a server-side `album contains`
- * rule, exact match preferred — the same single-container resolve tv-show
- * applies to its title), and the songs drill from that `albumid`; `resolved`
- * then carries `album`/`albumid`. At least one of @artist/@title must be given.
+ * Otherwise the search resolves the artist, then drills to song leaves. The wide
+ * paths — artist-only, or a single matched album, with no track filter — are one
+ * paged `GetSongs {artistid|albumid}` call, so `total`/`limit`/`offset` come
+ * straight from Kodi. A track filter, or an album substring matching several
+ * albums, falls back to fetching the songs and paging app-side; the multi-album
+ * case is flagged `approximate`.
  *
- * @return the search-result node, or NULL with @error set (neither artist nor
- *         title, or a call failure); an unresolved artist or album yields a
- *         clean zero-total result.
+ * Without an artist (and without @song) the album title anchors the search
+ * instead: it is resolved library-wide to ONE album (`GetAlbums` with a
+ * server-side `album contains` rule, exact match preferred — the same
+ * single-container resolve tv-show applies to its title), and the songs drill
+ * from that `albumid`; `resolved` then carries `album`/`albumid`. At least one
+ * of @artist/@title/@song must be given.
+ *
+ * @return the search-result node, or NULL with @error set (no anchor field, or
+ *         a call failure); an unresolved artist or album yields a clean
+ *         zero-total result.
  */
 static JsonNode *
 search_music (MkTools *self, const char *instance, const char *artist,
-              const char *title, gboolean have_number, gint64 number,
-              gint64 limit, gint64 offset, gboolean count, GError **error)
+              const char *title, const char *song, gboolean have_number,
+              gint64 number, gint64 limit, gint64 offset, gboolean count,
+              GError **error)
 {
   gboolean have_artist = (artist != NULL && artist[0] != '\0');
+  gboolean have_song = (song != NULL && song[0] != '\0');
 
-  if (!have_artist && (title == NULL || title[0] == '\0'))
+  if (!have_artist && !have_song && (title == NULL || title[0] == '\0'))
     {
       g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                   "searchmedia music: \"artist\" or \"title\" is required");
+                   "searchmedia music: \"artist\", \"title\" or \"song\" "
+                   "is required");
       return NULL;
+    }
+
+  /* Song-title path: anchor on the song's own title, matched server-side and
+   * narrowed (not container-resolved) by artist/album/track. One GetSongs call,
+   * library-wide, so no GetArtists/GetAlbums and no `resolved` container. */
+  if (have_song)
+    {
+      MkFilterRule rules[4];
+      gsize nrules = 0;
+      g_autofree char *ns =
+        have_number ? g_strdup_printf ("%" G_GINT64_FORMAT, number) : NULL;
+      nrules = append_rule (rules, nrules, "title", "contains", song);
+      nrules = append_rule (rules, nrules, "artist", "contains", artist);
+      nrules = append_rule (rules, nrules, "album", "contains", title);
+      nrules = append_rule (rules, nrules, "tracknumber", "is", ns);
+
+      g_autoptr (JsonNode) result = query_songs_by_rules (
+        self, instance, rules, nrules, offset, limit, count, error);
+      if (result == NULL)
+        return NULL;
+      gint64 total = list_total (result);
+      g_autoptr (GPtrArray) rows = count ? NULL : collect_items (result, "songs");
+      return build_search_result ("music", NULL, NULL, NULL, 0, FALSE, total,
+                                  offset, FALSE, rows, count);
     }
 
   /* Album-anchored path: no artist, so the album title is the anchor —
@@ -2389,7 +2465,12 @@ schema_search (MkTools *self)
              "Media kind to search: music | tv-show | movie.");
   prop_typed (b, "artist", "string",
               "Music only: performer name (substring, case-insensitive). "
-              "Resolves the artist; music needs artist or title.");
+              "Resolves the artist; music needs artist, title or song.");
+  prop_typed (b, "song", "string",
+              "Music only: song title (substring, case-insensitive). Matches "
+              "songs by their OWN name library-wide — the way to find a track "
+              "without its album; narrow with artist/title(album)/number. "
+              "Rows carry no resolved container.");
   prop_typed (b, "actor", "string",
               "movie/tv-show only: cast-member name (substring, "
               "case-insensitive). For tv-show it matches episode cast, which "
@@ -2400,10 +2481,11 @@ schema_search (MkTools *self)
               "directors; combinable with title.");
   prop_typed (b, "title", "string",
               "Container/title to match (substring, case-insensitive): album "
-              "for music, show for tv-show, the movie title for movie. "
-              "tv-show needs title, actor or director; without title the "
-              "person is matched library-wide and rows carry showtitle. "
-              "Music without artist resolves the album library-wide.");
+              "for music (a song's own title is the separate `song` arg), show "
+              "for tv-show, the movie title for movie. tv-show needs title, "
+              "actor or director; without title the person is matched "
+              "library-wide and rows carry showtitle. Music without artist "
+              "resolves the album library-wide.");
   prop_typed (b, "season", "integer",
               "tv-show only: season number to narrow the episodes.");
   prop_typed (b, "number", "integer",
@@ -2452,6 +2534,7 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
 
   const char *title = arg_str (args, "title", NULL);
   const char *artist = arg_str (args, "artist", NULL);
+  const char *song = arg_str (args, "song", NULL);
   const char *actor = arg_str (args, "actor", NULL);
   const char *director = arg_str (args, "director", NULL);
   gint64 season = 0, number = 0, v = 0;
@@ -2475,8 +2558,8 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
     return search_tv (self, instance, title, actor, director, have_season,
                       season, have_number, number, limit, offset, count, error);
   if (g_str_equal (type, "music"))
-    return search_music (self, instance, artist, title, have_number, number,
-                         limit, offset, count, error);
+    return search_music (self, instance, artist, title, song, have_number,
+                         number, limit, offset, count, error);
 
   g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
                "searchmedia: unknown type \"%s\" (use music/tv-show/movie)", type);
@@ -4868,8 +4951,9 @@ static const MkToolDef mk_tool_defs[] = {
    */
   { "searchmedia", "Find playable files by name: music/tv-show/movie, "
                    "drilled to leaf files with paging (limit/offset) and a "
-                   "total count. For music, title means the ALBUM name — "
-                   "songs cannot be matched by their own title. Movie and "
+                   "total count. For music, title means the ALBUM name; match "
+                   "a song by its own title with the `song` arg (\"play Hey "
+                   "Jude\" needs no artist). Movie and "
                    "tv-show queries can also filter by actor/director. Finds "
                    "media items only — for people lookups (bands, artists, "
                    "who is in the library) use `contributors`. Returns "
