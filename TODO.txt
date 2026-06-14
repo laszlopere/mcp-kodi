@@ -43,8 +43,9 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             resolves the active player
         [x] 11.6.1.4 mute — Application.SetMute {mute:true}
         [x] 11.6.1.5 unmute — Application.SetMute {mute:false}
-        [x] 11.6.1.6 noop — fires no action, returns the player_state()
-            snapshot only; a reachability + state probe
+        [x] 11.6.1.6 nowplaying — fires no action, returns the player_state()
+            snapshot only; a reachability + state probe (renamed from noop,
+            §11.17)
         [x] 11.6.1.7 skipnext — Input.ExecuteAction {action:"skipnext"};
             advance to the next playlist item / chapter (see 11.18)
         [x] 11.6.1.8 skipprevious — Input.ExecuteAction
