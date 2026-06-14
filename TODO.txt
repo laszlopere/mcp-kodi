@@ -44,13 +44,12 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         [x] 11.6.1.4 mute — Application.SetMute {mute:true}
         [x] 11.6.1.5 unmute — Application.SetMute {mute:false}
         [x] 11.6.1.6 nowplaying — fires no action, returns the player_state()
-            snapshot only; a reachability + state probe (renamed from noop,
-            §11.17)
+            snapshot only; a reachability + state probe (renamed from noop)
         [x] 11.6.1.7 skipnext — Input.ExecuteAction {action:"skipnext"};
-            advance to the next playlist item / chapter (see 11.18)
+            advance to the next playlist item / chapter
         [x] 11.6.1.8 skipprevious — Input.ExecuteAction
             {action:"skipprevious"}; previous item, or restart the current
-            one to match Kodi's button (see 11.18)
+            one to match Kodi's button
     [x] 11.6.2 Knobs — adjust a scalar
         [x] 11.6.2.1 volume — relative only, signed step; 0 = read-only
             probe; resolves the step against the live level, writes a
@@ -477,27 +476,6 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     description carries a "Returns {...}" shape clause — the only channel
     guaranteed to reach the model (Claude Code does not surface
     outputSchema in the model-visible tool definition).
-
-[x] 11.17 Rename/alias noop — same discoverability argument as the
-    11.6.4.5 search→searchmedia rename: an assistant hunting "what's
-    playing" looks for status/nowplaying, not a name that says "does
-    nothing".
-    Done as a hard rename (no alias, mirroring 11.6.4.5): the MCP tool name
-    noop → nowplaying, with the description leading on "what is playing".
-    Error prefixes/cross-references and docs (README, KODI-API) follow;
-    internal symbols (handler_noop, noop_snapshot, the noop-routes-through-
-    stub unit case) keep theirs.
-
-[x] 11.18 skipnext / skipprevious Buttons — "skip this song"; reuse
-    handler_button via Input.ExecuteAction, cheapest missing remote keys.
-    Done as two data-driven Button rows in mk_tool_defs[] reusing
-    handler_button / schema_instance_only / out_schema_snapshot unchanged —
-    Input.ExecuteAction { "action": "skipnext" | "skipprevious" }, then the
-    player-state snapshot (mirrors play/pause). No new handler code; the tool
-    table is iterated dynamically so no count needed updating. Unit tests
-    (button-skipnext / button-skipprevious) assert the keypress fired AND
-    carried the right action via params_carry(). README transport table +
-    descriptions/outputSchema follow the existing button pattern.
 
 [ ] 11.20 seek — no "skip ahead 5 min" / "restart" / "go to 1:12:00".
     Relative signed step like volume, plus an absolute `to` (snapshot
