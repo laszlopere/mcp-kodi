@@ -33,6 +33,12 @@ Diagnostics:
       # `if ((x = f()))` and append_rule's `n = append_rule(...)` chains are
       # idiomatic here, not bugs.
       - bugprone-assignment-in-if-condition
+      # The rest fire only on GLib/GObject idioms: g_usleep/time-macro
+      # arithmetic, g_autoptr + GError**/g_*_array element casts through
+      # gpointer. All expected, none actionable here.
+      - bugprone-implicit-widening-of-multiplication-result
+      - bugprone-casting-through-void
+      - bugprone-multi-level-implicit-pointer-conversion
 
 Index:
   Background: Build
