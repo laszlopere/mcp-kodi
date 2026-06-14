@@ -2229,7 +2229,7 @@ search_tv (MkTools *self, const char *instance, const char *title,
  * @artist: performer substring, or NULL/"" to anchor on the album title.
  * @title: album-name substring, or NULL/"" to span every album.
  * @song: song-title substring, or NULL/"" — when given, takes the song-title
- *        path (§11.19) regardless of artist/album.
+ *        path (§11.6.4.1.5) regardless of artist/album.
  * @have_number: whether @number (track) was given.
  * @number: track number to keep.
  * @limit: max rows.

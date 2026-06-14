@@ -301,7 +301,7 @@ case_search_music_album_only (void)
   free_tools (tools, cfg, kodi);
 }
 
-/* music + song only (§11.19): the song's own title anchors the search — one
+/* music + song only (§11.6.4.1.5): the song's own title anchors the search — one
  * GetSongs call with a server-side `title contains` rule, library-wide; no
  * container resolve (no GetArtists/GetAlbums), and no `resolved` in the
  * envelope. */
