@@ -3,6 +3,7 @@
 [![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 ![Language: C](https://img.shields.io/badge/language-C-555.svg)
 [![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2.svg)](https://github.com/sponsors/laszlopere)
+[![Last commit](https://img.shields.io/github/last-commit/laszlopere/mcp-kodi.svg)](https://github.com/laszlopere/mcp-kodi/commits)
 
 An [MCP](https://modelcontextprotocol.io) server that lets an AI assistant
 control a [Kodi](https://kodi.tv) media player over Kodi's JSON-RPC API. Written
