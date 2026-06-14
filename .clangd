@@ -1,0 +1,38 @@
+# clangd configuration for mcp-kodi — committed so every checkout lints the
+# same way.
+#
+# clangd needs the project's real build flags: the glib-2.0 / gobject-2.0 /
+# gio-2.0 / gio-unix-2.0 / json-glib-1.0 / libsoup-3.0 include paths (from
+# pkg-config) plus -DHAVE_CONFIG_H. Those come from a compile_commands.json
+# compilation database, which records absolute compiler/library paths and is
+# therefore machine-specific — it stays git-ignored. Generate it once per
+# checkout from a clean tree:
+#
+#     ./autogen.sh && ./configure     # only if the tree is not configured yet
+#     make clean && bear -- make      # writes ./compile_commands.json
+#                                     # (any compiledb wrapper works too)
+#
+# Without that database clangd falls back to heuristics and cannot find the
+# GLib headers. This file only layers project policy on top of it.
+
+CompileFlags:
+  # compile_commands.json lives next to this file, at the repo root.
+  CompilationDatabase: .
+  # Mirror the autotools build's warning level (src/Makefile.am).
+  Add: [-Wall, -Wextra]
+
+Diagnostics:
+  ClangTidy:
+    Add:
+      - bugprone-*
+      - portability-*
+    # GObject/GLib idioms trip these; they are noise in this codebase.
+    Remove:
+      - bugprone-easily-swappable-parameters
+      - bugprone-macro-parentheses
+      # `if ((x = f()))` and append_rule's `n = append_rule(...)` chains are
+      # idiomatic here, not bugs.
+      - bugprone-assignment-in-if-condition
+
+Index:
+  Background: Build
