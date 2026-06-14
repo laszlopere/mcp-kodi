@@ -138,7 +138,7 @@ song=$(kodi_rpc AudioLibrary.GetSongs \
          '{"properties":["title","artist","album","track"],"limits":{"start":0,"end":1}}' \
         | jq -c '.result.songs[0] // empty')
 episode=$(kodi_rpc VideoLibrary.GetEpisodes \
-         '{"properties":["showtitle","season","episode"],"limits":{"start":0,"end":1}}' \
+         '{"properties":["title","showtitle","season","episode"],"limits":{"start":0,"end":1}}' \
         | jq -c '.result.episodes[0] // empty')
 movie=$(kodi_rpc VideoLibrary.GetMovies \
          '{"limits":{"start":0,"end":1}}' \
@@ -151,11 +151,12 @@ if [ -n "$song" ]; then
   track=$(g  "$song" '.track // 0')
   songtitle=$(g "$song" '.title // ""')
 fi
-show=""; season=""; epnum=""
+show=""; season=""; epnum=""; eptitle=""
 if [ -n "$episode" ]; then
   show=$(g   "$episode" '.showtitle // ""')
   season=$(g "$episode" '.season // 0')
   epnum=$(g  "$episode" '.episode // 0')
+  eptitle=$(g "$episode" '.title // ""')
 fi
 
 # ===========================================================================
@@ -270,6 +271,20 @@ if [ -n "$show" ]; then
   if [ "$(j "$b" '.returned > 0')" = true ]; then
     eq "tv/SxxExx matches the season"  true "$(jx "$b" --argjson se "$season" 'all(.rows[]; .season  == $se)')"
     eq "tv/SxxExx matches the episode" true "$(jx "$b" --argjson n  "$epnum"  'all(.rows[]; .episode == $n)')"
+  fi
+
+  # Episode title alone (no show) finds the episode by its OWN name
+  # (§11.6.4.1.3): library-wide, server-side, no resolved container.
+  if [ -n "$eptitle" ]; then
+    b=$(res_body "$(searchmedia "$(jargs --arg t "$eptitle" \
+                              '{type:"tv-show",episodetitle:$t,limit:50}')")")
+    check_invariants "$b" tv-show 0 "tv/episode-title"
+    is_true "tv/episode-title finds the episode"   "$(j "$b" '.total >= 1')"
+    is_true "tv/episode-title has no resolved field" "$(j "$b" 'has("resolved") | not')"
+    if [ "$(j "$b" '.returned > 0')" = true ]; then
+      is_true "tv/episode-title row carries an episodeid" "$(j "$b" '(.rows[0].episodeid // 0) > 0')"
+      is_true "tv/episode-title row names its show"        "$(j "$b" '.rows[0] | has("showtitle")')"
+    fi
   fi
 else
   echo "   (no episodes in library — tv assertions skipped)"

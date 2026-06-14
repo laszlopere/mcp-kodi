@@ -677,6 +677,120 @@ case_search_tv_person_season_error (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* tv-show + episodetitle, NO show title (§11.6.4.1.3): the show resolve is
+ * skipped and one library-wide GetEpisodes call filters by the episode's own
+ * title; rows carry showtitle, the envelope has no resolved container. */
+static void
+case_search_tv_episode_title (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "VideoLibrary.GetEpisodes",
+    "{ \"episodes\": ["
+    "    { \"episodeid\": 100, \"label\": \"1x01. The Ship\","
+    "      \"title\": \"The Ship\", \"season\": 1, \"episode\": 1,"
+    "      \"showtitle\": \"Deep Space Nine\", \"file\": \"/t/ds9-s01e01.mkv\" } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 1, \"total\": 1 } }");
+
+  g_autoptr (JsonNode) an = args_node (
+    "{ \"type\": \"tv-show\", \"episodetitle\": \"the ship\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  MK_CHECK (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload));
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 1);
+      /* library-wide: no single show was resolved, rows name their show. */
+      MK_CHECK (!json_object_has_member (p, "resolved"));
+      JsonArray *rows = json_object_get_array_member (p, "rows");
+      JsonObject *r0 = json_array_get_object_element (rows, 0);
+      MK_CHECK_STR_EQ (json_object_get_string_member (r0, "showtitle"),
+                       "Deep Space Nine");
+    }
+
+  /* no resolve; one episodes call carries the title rule and asks showtitle. */
+  MK_CHECK (!called ("VideoLibrary.GetTVShows"));
+  MK_CHECK (called ("VideoLibrary.GetEpisodes"));
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes",
+                          "\"filter\":{\"field\":\"title\",\"operator\":"
+                          "\"contains\",\"value\":\"the ship\"}"));
+  MK_CHECK (!params_carry ("VideoLibrary.GetEpisodes", "\"tvshowid\""));
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes", "\"showtitle\""));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* tv-show + title + episodetitle: the show resolves by name, and the
+ * episode-title rule rides the same tvshowid-pinned GetEpisodes call —
+ * narrowing within that one show. */
+static void
+case_search_tv_show_plus_episode_title (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "VideoLibrary.GetTVShows",
+    "{ \"tvshows\": [ { \"tvshowid\": 449, \"label\": \"Star Trek: Voyager\" } ],"
+    "  \"limits\": { \"total\": 1 } }");
+  stub_kodi_set_response (
+    "VideoLibrary.GetEpisodes",
+    "{ \"episodes\": ["
+    "    { \"episodeid\": 18802, \"label\": \"1x01. Caretaker\","
+    "      \"title\": \"Caretaker\", \"season\": 1, \"episode\": 1,"
+    "      \"file\": \"/t/voy-s01e01.mkv\" } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 1, \"total\": 1 } }");
+
+  g_autoptr (JsonNode) an = args_node (
+    "{ \"type\": \"tv-show\", \"title\": \"voyager\","
+    "  \"episodetitle\": \"caretaker\" }");
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
+
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *r =
+        json_object_get_object_member (json_node_get_object (payload),
+                                       "resolved");
+      MK_CHECK (r != NULL);
+      if (r != NULL)
+        MK_CHECK_INT_EQ (json_object_get_int_member (r, "tvshowid"), 449);
+    }
+
+  /* show resolved; episodes pinned to it AND filtered by episode title. */
+  MK_CHECK (called ("VideoLibrary.GetTVShows"));
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes", "\"tvshowid\":449"));
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes",
+                          "{\"field\":\"title\",\"operator\":\"contains\","
+                          "\"value\":\"caretaker\"}"));
+  /* the resolve matches the SHOW title ("voyager"); the episode title must
+   * not leak into GetTVShows. */
+  MK_CHECK (params_carry ("VideoLibrary.GetTVShows", "\"value\":\"voyager\""));
+  MK_CHECK (!params_carry ("VideoLibrary.GetTVShows", "caretaker"));
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
 /* ---- contributors ----------------------------------------------------------
  *
  * The stub keys canned responses by METHOD, so all three videodb:// people
@@ -2667,6 +2781,8 @@ main (int argc, char **argv)
     { "search-tv-person",        case_search_tv_person },
     { "search-tv-person-global", case_search_tv_person_global },
     { "search-tv-person-season-error", case_search_tv_person_season_error },
+    { "search-tv-episode-title", case_search_tv_episode_title },
+    { "search-tv-show-plus-episode-title", case_search_tv_show_plus_episode_title },
     { "contributors-merge",      case_contributors_merge },
     { "contributors-paging",     case_contributors_paging },
     { "contributors-enumerate-all", case_contributors_enumerate_all },

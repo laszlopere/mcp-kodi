@@ -2103,9 +2103,11 @@ search_movie (MkTools *self, const char *instance, const char *title,
  * search_tv:
  * @self: the tool table.
  * @instance: target instance, or NULL for the default.
- * @title: show-name substring, or NULL/"" for a person-only query.
+ * @title: show-name substring, or NULL/"" for a person/episode-title query.
  * @actor: cast-member name substring, or NULL/"" for no person filter.
  * @director: episode-director name substring, or NULL/"" for no person filter.
+ * @episodetitle: episode-title substring (§11.6.4.1.3), or NULL/"" — an episode
+ *        is matched by its OWN title, library-wide unless @title narrows it.
  * @have_season: whether @season was given.
  * @season: season number to narrow to.
  * @have_number: whether @number was given.
@@ -2118,23 +2120,24 @@ search_movie (MkTools *self, const char *instance, const char *title,
  * Resolves the show (`GetTVShows`) then drills to episode leaves
  * (`GetEpisodes {tvshowid, season?}` plus an exact `episode` filter when a
  * number is given — its value is a string, KODI-API 12.16.21 / 12.16.6). One paged call
- * past the resolve. The person rules ride the same GetEpisodes call —
- * episode cast covers regulars and guest stars alike, and per-episode
- * directors are the only populated director data. Without a @title the
- * resolve is skipped entirely and one library-wide GetEpisodes call filters
- * by person, sorted by show; those rows carry `showtitle` instead of a
- * `resolved` container, and @season/@number make no sense show-less, so they
- * are rejected.
+ * past the resolve. The person and episode-title rules ride the same
+ * GetEpisodes call — episode cast covers regulars and guest stars alike, and
+ * per-episode directors are the only populated director data. Without a @title
+ * the resolve is skipped entirely and one library-wide GetEpisodes call filters
+ * by person/episode-title, sorted by show; those rows carry `showtitle` instead
+ * of a `resolved` container, and @season/@number make no sense show-less, so
+ * they are rejected.
  *
  * @return the search-result node, or NULL with @error set (no title/actor/
- *         director, season/number without title, or a call failure); an
- *         unresolved show yields a clean zero-total result.
+ *         director/episodetitle, season/number without title, or a call
+ *         failure); an unresolved show yields a clean zero-total result.
  */
 static JsonNode *
 search_tv (MkTools *self, const char *instance, const char *title,
-           const char *actor, const char *director, gboolean have_season,
-           gint64 season, gboolean have_number, gint64 number, gint64 limit,
-           gint64 offset, gboolean count, GError **error)
+           const char *actor, const char *director, const char *episodetitle,
+           gboolean have_season, gint64 season, gboolean have_number,
+           gint64 number, gint64 limit, gint64 offset, gboolean count,
+           GError **error)
 {
   static const char *const props[] = { "title",      "season",  "episode",
                                        "file",       "firstaired",
@@ -2148,12 +2151,13 @@ search_tv (MkTools *self, const char *instance, const char *title,
   gboolean have_title = (title != NULL && title[0] != '\0');
   gboolean have_person = (actor != NULL && actor[0] != '\0')
                          || (director != NULL && director[0] != '\0');
+  gboolean have_eptitle = (episodetitle != NULL && episodetitle[0] != '\0');
 
-  if (!have_title && !have_person)
+  if (!have_title && !have_person && !have_eptitle)
     {
       g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                   "searchmedia tv-show: \"title\" (show name), \"actor\" or "
-                   "\"director\" is required");
+                   "searchmedia tv-show: \"title\" (show name), \"episodetitle\","
+                   " \"actor\" or \"director\" is required");
       return NULL;
     }
   if (!have_title && (have_season || have_number))
@@ -2180,8 +2184,9 @@ search_tv (MkTools *self, const char *instance, const char *title,
 
   g_autofree char *ns =
     have_number ? g_strdup_printf ("%" G_GINT64_FORMAT, number) : NULL;
-  MkFilterRule rules[3];
+  MkFilterRule rules[4];
   gsize nrules = 0;
+  nrules = append_rule (rules, nrules, "title", "contains", episodetitle);
   nrules = append_rule (rules, nrules, "episode", "is", ns);
   nrules = append_rule (rules, nrules, "actor", "contains", actor);
   nrules = append_rule (rules, nrules, "director", "contains", director);
@@ -2479,6 +2484,12 @@ schema_search (MkTools *self)
               "movie/tv-show only: director name (substring, "
               "case-insensitive). For tv-show it matches per-episode "
               "directors; combinable with title.");
+  prop_typed (b, "episodetitle", "string",
+              "tv-show only: an episode's OWN title (substring, "
+              "case-insensitive) — the way to find an episode by name. Matched "
+              "library-wide (rows carry showtitle) unless a show title also "
+              "narrows it. This is the title, NOT the episode number (use "
+              "number for that).");
   prop_typed (b, "title", "string",
               "Container/title to match (substring, case-insensitive): album "
               "for music (a song's own title is the separate `song` arg), show "
@@ -2490,7 +2501,7 @@ schema_search (MkTools *self)
               "tv-show only: season number to narrow the episodes.");
   prop_typed (b, "number", "integer",
               "Position within the container: track number (music) or episode "
-              "number (tv-show).");
+              "number (tv-show) — for an episode's title use episodetitle.");
   prop_typed (b, "limit", "integer",
               "Max leaf rows to return (default 50, max 500). Page with offset.");
   prop_typed (b, "offset", "integer",
@@ -2537,6 +2548,7 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
   const char *song = arg_str (args, "song", NULL);
   const char *actor = arg_str (args, "actor", NULL);
   const char *director = arg_str (args, "director", NULL);
+  const char *episodetitle = arg_str (args, "episodetitle", NULL);
   gint64 season = 0, number = 0, v = 0;
   gboolean have_season = arg_int (args, "season", &season);
   gboolean have_number = arg_int (args, "number", &number);
@@ -2555,8 +2567,9 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
     return search_movie (self, instance, title, actor, director, limit, offset,
                          count, error);
   if (g_str_equal (type, "tv-show"))
-    return search_tv (self, instance, title, actor, director, have_season,
-                      season, have_number, number, limit, offset, count, error);
+    return search_tv (self, instance, title, actor, director, episodetitle,
+                      have_season, season, have_number, number, limit, offset,
+                      count, error);
   if (g_str_equal (type, "music"))
     return search_music (self, instance, artist, title, song, have_number,
                          number, limit, offset, count, error);
@@ -4953,7 +4966,8 @@ static const MkToolDef mk_tool_defs[] = {
                    "drilled to leaf files with paging (limit/offset) and a "
                    "total count. For music, title means the ALBUM name; match "
                    "a song by its own title with the `song` arg (\"play Hey "
-                   "Jude\" needs no artist). Movie and "
+                   "Jude\" needs no artist). Find a tv episode by its own name "
+                   "with the `episodetitle` arg. Movie and "
                    "tv-show queries can also filter by actor/director. Finds "
                    "media items only — for people lookups (bands, artists, "
                    "who is in the library) use `contributors`. Returns "
