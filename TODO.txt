@@ -74,6 +74,22 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             and offset best-effort. Person matching: artist feeds
             AudioLibrary.GetArtists (music); movie/tv-show take actor?/
             director? — see 11.6.4.2
+            [x] 11.6.4.1.1 movies by partial title — VideoLibrary.GetMovies
+                with a {field:title, operator:contains} rule; substring,
+                case-insensitive; returns ALL matching movies (no collapse)
+            [x] 11.6.4.1.2 tv shows by partial show title — resolves the show
+                via VideoLibrary.GetTVShows contains, then lists its episodes;
+                a multi-match substring COLLAPSES to one show (exact ci match
+                preferred, else alphabetically-first), unlike movies
+            [ ] 11.6.4.1.3 tv shows by partial episode title — gap: episodes
+                filter only by resolved show + season?/number?, never by their
+                own title, so "find the episode called X" is unresolvable
+            [x] 11.6.4.1.4 songs by partial album title — title is the ALBUM
+                name (AudioLibrary.GetAlbums contains → that album's songs);
+                an album substring spanning several albums sums their songs
+            [ ] 11.6.4.1.5 songs by partial song title — gap: music resolves
+                artist/album only, a song's own title is never filtered;
+                tracked as 11.19
         [x] 11.6.4.2 search by person — movie/tv-show queries can name a
             person: optional actor? and director? args become server-side
             {field, operator: contains} rules, and-combined with title?
