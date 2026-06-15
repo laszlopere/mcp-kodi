@@ -3270,6 +3270,15 @@ schema_playfile (MkTools *self)
   prop_typed (b, "file", "string",
               "Path of the file to play — the `file` field of a `searchmedia` result "
               "row. Any path Kodi can reach works, in-library or not.");
+  prop_typed (b, "fullscreenaudio", "boolean",
+              "Audio only: once playback starts, bring Kodi's fullscreen "
+              "now-playing screen (the `visualisation` window) to the front. "
+              "Audio playback does not auto-fullscreen the way video does, so "
+              "without this the player stays behind whatever window is up, "
+              "showing only the small now-playing strip. Ignored when the open "
+              "starts video (Kodi already fullscreens that) and a no-op when "
+              "nothing starts. Note: with no visualisation add-on installed the "
+              "window renders blank behind the now-playing info.");
 
   static const char *const required[] = { "file", NULL };
   schema_end (b, required);
@@ -3280,7 +3289,9 @@ schema_playfile (MkTools *self)
  * handler_playfile:
  * @self: the tool table.
  * @def: this tool's row (unused).
- * @args: the call arguments; `file` is the path to play.
+ * @args: the call arguments; `file` is the path to play, optional
+ *        `fullscreenaudio` brings the visualisation window to the front when an
+ *        audio player starts.
  * @error: return location for a GError, or NULL.
  *
  * Implements the `playfile` tool: opens one file by path with
@@ -3307,6 +3318,12 @@ schema_playfile (MkTools *self)
  *   3. If Kodi answered "OK" but the post-settle snapshot shows no active
  *      player, the open silently died (the in-library missing-file case) —
  *      that snapshot is discarded and the failure reported.
+ *
+ * With `fullscreenaudio` set, a successful *audio* open is followed by a
+ * best-effort GUI.ActivateWindow("visualisation") to bring the fullscreen
+ * now-playing screen forward — audio, unlike video, does not auto-fullscreen on
+ * Player.Open. The activation never affects the result: video opens skip it
+ * (already fullscreen) and a failed activation is swallowed.
  *
  * @return the post-open player-state object, or NULL with @error set (missing
  *         `file`, a missing/unplayable file, or a call failure).
@@ -3385,6 +3402,31 @@ handler_playfile (MkTools *self, const MkToolDef *def, JsonObject *args,
                    "— the file is missing or unreadable on the Kodi box "
                    "(a stale library entry?)", file);
       return NULL;
+    }
+
+  /* Optional fullscreen-on-start, audio only. Video already switches to its
+   * fullscreen window on Player.Open; audio does not — it leaves the caller on
+   * whatever window was up, showing only the now-playing strip. So when the
+   * caller asked AND an audio player actually started, activate `visualisation`
+   * to fill the screen. Best-effort: the open has already succeeded and `state`
+   * is the real result, so a failed activation must not fail the call — its
+   * error is swallowed. */
+  if (arg_bool (args, "fullscreenaudio")
+      && g_strcmp0 (json_object_get_string_member_with_default (
+                      json_node_get_object (state), "type", ""),
+                    "audio")
+           == 0)
+    {
+      g_autoptr (JsonBuilder) wb = json_builder_new ();
+      json_builder_begin_object (wb);
+      json_builder_set_member_name (wb, "window");
+      json_builder_add_string_value (wb, "visualisation");
+      json_builder_end_object (wb);
+      g_autoptr (JsonNode) wparams = json_builder_get_root (wb);
+      g_autoptr (GError) wlocal = NULL;
+      g_autoptr (JsonNode) wres = mk_kodi_call (
+        self->kodi, instance, "GUI.ActivateWindow", wparams, &wlocal);
+      (void) wres; /* best-effort: playback already reported in `state` */
     }
   return state;
 }
