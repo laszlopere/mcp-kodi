@@ -1,0 +1,176 @@
+#!/bin/sh
+# Functional test for the `notify` tool.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi. `notify` pushes a toast onto the box's on-screen display with
+# GUI.ShowNotification (a required title + message, an optional icon and
+# display time) and changes nothing about playback, so it returns a small
+# confirmation echo of what was shown rather than the player_state() snapshot.
+#
+# There is no JSON-RPC read-back for an on-screen notification — Kodi exposes
+# no way to query the toast that is currently visible — so the assertions check
+# the tool's result, not the pixels, the same way the other setters are tested.
+# The contract under test:
+#   - a title + message succeeds, echoing { shown:true, title, message,
+#     displaytime:5000 } (the default display time when none is given);
+#   - an explicit image + displaytime are echoed back;
+#   - a missing/empty title or a missing message is a clean tool error;
+#   - an unconfigured instance is a clean tool error and no toast is sent.
+#
+# Because it touches no playback, the test needs neither the volume guard nor
+# any library discovery; the throwaway XDG_STATE_HOME is kept only so a stray
+# write can never touch the user's real state.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+KODI_HOST=${KODI_HOST:-127.0.0.1:8080}
+KODI_AUTH=${KODI_AUTH:-kodi:kodi}
+KODI_SCHEME=${KODI_SCHEME:-http}
+export KODI_HOST KODI_AUTH KODI_SCHEME
+
+# notify never writes the history log, but keep any stray state write out of the
+# user's real ~/.local/state by redirecting XDG_STATE_HOME to a throwaway dir.
+STATE_DIR=$(mktemp -d) || { echo "SKIP: cannot mktemp"; exit 77; }
+export XDG_STATE_HOME="$STATE_DIR"
+trap 'rm -rf "$STATE_DIR"' EXIT
+
+SKIP=77
+
+skip () { echo "SKIP: $*"; exit $SKIP; }
+
+# ---- dependencies ---------------------------------------------------------
+
+command -v jq   >/dev/null 2>&1 || skip "jq not found"
+command -v curl >/dev/null 2>&1 || skip "curl not found"
+
+# Locate the mcp-kodi binary: the automake build tree first ($top_builddir is
+# exported by `make check`), then fallbacks for running the script by hand.
+find_binary () {
+  for c in \
+    "${top_builddir:-}/src/mcp-kodi" \
+    "$(dirname "$0")/../src/mcp-kodi" \
+    "./src/mcp-kodi" \
+    "src/mcp-kodi"
+  do
+    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# ---- talking to Kodi directly (the liveness gate) -------------------------
+
+kodi_rpc () { # method params-json  ->  raw JSON-RPC response
+  curl -s -m 20 -u "$KODI_AUTH" -H 'Content-Type: application/json' \
+    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" \
+    "$KODI_SCHEME://$KODI_HOST/jsonrpc"
+}
+
+pong=$(kodi_rpc JSONRPC.Ping '{}' | jq -r '.result // empty' 2>/dev/null)
+[ "$pong" = "pong" ] || skip "Kodi not reachable at $KODI_SCHEME://$KODI_HOST"
+
+# ---- talking to the server under test (MCP over stdio) --------------------
+
+# Feed `initialize` + one `tools/call`, echo back the tool result object for
+# request id 2 (`{ content:[{type,text}], isError }`). The server reads
+# newline-delimited JSON and exits on EOF, so one invocation per call keeps
+# every assertion isolated.
+mcp_tool () { # name arguments-json  ->  tool result object
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
+    | "$MCP" 2>/dev/null \
+    | jq -c 'select(.id==2) | .result'
+}
+
+notify   () { mcp_tool notify "$1"; }             # arguments-json -> result object
+res_err  () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
+res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
+jargs    () { jq -cn "$@"; }                      # build an arguments object safely
+g        () { printf '%s' "$1" | jq -r "$2"; }    # body, filter -> scalar
+j        () { printf '%s' "$1" | jq    "$2"; }    # body, filter -> json/bool
+
+# ---- assertions -----------------------------------------------------------
+
+PASS=0
+FAIL=0
+ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
+
+eq () { # desc expected actual
+  if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi
+}
+is_true () { # desc jq-bool-string
+  if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi
+}
+
+echo "notify functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ===========================================================================
+# 1. Title + message only: the toast is shown and the confirmation echo names
+#    it back, with displaytime defaulting to Kodi's 5000ms and no image key.
+# ===========================================================================
+echo "-- title + message (defaults)"
+
+b=$(notify "$(jargs --arg t "mcp-kodi test" --arg m "notify default toast" \
+              '{title:$t,message:$m}')")
+eq "title+message -> not an error" false "$(res_err "$b")"
+body=$(res_body "$b")
+eq "echo: shown is true"            true               "$(g "$body" '.shown')"
+eq "echo: title round-trips"        "mcp-kodi test"    "$(g "$body" '.title')"
+eq "echo: message round-trips"      "notify default toast" "$(g "$body" '.message')"
+eq "echo: displaytime defaults 5000" 5000              "$(g "$body" '.displaytime')"
+is_true "echo: no image key when none given" "$(j "$body" 'has("image")|not')"
+
+# ===========================================================================
+# 2. Explicit icon + display time: both are forwarded and echoed back.
+# ===========================================================================
+echo "-- explicit image + displaytime"
+
+b=$(notify "$(jargs --arg t "warn" --arg m "with an icon" \
+              '{title:$t,message:$m,image:"warning",displaytime:2000}')")
+eq "image+displaytime -> not an error" false "$(res_err "$b")"
+body=$(res_body "$b")
+eq "echo: image round-trips"       warning "$(g "$body" '.image')"
+eq "echo: displaytime round-trips" 2000    "$(g "$body" '.displaytime')"
+
+# ===========================================================================
+# 3. Caller mistakes: a missing/empty title or a missing message is a clean
+#    tool error, never a silent success.
+# ===========================================================================
+echo "-- errors / edges"
+
+b=$(notify "$(jargs --arg m "no title here" '{message:$m}')")
+eq "missing title -> tool error" true "$(res_err "$b")"
+
+b=$(notify "$(jargs --arg m "empty title" '{title:"",message:$m}')")
+eq "empty title -> tool error" true "$(res_err "$b")"
+
+b=$(notify "$(jargs --arg t "no message here" '{title:$t}')")
+eq "missing message -> tool error" true "$(res_err "$b")"
+
+# An unconfigured instance is a clean tool error (no toast sent), carrying the
+# no_instance category and a setup hint so the AI can help fix the config.
+b=$(notify "$(jargs --arg t "t" --arg m "m" \
+              '{title:$t,message:$m,instance:"no-such-box"}')")
+eq "unknown instance -> tool error" true "$(res_err "$b")"
+eq "unknown instance -> category no_instance" no_instance \
+   "$(g "$(res_body "$b")" '.category')"
+is_true "unknown instance -> carries a setup hint" \
+        "$(j "$(res_body "$b")" 'has("hint") and (.hint|length>0)')"
+
+# ---- tally ----------------------------------------------------------------
+echo "------------------------------------------------------------"
+printf 'notify functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+exit 0

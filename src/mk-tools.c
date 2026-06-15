@@ -4668,6 +4668,173 @@ out_schema_history (MkTools *self)
   return json_builder_get_root (b);
 }
 
+/* ---- notify — push a toast onto the Kodi on-screen display. -------------- */
+
+/**
+ * schema_notify:
+ * @self: the table (used to name the configured instances).
+ *
+ * Schema for the `notify` tool: the required `title` + `message`, plus the
+ * optional `image` (a built-in icon keyword or any image path/URL) and
+ * `displaytime`, alongside the optional `instance`.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_notify (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_instance (b, self, FALSE);
+  prop_typed (b, "title", "string",
+              "Notification title — the bold heading of the toast.");
+  prop_typed (b, "message", "string",
+              "Notification body text shown beneath the title.");
+  prop_typed (b, "image", "string",
+              "Icon for the toast: one of the keywords \"info\", \"warning\" "
+              "or \"error\" for a built-in icon, or any image path/URL the "
+              "Kodi box can reach. Omitted uses Kodi's default icon.");
+  prop_typed (b, "displaytime", "integer",
+              "How long the toast stays on screen, in milliseconds. Omitted "
+              "uses Kodi's default of 5000; Kodi clamps very small values to "
+              "its own minimum.");
+
+  static const char *const required[] = { "title", "message", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * out_schema_notify:
+ * @self: the table (unused; the shape is fixed).
+ *
+ * Output schema of `notify`: the confirmation echo built by handler_notify() —
+ * `{ "shown", "title", "message", "displaytime", "image"? }`. `image` is
+ * present only when one was supplied.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+out_schema_notify (MkTools *self)
+{
+  (void) self;
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_typed (b, "shown", "boolean",
+              "Always true — the notification was handed to Kodi.");
+  prop_typed (b, "title", "string", "The title that was shown.");
+  prop_typed (b, "message", "string", "The message that was shown.");
+  prop_typed (b, "displaytime", "integer",
+              "The display time in milliseconds — the requested value, or "
+              "5000 (Kodi's default) when none was given.");
+  prop_typed (b, "image", "string",
+              "The icon keyword or image path that was used, present only "
+              "when one was supplied.");
+
+  static const char *const required[] =
+    { "shown", "title", "message", "displaytime", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_notify:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments; `title` + `message` are required, `image` and
+ *        `displaytime` optional, plus the optional `instance`.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `notify` tool: pushes a toast onto the Kodi player's
+ * on-screen display with `GUI.ShowNotification` (KODI-API 12.6.6). The `image`
+ * argument is forwarded verbatim — Kodi reads the keywords "info"/"warning"/
+ * "error" as built-in icons and anything else as an image path/URL — and
+ * `displaytime` is forwarded only when given, letting Kodi apply its 5000ms
+ * default otherwise.
+ *
+ * Unlike the transport tools this changes nothing about playback, so rather
+ * than the player_state() snapshot it returns a small confirmation echo of
+ * what was displayed: `{ "shown": true, "title", "message", "displaytime",
+ * "image"? }`. `displaytime` echoes the requested value, or 5000 (Kodi's
+ * documented default) when none was given, so the echo is self-consistent.
+ *
+ * @return the confirmation echo, or NULL with @error set (missing `title`/
+ *         `message`, or a call failure).
+ */
+static JsonNode *
+handler_notify (MkTools *self, const MkToolDef *def, JsonObject *args,
+                GError **error)
+{
+  (void) def;
+  const char *instance = arg_instance (args);
+  const char *title = arg_str (args, "title", NULL);
+  const char *message = arg_str (args, "message", NULL);
+  const char *image = arg_str (args, "image", NULL);
+
+  if (title == NULL || title[0] == '\0')
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "notify: \"title\" is required");
+      return NULL;
+    }
+  if (message == NULL || message[0] == '\0')
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "notify: \"message\" is required");
+      return NULL;
+    }
+
+  gint64 displaytime = 5000; /* Kodi's documented default. */
+  gboolean have_dt = arg_int (args, "displaytime", &displaytime);
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "title");
+  json_builder_add_string_value (b, title);
+  json_builder_set_member_name (b, "message");
+  json_builder_add_string_value (b, message);
+  if (image != NULL && image[0] != '\0')
+    {
+      json_builder_set_member_name (b, "image");
+      json_builder_add_string_value (b, image);
+    }
+  if (have_dt)
+    {
+      json_builder_set_member_name (b, "displaytime");
+      json_builder_add_int_value (b, displaytime);
+    }
+  json_builder_end_object (b);
+  g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+  g_autoptr (JsonNode) shown = mk_kodi_call (self->kodi, instance,
+                                             "GUI.ShowNotification", params,
+                                             error);
+  if (shown == NULL)
+    return NULL;
+
+  /* Confirmation echo — notify changes no playback state, so there is no
+   * player_state() to report. Echo what was displayed instead. */
+  g_autoptr (JsonBuilder) r = json_builder_new ();
+  json_builder_begin_object (r);
+  json_builder_set_member_name (r, "shown");
+  json_builder_add_boolean_value (r, TRUE);
+  json_builder_set_member_name (r, "title");
+  json_builder_add_string_value (r, title);
+  json_builder_set_member_name (r, "message");
+  json_builder_add_string_value (r, message);
+  json_builder_set_member_name (r, "displaytime");
+  json_builder_add_int_value (r, displaytime);
+  if (image != NULL && image[0] != '\0')
+    {
+      json_builder_set_member_name (r, "image");
+      json_builder_add_string_value (r, image);
+    }
+  json_builder_end_object (r);
+  return json_builder_get_root (r);
+}
+
 /* ---- The tool table -------------------------------------------------------
  *
  * Being rebuilt from the comprehensive Kodi JSON-RPC inventory (../KODI-API.txt)
@@ -5192,6 +5359,35 @@ static const MkToolDef mk_tool_defs[] = {
    *         sighting, `last_seen` = latest, present once re-observed); `total`
    *         counts matches before the limit.
    */
+  /* ---- On-screen display — push a toast to the box's screen. ---- */
+
+  /**
+   * notify (Display):
+   *
+   * Push a message onto the Kodi player's on-screen display — a toast with a
+   * title + message, optional icon and display time. Changes nothing about
+   * playback, so unlike the transport tools it does not report player_state();
+   * it returns a confirmation echo of what was shown.
+   *
+   * Call:  GUI.ShowNotification { "title", "message", "image"?, "displaytime"? }.
+   * @param title (required): the toast's bold heading.
+   * @param message (required): the toast's body text.
+   * @param image (optional): "info"/"warning"/"error" for a built-in icon, or
+   *        any image path/URL the box can reach; omitted uses Kodi's default.
+   * @param displaytime (optional): milliseconds on screen; omitted uses Kodi's
+   *        5000ms default (Kodi clamps very small values).
+   * @param instance (optional): the Kodi instance to target; omitted uses the
+   *        configured default.
+   * @return the confirmation echo `{ "shown": true, "title", "message",
+   *         "displaytime", "image"? }`.
+   */
+  { "notify", "Show a notification toast on the Kodi box's screen: a title and "
+              "message, with an optional icon (\"info\"/\"warning\"/\"error\" "
+              "or any image path/URL) and display time in milliseconds. "
+              "Doesn't touch playback. Returns { \"shown\", \"title\", "
+              "\"message\", \"displaytime\", \"image\"? }.",
+    schema_notify, handler_notify, NULL, out_schema_notify },
+
   { "history", "List recently played items from the local playback log. Filter "
                "with an ISO-8601 window (since/until), media/kind/artist, a "
                "free-text match or an exact id; page with limit/offset/order, "

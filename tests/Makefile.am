@@ -4,7 +4,7 @@
 # history.test reads only the local log and needs no Kodi.
 
 TESTS = searchmedia.test contributors.test playfile.test queue.test \
-        getplaylist.test dropplaylists.test rpc.test history.test \
-        monitor.test
+        getplaylist.test dropplaylists.test notify.test rpc.test \
+        history.test monitor.test
 
 EXTRA_DIST = $(TESTS)

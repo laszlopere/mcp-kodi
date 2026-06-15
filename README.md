@@ -51,6 +51,7 @@ boxes when `instance` is omitted).
 | `mute`     | Mute the box's audio output. |
 | `unmute`   | Unmute the box's audio output. |
 | `nowplaying` | Report what is playing without changing anything — also a reachability + state probe. |
+| `notify`   | Show a notification toast on the box's screen — title + message, with an optional icon (`info`/`warning`/`error` or any image path/URL) and display time. Doesn't touch playback. |
 
 **Search & discovery**
 
