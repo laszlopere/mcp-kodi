@@ -105,9 +105,7 @@ is_true "unknown instance -> carries a setup hint" \
 # 2. Nothing playing: stop any active player, then the tool must refuse with
 #    the "nothing is playing" error pointing at play/playfile.
 # ===========================================================================
-active=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
-[ -n "$active" ] && kodi_rpc Player.Stop "{\"playerid\":$active}" >/dev/null 2>&1
-sleep 1
+mk_wait_idle   # stop any player and wait for real idle (was a fixed sleep)
 
 setas_err "set with nothing playing" '{"audio":0}' 'nothing is playing'
 

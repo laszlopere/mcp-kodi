@@ -175,6 +175,24 @@ b=$(rpc_on '{"method":"JSONRPC.Ping","params":[1,2]}')
 eq       "non-object params -> tool error" true "$(res_err "$b")"
 contains "params error names params"       "params" "$(g "$(res_body "$b")" '.error')"
 
+# An explicit null params is tolerated — same as omitting it (a method that
+# needs none still runs): JSONRPC.Ping returns the raw "pong", not an error.
+b=$(rpc_on '{"method":"JSONRPC.Ping","params":null}')
+eq "null params is not an error"   false    "$(res_err "$b")"
+eq "null params still returns pong" '"pong"' "$(res_text "$b")"
+
+# An empty method string is treated as missing, not passed to Kodi.
+b=$(rpc_on '{"method":""}')
+eq       "empty method -> tool error"  true "$(res_err "$b")"
+contains "empty-method error names method" "method" "$(g "$(res_body "$b")" '.error')"
+
+# A method whose REQUIRED params are missing is Kodi's to reject: its -32602
+# surfaces as a clean tool error (isError:true), not a crash.
+b=$(rpc_on '{"method":"Application.GetProperties"}')
+eq       "missing required params -> tool error" true "$(res_err "$b")"
+contains "missing-required-params error mentions Kodi" "Kodi error" \
+         "$(g "$(res_body "$b")" '.error')"
+
 # ===========================================================================
 # 4. Discoverability: `instances get` reports allow_rpc, and the rpc schema
 #    advertises which instances currently permit the hatch.

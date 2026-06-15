@@ -196,6 +196,33 @@ is_true "order=oldest: oldest before newest" \
   "$(j "$pb" '([.entries[].title] | index("Oldest")) < ([.entries[].title] | index("Newest"))')"
 
 # ===========================================================================
+# 6b. Paging boundaries: limit is clamped to [1, max] and offset to >= 0, and a
+#     past-the-end offset is an empty (but valid, not truncated) page — none of
+#     these is an error.
+# ===========================================================================
+echo "-- paging boundaries"
+# limit:0 and a negative limit clamp UP to 1 (never "return nothing"): one row.
+pb=$(res_body "$(hist '{"limit":0}')")
+eq "limit:0 is not an error"  false "$(res_err "$(hist '{"limit":0}')")"
+eq "limit:0 clamps to one row" 1 "$(g "$pb" '.returned')"
+eq "limit:0 keeps total"       4 "$(g "$pb" '.total')"
+eq "limit:-5 also clamps to one row" 1 \
+   "$(g "$(res_body "$(hist '{"limit":-5}')")" '.returned')"
+
+# A negative offset clamps to 0 — same as the bare call's newest-first page.
+pb=$(res_body "$(hist '{"offset":-1}')")
+eq "offset:-1 clamps to 0"            0        "$(g "$pb" '.offset')"
+eq "offset:-1 returns the newest first" "Newest" "$(g "$pb" '.entries[0].title')"
+
+# An offset past the end: a clean empty page — zero rows, total intact, and NOT
+# truncated (there is nothing beyond it).
+pb=$(res_body "$(hist '{"offset":999}')")
+eq "offset past end is not an error" false "$(res_err "$(hist '{"offset":999}')")"
+eq "offset past end: zero returned"  0     "$(g "$pb" '.returned')"
+eq "offset past end: total intact"   4     "$(g "$pb" '.total')"
+eq "offset past end: not truncated"  false "$(g "$pb" '.truncated')"
+
+# ===========================================================================
 # 7. Error paths and an empty log.
 # ===========================================================================
 echo "-- errors and empty log"

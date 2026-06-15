@@ -112,9 +112,7 @@ is_true "unknown instance -> carries a setup hint" \
 # ===========================================================================
 echo "-- empty cases"
 
-active=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
-[ -n "$active" ] && kodi_rpc Player.Stop "{\"playerid\":$active}" >/dev/null 2>&1
-sleep 1
+mk_wait_idle   # stop any player and wait for real idle (was a fixed sleep)
 for plid in 0 1 2; do
   kodi_rpc Playlist.Clear "{\"playlistid\":$plid}" >/dev/null 2>&1
 done
