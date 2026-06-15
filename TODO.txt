@@ -562,9 +562,6 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
     channel entries, but searchmedia cannot find them and queue cannot
     queue them; the log names things no other tool can act on.
 
-[ ] 22 Subtitle / audio-track selection for video playback —
-    common living-room request, rpc-only today.
-
 [x] 23 Glama listing — Dockerfile so the directory health-check passes.
     Done 2026-06-12. Root-caused the real blocker: the server exited 1 with no
     config AND no env, but it must boot first so the assistant can register the
