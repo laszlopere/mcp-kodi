@@ -26,44 +26,14 @@
 
 set -u
 
-KODI_HOST=${KODI_HOST:-127.0.0.1:8080}
-KODI_AUTH=${KODI_AUTH:-kodi:kodi}
-KODI_SCHEME=${KODI_SCHEME:-http}
+# Shared harness: target-Kodi defaults, skip gate, find_binary, kodi_rpc, the
+# liveness gate, and the ok/no/eq assertion framework. See tests/lib.sh. The
+# KODI_* vars lib exports are scrubbed from the server invocation with `env -u`
+# below, so the config alone steers the server under test.
+. "$(dirname "$0")/lib.sh"
 
-SKIP=77
-
-skip () { echo "SKIP: $*"; exit $SKIP; }
-
-# ---- dependencies ---------------------------------------------------------
-
-command -v jq   >/dev/null 2>&1 || skip "jq not found"
-command -v curl >/dev/null 2>&1 || skip "curl not found"
-
-# Locate the mcp-kodi binary: the automake build tree first ($top_builddir is
-# exported by `make check`), then fallbacks for running the script by hand.
-find_binary () {
-  for c in \
-    "${top_builddir:-}/src/mcp-kodi" \
-    "$(dirname "$0")/../src/mcp-kodi" \
-    "./src/mcp-kodi" \
-    "src/mcp-kodi"
-  do
-    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
-  done
-  return 1
-}
-MCP=$(find_binary) || skip "mcp-kodi binary not built"
-
-# ---- talking to Kodi directly (playback start + the liveness gate) --------
-
-kodi_rpc () { # method params-json  ->  raw JSON-RPC response
-  curl -s -m 20 -u "$KODI_AUTH" -H 'Content-Type: application/json' \
-    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" \
-    "$KODI_SCHEME://$KODI_HOST/jsonrpc"
-}
-
-pong=$(kodi_rpc JSONRPC.Ping '{}' | jq -r '.result // empty' 2>/dev/null)
-[ "$pong" = "pong" ] || skip "Kodi not reachable at $KODI_SCHEME://$KODI_HOST"
+# Dependencies (jq, curl), locate the binary into $MCP, require a live Kodi.
+mk_preflight
 
 # ---- a private config + state for the server under test -------------------
 
@@ -79,20 +49,6 @@ jq -n --arg host "$KODI_HOST" --arg auth "$KODI_AUTH" --arg scheme "$KODI_SCHEME
      live: {name: "Live Box", host: $host, auth: $auth, scheme: $scheme},
      dead: {name: "Dead Box", host: "127.0.0.1:9", scheme: "http"}}}' \
   > "$WORK/cfg/mcp-kodi/config.json"
-
-# ---- assertions -----------------------------------------------------------
-
-PASS=0
-FAIL=0
-ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
-no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
-
-eq () { # desc expected actual
-  if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi
-}
-is_true () { # desc jq-bool-string
-  if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi
-}
 
 echo "monitor functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
 
@@ -124,10 +80,7 @@ done
 
 if [ -z "$played_id" ]; then
   echo "   (nothing playable in the library — playback assertions skipped)"
-  echo "------------------------------------------------------------"
-  printf 'monitor functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
-  [ "$FAIL" -eq 0 ] || exit 1
-  exit 0
+  mk_tally "monitor functional test"
 fi
 
 # The file Kodi says is now playing — what the poller must record.
@@ -198,8 +151,4 @@ now=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empt
 [ -n "$now" ] && kodi_rpc Player.Stop "{\"playerid\":$now}" >/dev/null 2>&1
 [ -n "$prev" ] && echo "   (note: a player was active before the test; left stopped)"
 
-# ---- tally ----------------------------------------------------------------
-echo "------------------------------------------------------------"
-printf 'monitor functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ] || exit 1
-exit 0
+mk_tally "monitor functional test"

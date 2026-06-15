@@ -33,86 +33,18 @@
 
 set -u
 
-KODI_HOST=${KODI_HOST:-127.0.0.1:8080}
-KODI_AUTH=${KODI_AUTH:-kodi:kodi}
-KODI_SCHEME=${KODI_SCHEME:-http}
-export KODI_HOST KODI_AUTH KODI_SCHEME
+# Shared harness: target-Kodi defaults, skip gates, kodi_rpc / mcp_tool, the jq
+# helpers, and the ok/no/eq assertion framework. See tests/lib.sh.
+. "$(dirname "$0")/lib.sh"
 
 # notify never writes the history log, but keep any stray state write out of the
 # user's real ~/.local/state by redirecting XDG_STATE_HOME to a throwaway dir.
-STATE_DIR=$(mktemp -d) || { echo "SKIP: cannot mktemp"; exit 77; }
-export XDG_STATE_HOME="$STATE_DIR"
-trap 'rm -rf "$STATE_DIR"' EXIT
+mk_state_dir
 
-SKIP=77
+# Dependencies (jq, curl), locate the binary into $MCP, require a live Kodi.
+mk_preflight
 
-skip () { echo "SKIP: $*"; exit $SKIP; }
-
-# ---- dependencies ---------------------------------------------------------
-
-command -v jq   >/dev/null 2>&1 || skip "jq not found"
-command -v curl >/dev/null 2>&1 || skip "curl not found"
-
-# Locate the mcp-kodi binary: the automake build tree first ($top_builddir is
-# exported by `make check`), then fallbacks for running the script by hand.
-find_binary () {
-  for c in \
-    "${top_builddir:-}/src/mcp-kodi" \
-    "$(dirname "$0")/../src/mcp-kodi" \
-    "./src/mcp-kodi" \
-    "src/mcp-kodi"
-  do
-    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
-  done
-  return 1
-}
-MCP=$(find_binary) || skip "mcp-kodi binary not built"
-
-# ---- talking to Kodi directly (the liveness gate) -------------------------
-
-kodi_rpc () { # method params-json  ->  raw JSON-RPC response
-  curl -s -m 20 -u "$KODI_AUTH" -H 'Content-Type: application/json' \
-    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" \
-    "$KODI_SCHEME://$KODI_HOST/jsonrpc"
-}
-
-pong=$(kodi_rpc JSONRPC.Ping '{}' | jq -r '.result // empty' 2>/dev/null)
-[ "$pong" = "pong" ] || skip "Kodi not reachable at $KODI_SCHEME://$KODI_HOST"
-
-# ---- talking to the server under test (MCP over stdio) --------------------
-
-# Feed `initialize` + one `tools/call`, echo back the tool result object for
-# request id 2 (`{ content:[{type,text}], isError }`). The server reads
-# newline-delimited JSON and exits on EOF, so one invocation per call keeps
-# every assertion isolated.
-mcp_tool () { # name arguments-json  ->  tool result object
-  printf '%s\n%s\n' \
-    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
-    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
-    | "$MCP" 2>/dev/null \
-    | jq -c 'select(.id==2) | .result'
-}
-
-notify   () { mcp_tool notify "$1"; }             # arguments-json -> result object
-res_err  () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
-res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
-jargs    () { jq -cn "$@"; }                      # build an arguments object safely
-g        () { printf '%s' "$1" | jq -r "$2"; }    # body, filter -> scalar
-j        () { printf '%s' "$1" | jq    "$2"; }    # body, filter -> json/bool
-
-# ---- assertions -----------------------------------------------------------
-
-PASS=0
-FAIL=0
-ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
-no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
-
-eq () { # desc expected actual
-  if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi
-}
-is_true () { # desc jq-bool-string
-  if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi
-}
+notify () { mcp_tool notify "$1"; }               # arguments-json -> result object
 
 echo "notify functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
 
@@ -169,8 +101,4 @@ eq "unknown instance -> category no_instance" no_instance \
 is_true "unknown instance -> carries a setup hint" \
         "$(j "$(res_body "$b")" 'has("hint") and (.hint|length>0)')"
 
-# ---- tally ----------------------------------------------------------------
-echo "------------------------------------------------------------"
-printf 'notify functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ] || exit 1
-exit 0
+mk_tally "notify functional test"

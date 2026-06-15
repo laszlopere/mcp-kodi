@@ -34,9 +34,11 @@
 
 set -u
 
-KODI_HOST=${KODI_HOST:-127.0.0.1:8080}
-KODI_AUTH=${KODI_AUTH:-kodi:kodi}
-KODI_SCHEME=${KODI_SCHEME:-http}
+# Shared harness: target-Kodi defaults, skip gate, find_binary, kodi_rpc, the
+# liveness gate, the jq helpers, and the assertion framework. See tests/lib.sh.
+# (The KODI_* vars lib exports are scrubbed per-call with `env -u` below, so the
+# server reads its config from the private XDG_CONFIG_HOME, not the environment.)
+. "$(dirname "$0")/lib.sh"
 
 # The second box (a remote instance) plays the "rpc disabled" role in the
 # realistic two-instance config (section 5). Overridable, but it need NOT be
@@ -45,40 +47,8 @@ KODI_SCHEME=${KODI_SCHEME:-http}
 KODI_REMOTE_HOST=${KODI_REMOTE_HOST:-kodi.example.local:8443}
 KODI_REMOTE_SCHEME=${KODI_REMOTE_SCHEME:-https}
 
-SKIP=77
-
-skip () { echo "SKIP: $*"; exit $SKIP; }
-
-# ---- dependencies ---------------------------------------------------------
-
-command -v jq   >/dev/null 2>&1 || skip "jq not found"
-command -v curl >/dev/null 2>&1 || skip "curl not found"
-
-# Locate the mcp-kodi binary: the automake build tree first ($top_builddir is
-# exported by `make check`), then fallbacks for running the script by hand.
-find_binary () {
-  for c in \
-    "${top_builddir:-}/src/mcp-kodi" \
-    "$(dirname "$0")/../src/mcp-kodi" \
-    "./src/mcp-kodi" \
-    "src/mcp-kodi"
-  do
-    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
-  done
-  return 1
-}
-MCP=$(find_binary) || skip "mcp-kodi binary not built"
-
-# ---- talking to Kodi directly (for the liveness gate) ---------------------
-
-kodi_rpc () { # method params-json  ->  raw JSON-RPC response
-  curl -s -m 20 -u "$KODI_AUTH" -H 'Content-Type: application/json' \
-    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" \
-    "$KODI_SCHEME://$KODI_HOST/jsonrpc"
-}
-
-pong=$(kodi_rpc JSONRPC.Ping '{}' | jq -r '.result // empty' 2>/dev/null)
-[ "$pong" = "pong" ] || skip "Kodi not reachable at $KODI_SCHEME://$KODI_HOST"
+# Dependencies (jq, curl), locate the binary into $MCP, require a live Kodi.
+mk_preflight
 
 # ---- two server configs: one opted into rpc, one not ----------------------
 #
@@ -146,28 +116,6 @@ mcp_tool_schema () { # xdg name  ->  the tool's inputSchema
 
 rpc_on  () { mcp_tool_cfg "$ON"  rpc "$1"; }   # arguments-json -> result object
 rpc_off () { mcp_tool_cfg "$OFF" rpc "$1"; }   # arguments-json -> result object
-res_err  () { printf '%s' "$1" | jq -r '.isError'; }            # "true" | "false"
-res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }  # tool payload
-res_text () { printf '%s' "$1" | jq -r '.content[0].text'; }    # raw text payload
-g        () { printf '%s' "$1" | jq -r "$2"; } # body, filter -> scalar
-j        () { printf '%s' "$1" | jq    "$2"; } # body, filter -> json/bool
-
-# ---- assertions -----------------------------------------------------------
-
-PASS=0
-FAIL=0
-ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
-no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
-
-eq () { # desc expected actual
-  if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi
-}
-is_true () { # desc jq-bool-string
-  if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi
-}
-contains () { # desc haystack needle
-  case "$2" in *"$3"*) ok "$1";; *) no "$1" "[$2] has no [$3]";; esac
-}
 
 echo "rpc functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
 
@@ -179,7 +127,7 @@ echo "-- gate: disabled instance"
 
 b=$(rpc_off '{"method":"JSONRPC.Ping"}')
 eq       "rpc on a non-opted-in instance is an error" true "$(res_err "$b")"
-contains "disabled error names allow_rpc"  "$(g "$(res_body "$b")" '.error')" "allow_rpc"
+contains "disabled error names allow_rpc"  "allow_rpc" "$(g "$(res_body "$b")" '.error')"
 
 # The escape hatch must not be grantable through the instances tool: a `set`
 # trying to flip allow_rpc on is ignored, so rpc stays disabled.
@@ -212,7 +160,7 @@ is_true "raw result carries a muted boolean"   "$(j "$pb" '(.muted | type) == "b
 # 2c. A Kodi-side error surfaces as a tool error (isError:true), not a crash.
 b=$(rpc_on '{"method":"NoSuch.Method"}')
 eq       "unknown method -> tool error"  true "$(res_err "$b")"
-contains "error mentions Kodi"           "$(g "$(res_body "$b")" '.error')" "Kodi error"
+contains "error mentions Kodi"           "Kodi error" "$(g "$(res_body "$b")" '.error')"
 
 # ===========================================================================
 # 3. Argument validation — clean tool errors, never a crash or a Kodi call.
@@ -221,11 +169,11 @@ echo "-- argument validation"
 
 b=$(rpc_on '{}')
 eq       "missing method -> tool error"  true "$(res_err "$b")"
-contains "missing-method error names method" "$(g "$(res_body "$b")" '.error')" "method"
+contains "missing-method error names method" "method" "$(g "$(res_body "$b")" '.error')"
 
 b=$(rpc_on '{"method":"JSONRPC.Ping","params":[1,2]}')
 eq       "non-object params -> tool error" true "$(res_err "$b")"
-contains "params error names params"       "$(g "$(res_body "$b")" '.error')" "params"
+contains "params error names params"       "params" "$(g "$(res_body "$b")" '.error')"
 
 # ===========================================================================
 # 4. Discoverability: `instances get` reports allow_rpc, and the rpc schema
@@ -238,8 +186,8 @@ got=$(res_body "$b" | jq -r '.instances[] | select(.key=="local") | .allow_rpc')
 eq "instances get reports allow_rpc:true" true "$got"
 
 schema=$(mcp_tool_schema "$ON" rpc)
-contains "rpc schema names the permitted instance" \
-         "$(printf '%s' "$schema" | jq -r '.properties.method.description')" "local"
+contains "rpc schema names the permitted instance" "local" \
+         "$(printf '%s' "$schema" | jq -r '.properties.method.description')"
 
 # ===========================================================================
 # 5. Realistic two-instance topology in ONE config: local opted-in (default),
@@ -262,8 +210,8 @@ eq "rpc on explicit local returns raw \"pong\""   '"pong"' "$(res_text "$b")"
 # that names both the instance and the flag to set.
 b=$(mcp_tool_cfg "$BOTH" rpc '{"instance":"remote","method":"JSONRPC.Ping"}')
 eq       "rpc on remote is refused"               true "$(res_err "$b")"
-contains "remote refusal names allow_rpc"         "$(g "$(res_body "$b")" '.error')" "allow_rpc"
-contains "remote refusal names the instance"      "$(g "$(res_body "$b")" '.error')" "remote"
+contains "remote refusal names allow_rpc"         "allow_rpc" "$(g "$(res_body "$b")" '.error')"
+contains "remote refusal names the instance"      "remote"    "$(g "$(res_body "$b")" '.error')"
 
 # instances get reflects the split posture: local on, remote (no key) reported off.
 b=$(mcp_tool_cfg "$BOTH" instances '{"action":"get"}')
@@ -273,11 +221,7 @@ eq "instances get: remote allow_rpc:false" false "$(printf '%s' "$pb" | jq -r '.
 
 # The rpc schema advertises the permitted instance (local), guiding the model.
 schema=$(mcp_tool_schema "$BOTH" rpc)
-contains "rpc schema names local as permitted" \
-         "$(printf '%s' "$schema" | jq -r '.properties.method.description')" "local"
+contains "rpc schema names local as permitted" "local" \
+         "$(printf '%s' "$schema" | jq -r '.properties.method.description')"
 
-# ---- tally ----------------------------------------------------------------
-echo "------------------------------------------------------------"
-printf 'rpc functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ] || exit 1
-exit 0
+mk_tally "rpc functional test"

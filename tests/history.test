@@ -17,24 +17,13 @@
 
 set -u
 
-SKIP=77
-skip () { echo "SKIP: $*"; exit $SKIP; }
+# Shared harness: skip gate, find_binary, the jq helpers, and the ok/no/eq/
+# contains assertion framework. See tests/lib.sh. This test needs NO live Kodi,
+# so it does NOT call mk_preflight/mk_require_ping — it only needs jq + binary,
+# and drives the server through its own env-scrubbed `hist`/`schema` below.
+. "$(dirname "$0")/lib.sh"
 
 command -v jq >/dev/null 2>&1 || skip "jq not found"
-
-# Locate the mcp-kodi binary: the automake build tree first ($top_builddir is
-# exported by `make check`), then fallbacks for running the script by hand.
-find_binary () {
-  for c in \
-    "${top_builddir:-}/src/mcp-kodi" \
-    "$(dirname "$0")/../src/mcp-kodi" \
-    "./src/mcp-kodi" \
-    "src/mcp-kodi"
-  do
-    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
-  done
-  return 1
-}
 MCP=$(find_binary) || skip "mcp-kodi binary not built"
 
 # ---- a private config + a known history log -------------------------------
@@ -82,20 +71,6 @@ schema () { # -> the history tool's inputSchema
         "$MCP" 2>/dev/null \
     | jq -c 'select(.id==2) | .result.tools[] | select(.name=="history") | .inputSchema'
 }
-res_err  () { printf '%s' "$1" | jq -r '.isError'; }
-res_body () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }
-g        () { printf '%s' "$1" | jq -r "$2"; }
-j        () { printf '%s' "$1" | jq    "$2"; }
-
-# ---- assertions -----------------------------------------------------------
-PASS=0
-FAIL=0
-ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
-no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
-eq () { if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi; }
-is_true () { if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi; }
-contains () { case "$2" in *"$3"*) ok "$1";; *) no "$1" "[$2] has no [$3]";; esac; }
-
 echo "history functional test — binary $MCP"
 
 # ===========================================================================
@@ -226,7 +201,7 @@ is_true "order=oldest: oldest before newest" \
 echo "-- errors and empty log"
 b=$(hist '{"since":"yesterday"}')
 eq       "malformed since -> tool error" true "$(res_err "$b")"
-contains "error names the bad arg"       "$(g "$(res_body "$b")" '.error')" "since"
+contains "error names the bad arg"       "since" "$(g "$(res_body "$b")" '.error')"
 
 # A missing log is not an error: zero entries.
 rm -f "$HIST"
@@ -239,22 +214,18 @@ eq "missing log: zero total"     0     "$(g "$(res_body "$b")" '.total')"
 # ===========================================================================
 echo "-- schema"
 s=$(schema)
-contains "schema has since"  "$s" '"since"'
-contains "schema has until"  "$s" '"until"'
-contains "schema has limit"  "$s" '"limit"'
-contains "schema has offset" "$s" '"offset"'
-contains "schema has order"  "$s" '"order"'
-contains "schema has count"  "$s" '"count"'
-contains "schema has media"  "$s" '"media"'
-contains "schema has kind"   "$s" '"kind"'
-contains "schema has artist" "$s" '"artist"'
-contains "schema has match"  "$s" '"match"'
-contains "schema has id"     "$s" '"id"'
-contains "instance desc says ALL instances" \
-  "$(printf '%s' "$s" | jq -r '.properties.instance.description')" "ALL instances"
+contains "schema has since"  '"since"'  "$s"
+contains "schema has until"  '"until"'  "$s"
+contains "schema has limit"  '"limit"'  "$s"
+contains "schema has offset" '"offset"' "$s"
+contains "schema has order"  '"order"'  "$s"
+contains "schema has count"  '"count"'  "$s"
+contains "schema has media"  '"media"'  "$s"
+contains "schema has kind"   '"kind"'   "$s"
+contains "schema has artist" '"artist"' "$s"
+contains "schema has match"  '"match"'  "$s"
+contains "schema has id"     '"id"'     "$s"
+contains "instance desc says ALL instances" "ALL instances" \
+  "$(printf '%s' "$s" | jq -r '.properties.instance.description')"
 
-# ---- tally ----------------------------------------------------------------
-echo "------------------------------------------------------------"
-printf 'history functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ] || exit 1
-exit 0
+mk_tally "history functional test"
