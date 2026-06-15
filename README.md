@@ -59,6 +59,7 @@ boxes when `instance` is omitted).
 |----------------|--------------|
 | `searchmedia`  | Find playable **leaf files** by name across `music` / `tv-show` / `movie`, with paging (`limit`/`offset`) and a total count. Music `title` matches the **album**; the `song` arg matches a track by its **own title** library-wide (*"play Hey Jude"* needs no artist), narrowable by `artist`/`title`/`number`. For tv, `title` matches the **show**; the `episodetitle` arg finds an episode by its **own title** library-wide (narrowable by a show `title`). Movie/tv-show queries can also filter by `actor`/`director`. Resolves the library by name, so the assistant acts by title, not numeric id. Media items only — people lookups live in `contributors`. |
 | `contributors` | Find or list **people** — bands, solo artists, composers, actors, directors — by optional name substring and/or `type`. Each row says where the name yields hits (`albums`/`songs`/`movies`/`tvshows`); feed the exact name back into `searchmedia` to drill. |
+| `audio_and_subtitle_info` | Inspect a movie or episode's **audio tracks and subtitles before playback**, from Kodi's cached `streamdetails` — no playback. Name the item by `type`+`id` (a `searchmedia` row) or by `file`. Returns `{ file, audio:[{ index, codec, channels, language }], subtitle:[{ index, language }], video:[…] }`. **Embedded streams only** — external `.srt` sidecars and files Kodi hasn't scanned come back as empty arrays. |
 
 **Playback & queue**
 

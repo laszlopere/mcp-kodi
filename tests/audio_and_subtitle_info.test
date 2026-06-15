@@ -1,0 +1,214 @@
+#!/bin/sh
+# Functional test for the `audio_and_subtitle_info` tool.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi. The tool reports a movie/episode's embedded audio and subtitle streams
+# BEFORE playback, from Kodi's cached streamdetails (VideoLibrary.Get*Details by
+# type+id, or Files.GetFileDetails by file) — it starts nothing and changes
+# nothing. This test exercises every caller mistake (each a clean tool error
+# whose message names the fault and the accepted usage), then discovers a real
+# movie via `searchmedia` and asserts the tool returns the three normalized
+# stream arrays — by library id and by file path — with a synthesized 0-based
+# `index` on each stream. Because the tool never plays anything, there is no
+# volume guard and no playback to clean up.
+#
+# Library-agnostic: it inspects whatever movie the library actually holds, so it
+# passes against any *populated* library. Streamdetails depth varies per file
+# (an audio-only or never-scanned item may legitimately carry empty arrays), so
+# the assertions check shape and the index invariant, not specific codecs.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#   - at least one movie in the library (else the live-data assertions SKIP)
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+KODI_HOST=${KODI_HOST:-127.0.0.1:8080}
+KODI_AUTH=${KODI_AUTH:-kodi:kodi}
+KODI_SCHEME=${KODI_SCHEME:-http}
+export KODI_HOST KODI_AUTH KODI_SCHEME
+
+# The tool makes no playback-affecting call, so nothing is logged to history;
+# still, redirect XDG_STATE_HOME to a throwaway dir to keep the run hermetic.
+STATE_DIR=$(mktemp -d) || { echo "SKIP: cannot mktemp"; exit 77; }
+export XDG_STATE_HOME="$STATE_DIR"
+trap 'rm -rf "$STATE_DIR"' EXIT
+
+SKIP=77
+skip () { echo "SKIP: $*"; exit $SKIP; }
+
+# ---- dependencies ---------------------------------------------------------
+
+command -v jq   >/dev/null 2>&1 || skip "jq not found"
+command -v curl >/dev/null 2>&1 || skip "curl not found"
+
+find_binary () {
+  for c in \
+    "${top_builddir:-}/src/mcp-kodi" \
+    "$(dirname "$0")/../src/mcp-kodi" \
+    "./src/mcp-kodi" \
+    "src/mcp-kodi"
+  do
+    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# ---- talking to Kodi directly (the liveness gate + leaf discovery) --------
+
+kodi_rpc () { # method params-json  ->  raw JSON-RPC response
+  curl -s -m 20 -u "$KODI_AUTH" -H 'Content-Type: application/json' \
+    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" \
+    "$KODI_SCHEME://$KODI_HOST/jsonrpc"
+}
+
+pong=$(kodi_rpc JSONRPC.Ping '{}' | jq -r '.result // empty' 2>/dev/null)
+[ "$pong" = "pong" ] || skip "Kodi not reachable at $KODI_SCHEME://$KODI_HOST"
+
+# ---- talking to the server under test (MCP over stdio) --------------------
+
+mcp_tool () { # name arguments-json  ->  tool result object
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
+    | "$MCP" 2>/dev/null \
+    | jq -c 'select(.id==2) | .result'
+}
+
+info        () { mcp_tool audio_and_subtitle_info "$1"; }
+searchmedia () { mcp_tool searchmedia             "$1"; }
+res_err     () { printf '%s' "$1" | jq -r '.isError'; }
+res_body    () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }
+jargs       () { jq -cn "$@"; }
+g           () { printf '%s' "$1" | jq -r "$2"; }
+j           () { printf '%s' "$1" | jq    "$2"; }
+
+# ---- assertions -----------------------------------------------------------
+
+PASS=0
+FAIL=0
+ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
+
+eq () { # desc expected actual
+  if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi
+}
+is_true () { # desc jq-bool-string
+  if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi
+}
+contains () { # desc needle haystack
+  case "$3" in
+    *"$2"*) ok "$1";;
+    *)      no "$1" "wanted [$2] in [$3]";;
+  esac
+}
+
+# A call that must fail: assert isError:true and that the message guides the
+# caller — it names what was wrong and what to do instead.
+info_err () { # desc arguments-json expected-message-fragment
+  b=$(info "$2")
+  eq "$1 -> tool error" true "$(res_err "$b")"
+  contains "$1 -> message guides the caller" "$3" "$(g "$(res_body "$b")" '.error')"
+}
+
+echo "audio_and_subtitle_info functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ===========================================================================
+# 1. Argument errors first (no Kodi needed): each mistake a caller can make is
+#    a clean tool error (isError:true) whose message names the offending
+#    argument and the accepted usage.
+# ===========================================================================
+echo "-- errors / edges"
+
+info_err "neither id nor file"  '{}' \
+         'exactly one of "id" (with "type") or "file"'
+info_err "empty file"           '{"file":""}' \
+         'exactly one of "id" (with "type") or "file"'
+info_err "both id and file"     '{"id":5,"file":"/v/a.mkv"}' \
+         'exactly one of "id" (with "type") or "file"'
+info_err "id without type"      '{"id":5}' \
+         'naming its kind (movie/episode)'
+info_err "id with unknown type" '{"id":5,"type":"song"}' \
+         'naming its kind (movie/episode)'
+
+# An unconfigured instance is a communication failure: the error carries the
+# no_instance category and a setup hint.
+b=$(info '{"instance":"no-such-box","file":"/v/a.mkv"}')
+eq "unknown instance -> tool error" true "$(res_err "$b")"
+eq "unknown instance -> category no_instance" no_instance \
+   "$(g "$(res_body "$b")" '.category')"
+is_true "unknown instance -> carries a setup hint" \
+        "$(j "$(res_body "$b")" 'has("hint") and (.hint|length>0)')"
+
+# A nonexistent library id is refused with a "no <type> with id … in the
+# library" error.
+info_err "nonexistent movie id" '{"type":"movie","id":999999999}' \
+         'in the library'
+
+# ===========================================================================
+# 2. Discover a real movie via `searchmedia`; a movie-less library skips the
+#    rest (still a pass — the error contract above is fully exercised).
+# ===========================================================================
+b=$(res_body "$(searchmedia '{"type":"movie","limit":1}')")
+if [ "$(j "$b" '.returned >= 1')" != true ]; then
+  echo "   (library holds no movies — live-data assertions skipped)"
+  echo "------------------------------------------------------------"
+  printf 'audio_and_subtitle_info functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+  [ "$FAIL" -eq 0 ] || exit 1
+  exit 0
+fi
+
+movieid=$(g "$b" '.rows[0].movieid')
+file=$(g "$b" '.rows[0].file')
+echo "-- inspecting movie $movieid"
+echo "   ($file)"
+
+# ===========================================================================
+# 3. By library id: the three stream arrays come back, the file is echoed, and
+#    every stream carries its 0-based position as `index`.
+# ===========================================================================
+b=$(info "$(jargs --argjson i "$movieid" '{type:"movie",id:$i}')")
+eq "by-id call is not an error" false "$(res_err "$b")"
+body=$(res_body "$b")
+
+is_true "audio is an array"    "$(j "$body" '.audio    | type == "array"')"
+is_true "subtitle is an array" "$(j "$body" '.subtitle | type == "array"')"
+is_true "video is an array"    "$(j "$body" '.video    | type == "array"')"
+is_true "file is a non-empty string" \
+        "$(j "$body" '(.file | type == "string") and (.file | length > 0)')"
+
+# index invariant: each array is indexed 0..n-1 in order, across all three.
+is_true "every stream's index equals its position" \
+        "$(j "$body" '[.audio, .subtitle, .video]
+                      | all(. as $a | [range(0; length)] | all(. as $k | $a[$k].index == $k))')"
+
+# A movie almost always has at least one video stream; assert the head index
+# only when the array is non-empty so an unscanned outlier still passes.
+is_true "first video stream (if any) has index 0" \
+        "$(j "$body" '(.video | length == 0) or (.video[0].index == 0)')"
+
+# ===========================================================================
+# 4. By file path: Files.GetFileDetails{media:"video"} resolves the same item;
+#    the three arrays come back and the echoed file matches what we asked for.
+# ===========================================================================
+b=$(info "$(jargs --arg f "$file" '{file:$f}')")
+eq "by-file call is not an error" false "$(res_err "$b")"
+body=$(res_body "$b")
+is_true "by-file audio is an array"    "$(j "$body" '.audio    | type == "array"')"
+is_true "by-file subtitle is an array" "$(j "$body" '.subtitle | type == "array"')"
+is_true "by-file video is an array"    "$(j "$body" '.video    | type == "array"')"
+eq "by-file echoes the requested path" "$file" "$(g "$body" '.file')"
+
+# ---- tally ----------------------------------------------------------------
+echo "------------------------------------------------------------"
+printf 'audio_and_subtitle_info functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+exit 0

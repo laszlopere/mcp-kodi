@@ -219,6 +219,28 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         image? } — displaytime echoes the requested value or 5000. image and
         displaytime are forwarded only when given; empty/missing title or
         message is a clean tool error (tests/notify.test)
+    [ ] 11.6.9 Audio language and subtitles
+        [x] 11.6.9.1 finding the information before the playback —
+            audio_and_subtitle_info tool: embedded streams from streamdetails
+            (VideoLibrary.GetMovieDetails/GetEpisodeDetails by type+id, or
+            Files.GetFileDetails {media:"video"} by file), no playback needed.
+            Returns { file, audio:[{index,codec,channels,language}],
+            subtitle:[{index,language}], video:[…] } — each stream carries its
+            position as index (the handle .2/.3 select by for embedded streams).
+            Embedded only: sidecar subs + unscanned files come back empty
+            (tests/audio_and_subtitle_info.test)
+        [ ] 11.6.9.2 setting the audio track and subtitles while playing —
+            one tool: Player.SetAudioStream {playerid, stream:index|"next"|
+            "previous"} + Player.SetSubtitle {playerid, subtitle:index|"on"|
+            "off"|..., enable:true} (enable:true required to actually show it)
+        [ ] 11.6.9.3 setting the audio track and subtitles when starting the
+            playback, and for the next items in the playlist — one tool.
+            Player.Open has no audio/subtitle option, so the tool applies
+            11.6.9.2 once the stream starts (Player.OnAVStart). For the active
+            item it's easy: open, wait, apply, return. For queued items it's
+            hard: a queued item carries no preference, so it needs a real-time
+            OnAVStart notification (not polling) per item — a persistent
+            listener outliving the tool call that queued it
 
 [ ] 11.7 Prompts / resources — on hold, not shipping now; tools are the
     whole server surface, initialize advertises only {tools:{}}. Revisit

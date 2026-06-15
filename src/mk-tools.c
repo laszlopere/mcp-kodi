@@ -3779,6 +3779,298 @@ handler_queue (MkTools *self, const MkToolDef *def, JsonObject *args,
   return player_state (self, instance, error);
 }
 
+/* ---- audio_and_subtitle_info ----------------------------------------------
+ *
+ * Read what audio tracks and subtitles a video carries **before** playing it.
+ * Kodi caches each item's embedded stream layout in its video DB at scan time
+ * (`streamdetails`), so this is answerable with no playback and nothing
+ * mutated — the read-only first step of the audio/subtitle group, surfacing the
+ * per-stream index that the during-playback setters will select by.
+ */
+
+/* The library id kinds `audio_and_subtitle_info` accepts for its `type`/`id`
+ * pair. Songs are excluded: an audio file carries no selectable audio-track or
+ * subtitle streamdetails, so the question is meaningless for them. */
+static const char *const mk_info_types[] = { "movie", "episode", NULL };
+
+/* Members copied through from each `streamdetails` entry, per stream kind. Kodi
+ * fills a superset and copy_member() silently skips any a given entry lacks, so
+ * a missing field just drops from that element rather than erroring. */
+static const char *const mk_audio_stream_fields[] = { "codec", "channels",
+                                                      "language", NULL };
+static const char *const mk_subtitle_stream_fields[] = { "language", NULL };
+static const char *const mk_video_stream_fields[] = {
+  "codec", "width", "height", "aspect", "duration", "stereomode", "hdrtype",
+  NULL
+};
+
+/**
+ * stream_array:
+ * @b: the builder, positioned inside the result object.
+ * @sd: Kodi's `streamdetails` object, or NULL when the item has none.
+ * @kind: the stream kind / member name — "audio", "subtitle" or "video".
+ * @fields: NULL-terminated list of entry members to copy through.
+ *
+ * Emits `"<kind>": [ … ]` — one object per stream in @sd's @kind array, each
+ * carrying a synthesized 0-based `index` (its position, the handle the
+ * `Player.SetAudioStream`/`SetSubtitle` setters select by for embedded streams)
+ * plus the @fields present on that entry. The array is always emitted, empty
+ * when @sd is NULL or has no streams of this kind.
+ */
+static void
+stream_array (JsonBuilder *b, JsonObject *sd, const char *kind,
+              const char *const *fields)
+{
+  json_builder_set_member_name (b, kind);
+  json_builder_begin_array (b);
+
+  JsonNode *node = sd != NULL ? json_object_get_member (sd, kind) : NULL;
+  JsonArray *arr =
+    node != NULL && JSON_NODE_HOLDS_ARRAY (node) ? json_node_get_array (node)
+                                                 : NULL;
+  guint n = arr != NULL ? json_array_get_length (arr) : 0;
+  for (guint i = 0; i < n; i++)
+    {
+      JsonNode *en = json_array_get_element (arr, i);
+      if (en == NULL || !JSON_NODE_HOLDS_OBJECT (en))
+        continue;
+      JsonObject *entry = json_node_get_object (en);
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "index");
+      json_builder_add_int_value (b, i);
+      for (gsize f = 0; fields[f] != NULL; f++)
+        copy_member (b, entry, fields[f]);
+      json_builder_end_object (b);
+    }
+
+  json_builder_end_array (b);
+}
+
+/**
+ * schema_audio_and_subtitle_info:
+ * @self: the table (used to name the configured instances).
+ *
+ * Schema for the `audio_and_subtitle_info` tool: the optional `instance`, the
+ * item named as either a `type` + `id` pair (a `searchmedia` movie/episode row)
+ * or a `file` path, mirroring `queue`. The one-of-`id`/`file` rule is enforced
+ * in the handler so the schema stays a flat property list.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_audio_and_subtitle_info (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_instance (b, self, FALSE);
+  prop_enum (b, "type", mk_info_types,
+             "Kind of library id passed in `id` — picks the item key "
+             "(movieid/episodeid). Required with `id`; not used with `file`. "
+             "Songs are not accepted: audio files carry no selectable "
+             "audio-track or subtitle streams.");
+  prop_typed (b, "id", "integer",
+              "Library id of the item to inspect — the `movieid`/`episodeid` of "
+              "a `searchmedia` result row, matching `type`. Give exactly one of "
+              "`id` or `file`.");
+  prop_typed (b, "file", "string",
+              "Path of the file to inspect — the `file` field of a "
+              "`searchmedia` result row; any path Kodi can reach works. "
+              "Streamdetails are only populated for files Kodi has scanned into "
+              "its library. Give exactly one of `id` or `file`.");
+
+  schema_end (b, NULL);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_audio_and_subtitle_info:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments; `type`+`id` or `file` name the item, optional
+ *        `instance`.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `audio_and_subtitle_info` tool: returns the embedded
+ * audio/subtitle/video stream layout of a movie or episode **before** playback,
+ * reading Kodi's cached `streamdetails`. No playback, nothing mutated.
+ *
+ * Resolves the item like `queue` (exactly one of `type`+`id` or `file`):
+ *
+ *   - `type`+`id` → `VideoLibrary.GetMovieDetails`/`GetEpisodeDetails`
+ *   - `file`      → `Files.GetFileDetails { media: "video" }`
+ *
+ * both with `properties: ["streamdetails","file"]`. An unknown id (or a file
+ * Kodi cannot detail) yields a clean "no such item" tool error; other call
+ * failures propagate. The reply echoes the resolved `file` and the three
+ * normalized stream arrays via stream_array().
+ *
+ * Only **embedded** streams appear — external subtitle sidecars (.srt) and a
+ * file Kodi has not scanned into its library both surface as empty arrays;
+ * those are discovered only at playback. The per-stream `index` maps to the
+ * `Player.SetAudioStream`/`SetSubtitle` index for embedded streams, but may
+ * diverge once sidecars merge in at playback.
+ *
+ * @return the stream-info object `{ "file", "audio":[…], "subtitle":[…],
+ *         "video":[…] }`, or NULL with @error set (bad arguments, an unknown
+ *         item, or a call failure).
+ */
+static JsonNode *
+handler_audio_and_subtitle_info (MkTools *self, const MkToolDef *def,
+                                 JsonObject *args, GError **error)
+{
+  (void) def;
+  const char *instance = arg_instance (args);
+  const char *type = arg_str (args, "type", NULL);
+  const char *file = arg_str (args, "file", NULL);
+  gint64 id = 0;
+  gboolean have_id = arg_int (args, "id", &id);
+  gboolean have_file = file != NULL && file[0] != '\0';
+
+  if (have_id == have_file)
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "audio_and_subtitle_info: give exactly one of \"id\" (with "
+                   "\"type\") or \"file\"");
+      return NULL;
+    }
+
+  const char *method = NULL, *detkey = NULL;
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  if (have_id)
+    {
+      gboolean known = FALSE;
+      for (gsize i = 0; mk_info_types[i] != NULL; i++)
+        known = known || g_strcmp0 (type, mk_info_types[i]) == 0;
+      if (!known)
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "audio_and_subtitle_info: \"id\" needs \"type\" naming "
+                       "its kind (movie/episode)");
+          return NULL;
+        }
+
+      const char *idkey;
+      if (g_str_equal (type, "episode"))
+        {
+          method = "VideoLibrary.GetEpisodeDetails";
+          idkey = "episodeid";
+          detkey = "episodedetails";
+        }
+      else
+        {
+          method = "VideoLibrary.GetMovieDetails";
+          idkey = "movieid";
+          detkey = "moviedetails";
+        }
+      json_builder_set_member_name (b, idkey);
+      json_builder_add_int_value (b, id);
+    }
+  else
+    {
+      method = "Files.GetFileDetails";
+      detkey = "filedetails";
+      json_builder_set_member_name (b, "file");
+      json_builder_add_string_value (b, file);
+      /* `media` is an extension filter; "video" is what makes Kodi parse and
+       * return the video item's streamdetails for the path. */
+      json_builder_set_member_name (b, "media");
+      json_builder_add_string_value (b, "video");
+    }
+  json_builder_set_member_name (b, "properties");
+  json_builder_begin_array (b);
+  json_builder_add_string_value (b, "streamdetails");
+  json_builder_add_string_value (b, "file");
+  json_builder_end_array (b);
+  json_builder_end_object (b);
+  g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+  g_autoptr (GError) local = NULL;
+  g_autoptr (JsonNode) res =
+    mk_kodi_call (self->kodi, instance, method, params, &local);
+  if (res == NULL)
+    {
+      if (g_error_matches (local, MK_KODI_ERROR, MK_KODI_ERROR_RPC) && have_id)
+        g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                     "audio_and_subtitle_info: no %s with id %" G_GINT64_FORMAT
+                     " in the library", type, id);
+      else if (g_error_matches (local, MK_KODI_ERROR, MK_KODI_ERROR_RPC))
+        g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                     "audio_and_subtitle_info: Kodi has no details for \"%s\" "
+                     "(%s)", file, local->message);
+      else
+        g_propagate_error (error, g_steal_pointer (&local));
+      return NULL;
+    }
+
+  JsonObject *obj =
+    JSON_NODE_HOLDS_OBJECT (res) ? json_node_get_object (res) : NULL;
+  JsonNode *dn = obj != NULL ? json_object_get_member (obj, detkey) : NULL;
+  JsonObject *det =
+    dn != NULL && JSON_NODE_HOLDS_OBJECT (dn) ? json_node_get_object (dn) : NULL;
+  JsonNode *sdn =
+    det != NULL ? json_object_get_member (det, "streamdetails") : NULL;
+  JsonObject *sd =
+    sdn != NULL && JSON_NODE_HOLDS_OBJECT (sdn) ? json_node_get_object (sdn)
+                                                : NULL;
+  const char *rfile =
+    det != NULL ? json_object_get_string_member_with_default (
+                    det, "file", have_file ? file : "")
+                : (have_file ? file : "");
+
+  g_autoptr (JsonBuilder) ob = json_builder_new ();
+  json_builder_begin_object (ob);
+  json_builder_set_member_name (ob, "file");
+  json_builder_add_string_value (ob, rfile);
+  stream_array (ob, sd, "audio", mk_audio_stream_fields);
+  stream_array (ob, sd, "subtitle", mk_subtitle_stream_fields);
+  stream_array (ob, sd, "video", mk_video_stream_fields);
+  json_builder_end_object (ob);
+  return json_builder_get_root (ob);
+}
+
+/**
+ * out_schema_audio_and_subtitle_info:
+ * @self: the table (unused; the schema is static).
+ *
+ * Output schema for `audio_and_subtitle_info`: the resolved `file` plus the
+ * three stream arrays, each an array of open objects whose members are
+ * documented inline (they vary by stream kind and by what Kodi captured).
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+out_schema_audio_and_subtitle_info (MkTools *self)
+{
+  (void) self;
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_typed (b, "file", "string",
+              "The resolved file path of the inspected item.");
+  prop_array_obj (b, "audio",
+                  "An embedded audio track: { \"index\", \"codec\", "
+                  "\"channels\", \"language\" }. \"index\" is the "
+                  "Player.SetAudioStream handle for embedded streams.",
+                  "Embedded audio tracks, in stream order.");
+  prop_array_obj (b, "subtitle",
+                  "An embedded subtitle track: { \"index\", \"language\" }. "
+                  "External .srt sidecars are not listed here — they appear "
+                  "only at playback.",
+                  "Embedded subtitle tracks, in stream order.");
+  prop_array_obj (b, "video",
+                  "A video stream: { \"index\", \"codec\", \"width\", "
+                  "\"height\", \"aspect\", \"duration\", \"stereomode\", "
+                  "\"hdrtype\"? }.",
+                  "Video streams, in stream order.");
+
+  static const char *const required[] = { "file", "audio", "subtitle", "video",
+                                          NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
 /* ---- getplaylist ----------------------------------------------------------
  *
  * Read the current queue: the rows of a playlist plus where playback sits in
@@ -5440,6 +5732,43 @@ static const MkToolDef mk_tool_defs[] = {
                "{ \"at\", \"instance\", \"kind\", \"media\", \"title\", "
                "\"artist\", … } ] }.",
     schema_history, handler_history, NULL, out_schema_history },
+
+  /**
+   * audio_and_subtitle_info (read-only):
+   *
+   * Report what audio tracks and subtitles a movie or episode carries
+   * **before** playback, from Kodi's cached `streamdetails` — no playback,
+   * nothing mutated. The read-only first step of the audio/subtitle group: the
+   * per-stream `index` it surfaces is the handle the during-playback setters
+   * select by.
+   *
+   * Resolves the item like `queue` (exactly one of `type`+`id` or `file`) and
+   * calls `VideoLibrary.GetMovieDetails`/`GetEpisodeDetails` or
+   * `Files.GetFileDetails` with `properties: ["streamdetails","file"]`.
+   *
+   * Call:  the resolving *Details method above, then shape its streamdetails.
+   * @param type: library kind for `id` — "movie" or "episode" (with `id`).
+   * @param id: library id (movieid/episodeid) of the item — give exactly one
+   *        of `id` (with `type`) or `file`.
+   * @param file: path to inspect — give exactly one of `id` or `file`.
+   * @param instance (optional): the Kodi instance to target; omitted uses the
+   *        configured default.
+   * @return `{ "file", "audio":[{ "index","codec","channels","language" }],
+   *         "subtitle":[{ "index","language" }], "video":[{ "index", … }] }`.
+   *         Embedded streams only — sidecar subs and unscanned files come back
+   *         as empty arrays.
+   */
+  { "audio_and_subtitle_info",
+    "Inspect a movie or episode's audio tracks and subtitles BEFORE playback, "
+    "from Kodi's cached streamdetails (no playback). Name the item by "
+    "type+id (a searchmedia movie/episode row) or by file. Returns { \"file\", "
+    "\"audio\":[{ \"index\", \"codec\", \"channels\", \"language\" }], "
+    "\"subtitle\":[{ \"index\", \"language\" }], \"video\":[…] }. Embedded "
+    "streams only: external .srt sidecars and files Kodi hasn't scanned come "
+    "back as empty arrays; \"index\" maps to the audio/subtitle setters for "
+    "embedded streams.",
+    schema_audio_and_subtitle_info, handler_audio_and_subtitle_info, NULL,
+    out_schema_audio_and_subtitle_info },
 
   /* ---- Escape hatch — raw JSON-RPC passthrough, opt-in per instance
    *      (gated by `allow_rpc`). ---- */
