@@ -40,13 +40,16 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
     video paused 15:38 into 46:40; nothing active collapses to
     { "state": "stopped" }, and optional fields appear only where they apply
     (player status at the top, the loaded media nested under `nowplaying` —
-    see 7.2; the legible `progress` clause — see 7.1):
+    see 7.2; the legible `progress` clause — see 7.1; a video's `audio`/
+    `subtitle` track summary — see 7.3):
         {
           "state": "paused",
           "type":  "video",
           "time":      { "hours": 0, "minutes": 15, "seconds": 38, "milliseconds": 507 },
           "totaltime": { "hours": 0, "minutes": 46, "seconds": 40, "milliseconds": 633 },
           "progress":  "15:38 / 46:40 (33%)",
+          "audio":     { "count": 2, "current": { "index": 0, "language": "eng", "codec": "ac3", "channels": 6 } },
+          "subtitle":  { "count": 3, "enabled": true, "current": { "index": 1, "language": "hun" } },
           "nowplaying": {
             "media": "episode",
             "id":    1234,
@@ -78,11 +81,24 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
         uninformative); `type` stays at the top as the player kind. The history
         log reads its enrichment from snap.nowplaying now
         (compose_entry/record_locked); the stored entry shape is unchanged.
-    [ ] 7.3 Add the available audio tracks and subtitles to the playback status
+    [x] 7.3 Add the available audio tracks and subtitles to the playback status
         where they apply (video playback). Keep these fields brief — a short
         summary of what is on offer plus the current selection, not the full
         per-stream dump (audio_and_subtitle_info already covers the detailed
         view); we do not want to spam the caller on every status reply.
+        DONE: player_state() now emits top-level `audio` and `subtitle`
+        objects for a video player (append_av_streams) — each a `count` of the
+        tracks on offer plus the live `current` selection carrying the same
+        `index` set_audio_and_subtitle selects by (language/codec/channels
+        vocabulary shared with audio_and_subtitle_info). `subtitle` also carries
+        `enabled`; its `current` is present only while a subtitle is shown
+        (a disabled one reads { count, enabled:false }). Video-only: an audio
+        player carries neither, and the stream props are requested from
+        Player.GetProperties only for video (asking on a non-video player can
+        draw an RPC error). This also un-defers 8.9.2's "echo the resulting
+        audio/subtitle layout" — set_audio_and_subtitle's player_state reply now
+        shows the selection take effect. Covered by the snapshot-av-streams /
+        snapshot-av-streams-edges unit cases.
 
 [ ] 8 Design tool tables
     [ ] 8.1 Buttons — argument-free actions, modeled as remote keypresses
@@ -291,7 +307,8 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
             from omitting it (leave unchanged) — read from the arg's JSON type,
             not arg_int, which would misread "off" as index 0. Nothing playing
             or a non-video player is a clean tool error. Returns the player_state
-            playback status (echoing the resulting audio/subtitle layout is deferred).
+            playback status, which since 7.3 echoes the resulting audio/subtitle
+            layout (its top-level audio/subtitle summary).
             Minimal vocabulary: the fuller next/previous/on were not built
             (tests/set_audio_and_subtitle.test)
         [ ] 8.9.3 setting the audio track and subtitles when starting the

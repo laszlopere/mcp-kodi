@@ -589,6 +589,92 @@ append_progress (JsonBuilder *b, JsonObject *props)
 }
 
 /**
+ * append_av_streams:
+ * @b: the builder, positioned inside the snapshot object.
+ * @props: the `Player.GetProperties` reply of a *video* player (the only kind
+ *         that carries these stream properties).
+ *
+ * Surfaces the audio tracks and subtitles a playing video carries (TODO 7.3),
+ * but **briefly**: how many of each are on offer (`count`) plus the live
+ * selection (`current`), not the full per-stream dump — that detailed,
+ * pre-playback view is `audio_and_subtitle_info`'s job, and re-listing every
+ * stream on every status reply would only spam the caller. The `current`
+ * object hands back the same `index` the `set_audio_and_subtitle` setter selects
+ * by (live, so authoritative once sidecars have merged in), described with the
+ * same `language`/`codec`/`channels` vocabulary that tool uses.
+ *
+ * `audio` is emitted whenever the player reports any audio stream (a video
+ * always has at least one). `subtitle` appears only when subtitles are on offer,
+ * carrying `enabled`; the `current` selection is included only while a subtitle
+ * is actually shown, so a disabled subtitle reads `{ count, enabled: false }`.
+ * Nothing is emitted for a kind with no streams ("fields appear only where they
+ * apply").
+ */
+static void
+append_av_streams (JsonBuilder *b, JsonObject *props)
+{
+  JsonNode *an = json_object_has_member (props, "audiostreams")
+                   ? json_object_get_member (props, "audiostreams")
+                   : NULL;
+  JsonArray *audio =
+    an != NULL && JSON_NODE_HOLDS_ARRAY (an) ? json_node_get_array (an) : NULL;
+  guint na = audio != NULL ? json_array_get_length (audio) : 0;
+  if (na > 0)
+    {
+      json_builder_set_member_name (b, "audio");
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "count");
+      json_builder_add_int_value (b, na);
+      JsonNode *cn = json_object_has_member (props, "currentaudiostream")
+                       ? json_object_get_member (props, "currentaudiostream")
+                       : NULL;
+      if (cn != NULL && JSON_NODE_HOLDS_OBJECT (cn))
+        {
+          JsonObject *cur = json_node_get_object (cn);
+          json_builder_set_member_name (b, "current");
+          json_builder_begin_object (b);
+          copy_member (b, cur, "index");
+          copy_member_nonempty (b, cur, "language");
+          copy_member_nonempty (b, cur, "codec");
+          copy_member (b, cur, "channels");
+          json_builder_end_object (b);
+        }
+      json_builder_end_object (b);
+    }
+
+  JsonNode *sn = json_object_has_member (props, "subtitles")
+                   ? json_object_get_member (props, "subtitles")
+                   : NULL;
+  JsonArray *subs =
+    sn != NULL && JSON_NODE_HOLDS_ARRAY (sn) ? json_node_get_array (sn) : NULL;
+  guint ns = subs != NULL ? json_array_get_length (subs) : 0;
+  if (ns > 0)
+    {
+      gboolean enabled = json_object_get_boolean_member_with_default (
+        props, "subtitleenabled", FALSE);
+      json_builder_set_member_name (b, "subtitle");
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "count");
+      json_builder_add_int_value (b, ns);
+      json_builder_set_member_name (b, "enabled");
+      json_builder_add_boolean_value (b, enabled);
+      JsonNode *cn = json_object_has_member (props, "currentsubtitle")
+                       ? json_object_get_member (props, "currentsubtitle")
+                       : NULL;
+      if (enabled && cn != NULL && JSON_NODE_HOLDS_OBJECT (cn))
+        {
+          JsonObject *cur = json_node_get_object (cn);
+          json_builder_set_member_name (b, "current");
+          json_builder_begin_object (b);
+          copy_member (b, cur, "index");
+          copy_member_nonempty (b, cur, "language");
+          json_builder_end_object (b);
+        }
+      json_builder_end_object (b);
+    }
+}
+
+/**
  * player_state:
  * @self: the tool table.
  * @instance: target instance name, or NULL for the configured default.
@@ -640,14 +726,22 @@ append_progress (JsonBuilder *b, JsonObject *props)
  * and percent, so an assistant can answer "how much is left" without doing the
  * arithmetic. See append_progress().
  *
+ * For a video it also summarizes the audio tracks and subtitles on offer
+ * (TODO 7.3): top-level `audio` and `subtitle` objects each carry a `count` and
+ * the live `current` selection (with the `index` the `set_audio_and_subtitle`
+ * setter selects by) — a brief view, not the full per-stream dump
+ * (`audio_and_subtitle_info` covers that). See append_av_streams().
+ *
  * @return a newly allocated object node — `{ "state": "stopped" }` when nothing
  *         is active, else `{ "state": "playing"|"paused", "type"?, "time"?,
- *         "totaltime"?, "progress"?, "nowplaying": { "media"?, "id"?, "file"?,
- *         "label"?, "title"?, "showtitle"?, "season"?, "episode"?, "album"?,
- *         "artist"?, "track"? } }` (`nowplaying` whenever something is loaded,
- *         with `media`/`id` always and the per-media fields only where they
- *         apply) — or NULL with @error set if a call fails. Example, a video
- *         paused 15:38 into 46:40:
+ *         "totaltime"?, "progress"?, "audio"?, "subtitle"?, "nowplaying":
+ *         { "media"?, "id"?, "file"?, "label"?, "title"?, "showtitle"?,
+ *         "season"?, "episode"?, "album"?, "artist"?, "track"? } }`
+ *         (`nowplaying` whenever something is loaded, with `media`/`id` always
+ *         and the per-media fields only where they apply; `audio`/`subtitle`
+ *         only for video) — or NULL with @error set if a call fails. Example, a
+ *         video paused 15:38 into 46:40 with two audio tracks and three
+ *         subtitles:
  * @code{.json}
  * {
  *   "state": "paused",
@@ -655,6 +749,8 @@ append_progress (JsonBuilder *b, JsonObject *props)
  *   "time":      { "hours": 0, "minutes": 15, "seconds": 38, "milliseconds": 507 },
  *   "totaltime": { "hours": 0, "minutes": 46, "seconds": 40, "milliseconds": 633 },
  *   "progress":  "15:38 / 46:40 (33%)",
+ *   "audio":     { "count": 2, "current": { "index": 0, "language": "eng", "codec": "ac3", "channels": 6 } },
+ *   "subtitle":  { "count": 3, "enabled": true, "current": { "index": 1, "language": "hun" } },
  *   "nowplaying": {
  *     "media": "episode",
  *     "id":    1234,
@@ -693,8 +789,20 @@ player_state (MkTools *self, const char *instance, GError **error)
   const char *ptype =
     json_object_get_string_member_with_default (p0, "type", NULL);
 
-  static const char *const prop_fields[] = { "speed", "time", "totaltime",
-                                             NULL };
+  /* A video player also reports its audio-track / subtitle layout, summarized
+   * into the snapshot by append_av_streams (TODO 7.3). Audio players carry none
+   * of these properties — and asking for them on a non-video player can draw an
+   * RPC error — so they are requested only for video. */
+  gboolean is_video = g_strcmp0 (ptype, "video") == 0;
+  static const char *const prop_fields_base[] = { "speed", "time", "totaltime",
+                                                  NULL };
+  static const char *const prop_fields_video[] = {
+    "speed",       "time",          "totaltime",      "currentaudiostream",
+    "audiostreams", "currentsubtitle", "subtitles",   "subtitleenabled",
+    NULL
+  };
+  const char *const *prop_fields =
+    is_video ? prop_fields_video : prop_fields_base;
   g_autoptr (JsonNode) pparams = player_props (playerid, prop_fields);
   g_autoptr (JsonNode) pres = mk_kodi_call (self->kodi, instance,
                                             "Player.GetProperties", pparams,
@@ -735,6 +843,11 @@ player_state (MkTools *self, const char *instance, GError **error)
   copy_member (b, props, "time");
   copy_member (b, props, "totaltime");
   append_progress (b, props);
+  /* A video's audio-track / subtitle layout, summarized (TODO 7.3): also "how
+   * the player is doing" (the live selection is mutable player state), kept at
+   * the top alongside position. Emitted for video only. */
+  if (is_video)
+    append_av_streams (b, props);
 
   /* "What is loaded" is nested under a single `nowplaying` object (TODO 7.2), so
    * the item identity is visibly distinct from the player status above. */
@@ -4272,8 +4385,11 @@ schema_set_audio_and_subtitle (MkTools *self)
  * a selected subtitle; it is omitted for `"off"`.
  *
  * @return the player-state snapshot (the standard playback status; playback
- *         item unchanged), or NULL with @error set (bad arguments, nothing
- *         playing, a non-video player, or a call failure).
+ *         item unchanged). Since TODO 7.3 that snapshot's top-level
+ *         `audio`/`subtitle` summary echoes the resulting track layout, so the
+ *         caller sees the selection it just made take effect. NULL with @error
+ *         set on bad arguments, nothing playing, a non-video player, or a call
+ *         failure.
  */
 static JsonNode *
 handler_set_audio_and_subtitle (MkTools *self, const MkToolDef *def,
@@ -5030,7 +5146,8 @@ handler_history (MkTools *self, const MkToolDef *def, JsonObject *args,
  * Output schema of the player-state snapshot (player_state()) shared by every
  * playback-affecting tool and `nowplaying`. Only `state` is guaranteed: the
  * top-level player status (`type`/`time`/`totaltime`/`progress`) appears when a
- * player is active, the loaded media nests under `nowplaying` (TODO 7.2) with
+ * player is active, a video's `audio`/`subtitle` summary (TODO 7.3) when it is a
+ * video, the loaded media nests under `nowplaying` (TODO 7.2) with
  * its per-media fields present only where they apply, and an empty field is
  * omitted rather than emitted blank.
  *
@@ -5056,6 +5173,19 @@ out_schema_snapshot (MkTools *self)
               "Legible position derived from time/totaltime, "
               "\"elapsed / total (NN%)\" e.g. \"15:38 / 46:40 (33%)\"; absent "
               "for live streams with no fixed length.");
+
+  /* A video's audio/subtitle summary (TODO 7.3): brief — a count plus the live
+   * selection, not the full per-stream dump (audio_and_subtitle_info has that).
+   * Video only; absent for audio playback. */
+  prop_typed (b, "audio", "object",
+              "Audio tracks of the playing video (video only): "
+              "{ count, current: { index, language, codec, channels } }. "
+              "`index` is the set_audio_and_subtitle audio selector.");
+  prop_typed (b, "subtitle", "object",
+              "Subtitles of the playing video (video only, present only when "
+              "any exist): { count, enabled, current: { index, language } }. "
+              "`current` is present only while a subtitle is shown; `index` is "
+              "the set_audio_and_subtitle subtitle selector.");
 
   /* The loaded media, nested (TODO 7.2). Members vary per media type, so the
    * object stays open (no fixed sub-property list), described in prose — the
@@ -5714,9 +5844,10 @@ static const MkToolDef mk_tool_defs[] = {
   { "nowplaying", "Report what is playing on the target instance without "
                   "changing anything — also a reachability and state probe. "
                   "Returns the player-state snapshot { \"state\", \"type\", "
-                  "\"time\", \"totaltime\", \"progress\", \"nowplaying\": "
-                  "{ \"media\", \"id\", \"title\", \"artist\", … } }; "
-                  "{ \"state\": \"stopped\" } when idle.",
+                  "\"time\", \"totaltime\", \"progress\", \"audio\", "
+                  "\"subtitle\" (audio/subtitle for video: count + current "
+                  "track), \"nowplaying\": { \"media\", \"id\", \"title\", "
+                  "\"artist\", … } }; { \"state\": \"stopped\" } when idle.",
     schema_instance_only, handler_noop, NULL, out_schema_snapshot },
 
   /* ---- Config tools — read/write the server's own instance config.
@@ -6115,8 +6246,9 @@ static const MkToolDef mk_tool_defs[] = {
    *
    * Resolves the active player like `queue`; with nothing playing or a
    * non-video player it returns a clean tool error. Reuses out_schema_snapshot
-   * (like `nowplaying`) — the reply is the standard player-state snapshot;
-   * echoing the resulting audio/subtitle layout is deferred.
+   * (like `nowplaying`) — the reply is the standard player-state snapshot, whose
+   * top-level `audio`/`subtitle` summary (TODO 7.3) now echoes the resulting
+   * track layout, so the caller sees the selection take effect.
    *
    * Call:  Player.GetActivePlayers → Player.SetAudioStream and/or
    *        Player.SetSubtitle (enable:true) → player_state snapshot.

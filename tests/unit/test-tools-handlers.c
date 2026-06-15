@@ -2779,6 +2779,144 @@ case_poll_history_idle (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* ---- player_state audio/subtitle summary (TODO 7.3) ----------------------- */
+
+/* A playing video summarizes its audio tracks and subtitles into the snapshot:
+ * brief top-level `audio`/`subtitle` objects, each a `count` plus the live
+ * `current` selection (not the full per-stream dump). The `current` carries the
+ * same `index` the `set_audio_and_subtitle` setter selects by. */
+static void
+case_snapshot_av_streams (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 1, \"type\": \"video\" } ]");
+  stub_kodi_set_response (
+    "Player.GetProperties",
+    "{ \"speed\": 1,"
+    "  \"audiostreams\": ["
+    "    { \"index\": 0, \"language\": \"eng\", \"codec\": \"ac3\","
+    "      \"channels\": 6 },"
+    "    { \"index\": 1, \"language\": \"hun\", \"codec\": \"dts\","
+    "      \"channels\": 2 } ],"
+    "  \"currentaudiostream\": { \"index\": 0, \"language\": \"eng\","
+    "    \"codec\": \"ac3\", \"channels\": 6 },"
+    "  \"subtitleenabled\": true,"
+    "  \"subtitles\": ["
+    "    { \"index\": 0, \"language\": \"eng\" },"
+    "    { \"index\": 1, \"language\": \"hun\" },"
+    "    { \"index\": 2, \"language\": \"ger\" } ],"
+    "  \"currentsubtitle\": { \"index\": 1, \"language\": \"hun\" } }");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"Sweeps\", \"file\": \"/v/lo-4x01.avi\","
+    "  \"type\": \"episode\", \"id\": 1234 } }");
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "nowplaying", NULL, &error);
+  MK_CHECK (error == NULL);
+
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+
+      /* audio: all-tracks count + the live selection, top-level. */
+      MK_CHECK (json_object_has_member (p, "audio"));
+      JsonObject *au = json_object_get_object_member (p, "audio");
+      MK_CHECK_INT_EQ (json_object_get_int_member (au, "count"), 2);
+      JsonObject *acur = json_object_get_object_member (au, "current");
+      MK_CHECK_INT_EQ (json_object_get_int_member (acur, "index"), 0);
+      MK_CHECK_STR_EQ (json_object_get_string_member (acur, "language"), "eng");
+      MK_CHECK_STR_EQ (json_object_get_string_member (acur, "codec"), "ac3");
+      MK_CHECK_INT_EQ (json_object_get_int_member (acur, "channels"), 6);
+
+      /* subtitle: count + enabled + the shown selection. */
+      MK_CHECK (json_object_has_member (p, "subtitle"));
+      JsonObject *su = json_object_get_object_member (p, "subtitle");
+      MK_CHECK_INT_EQ (json_object_get_int_member (su, "count"), 3);
+      MK_CHECK (json_object_get_boolean_member (su, "enabled"));
+      JsonObject *scur = json_object_get_object_member (su, "current");
+      MK_CHECK_INT_EQ (json_object_get_int_member (scur, "index"), 1);
+      MK_CHECK_STR_EQ (json_object_get_string_member (scur, "language"), "hun");
+    }
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
+/* Edges: disabled subtitles read `{ count, enabled:false }` with no `current`
+ * (none is shown), and an audio player carries neither `audio` nor `subtitle`
+ * (the summary is video-only). */
+static void
+case_snapshot_av_streams_edges (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  /* a video whose subtitles exist but are turned off */
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 1, \"type\": \"video\" } ]");
+  stub_kodi_set_response (
+    "Player.GetProperties",
+    "{ \"speed\": 1,"
+    "  \"audiostreams\": [ { \"index\": 0, \"language\": \"eng\" } ],"
+    "  \"currentaudiostream\": { \"index\": 0, \"language\": \"eng\" },"
+    "  \"subtitleenabled\": false,"
+    "  \"subtitles\": [ { \"index\": 0, \"language\": \"eng\" } ],"
+    "  \"currentsubtitle\": { \"index\": 0, \"language\": \"eng\" } }");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"M\", \"file\": \"/v/m.mkv\","
+    "  \"type\": \"movie\", \"id\": 7 } }");
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "nowplaying", NULL, &error);
+  MK_CHECK (error == NULL);
+  gboolean is_error = TRUE;
+  g_autoptr (JsonNode) payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  if (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload))
+    {
+      JsonObject *p = json_node_get_object (payload);
+      JsonObject *su = json_object_get_object_member (p, "subtitle");
+      MK_CHECK (su != NULL);
+      MK_CHECK_INT_EQ (json_object_get_int_member (su, "count"), 1);
+      MK_CHECK (!json_object_get_boolean_member (su, "enabled"));
+      /* nothing shown → no current selection echoed */
+      MK_CHECK (!json_object_has_member (su, "current"));
+    }
+
+  /* an audio player carries no audio/subtitle summary at all */
+  stub_kodi_set_response ("Player.GetActivePlayers",
+                          "[ { \"playerid\": 0, \"type\": \"audio\" } ]");
+  stub_kodi_set_response ("Player.GetProperties", "{ \"speed\": 1 }");
+  stub_kodi_set_response (
+    "Player.GetItem",
+    "{ \"item\": { \"title\": \"S\", \"file\": \"/s/a.flac\","
+    "  \"type\": \"song\", \"id\": 9 } }");
+  g_autoptr (JsonNode) res2 = mk_tools_call (tools, "nowplaying", NULL, &error);
+  MK_CHECK (error == NULL);
+  is_error = TRUE;
+  g_autoptr (JsonNode) payload2 = envelope_payload (res2, &is_error);
+  MK_CHECK (!is_error);
+  if (payload2 != NULL && JSON_NODE_HOLDS_OBJECT (payload2))
+    {
+      JsonObject *p = json_node_get_object (payload2);
+      MK_CHECK (!json_object_has_member (p, "audio"));
+      MK_CHECK (!json_object_has_member (p, "subtitle"));
+    }
+
+  g_clear_error (&error);
+  free_tools (tools, cfg, kodi);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2840,6 +2978,8 @@ main (int argc, char **argv)
     { "poll-history",            case_poll_history },
     { "poll-history-unreachable", case_poll_history_unreachable },
     { "poll-history-idle",       case_poll_history_idle },
+    { "snapshot-av-streams",     case_snapshot_av_streams },
+    { "snapshot-av-streams-edges", case_snapshot_av_streams_edges },
   };
   return mk_test_run (argc, argv, cases, G_N_ELEMENTS (cases));
 }
