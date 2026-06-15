@@ -35,7 +35,7 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
     Doxygen/README). Fixed both ways: every tool but rpc declares an
     outputSchema, and every description carries a "Returns {...}" shape clause
     (the only channel that reaches the model, since Claude Code hides
-    outputSchema). The shared status snapshot — returned by every transport
+    outputSchema). The shared playback status — returned by every transport
     Button plus seek/skip/speed/handoff/status/… — looks like this, e.g. a
     video paused 15:38 into 46:40; nothing active collapses to
     { "state": "stopped" }, and optional fields appear only where they apply:
@@ -54,7 +54,7 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
           "totaltime": { "hours": 0, "minutes": 46, "seconds": 40, "milliseconds": 633 }
         }
     [ ] 7.1 Make playback position recognizable. `time`/`totaltime` are
-        already in the snapshot (current position and total length), but as
+        already in the playback status (current position and total length), but as
         bare {hours,minutes,seconds,milliseconds} objects the model does not
         read them as "how far in / how long". Surface them legibly — a
         derived percentage and/or human-readable elapsed/total clause in the
@@ -64,7 +64,7 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
         episode/album/artist/track). Nest the item-identity fields into a
         single `item` object, leaving `state`/`time`/`totaltime` at the top —
         so what is loaded vs. how the player is doing are visibly distinct.
-    [ ] 7.3 Add the available audio tracks and subtitles to the snapshot
+    [ ] 7.3 Add the available audio tracks and subtitles to the playback status
         where they apply (video playback). Keep these fields brief — a short
         summary of what is on offer plus the current selection, not the full
         per-stream dump (audio_and_subtitle_info already covers the detailed
@@ -82,7 +82,7 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
         [x] 8.1.4 mute — Application.SetMute {mute:true}
         [x] 8.1.5 unmute — Application.SetMute {mute:false}
         [x] 8.1.6 nowplaying — fires no action, returns the player_state()
-            snapshot only; a reachability + state probe (renamed from noop)
+            playback status only; a reachability + state probe (renamed from noop)
         [x] 8.1.7 skipnext — Input.ExecuteAction {action:"skipnext"};
             advance to the next playlist item / chapter
         [x] 8.1.8 skipprevious — Input.ExecuteAction
@@ -218,7 +218,7 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
     [x] 8.5 playfile — play one file via Player.Open {item:{file}}
         (KODI-API 12.10.9); any path, in-library or not; auto-selects the
         audio/video player; Kodi enriches a scanned file back to its
-        library item; returns the player_state() snapshot
+        library item; returns the player_state() playback status
     [x] 8.6 rpc — generic escape hatch: any method, returns Kodi's raw
         result verbatim (unshaped); gated per instance by allow_rpc in the
         config, granted only by hand-editing config.json — the model can
@@ -277,7 +277,7 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
             from omitting it (leave unchanged) — read from the arg's JSON type,
             not arg_int, which would misread "off" as index 0. Nothing playing
             or a non-video player is a clean tool error. Returns the player_state
-            snapshot (echoing the resulting audio/subtitle layout is deferred).
+            playback status (echoing the resulting audio/subtitle layout is deferred).
             Minimal vocabulary: the fuller next/previous/on were not built
             (tests/set_audio_and_subtitle.test)
         [ ] 8.9.3 setting the audio track and subtitles when starting the
@@ -289,7 +289,7 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
             OnAVStart notification (not polling) per item — a persistent
             listener outliving the tool call that queued it
     [ ] 8.10 seek — no "skip ahead 5 min" / "restart" / "go to 1:12:00".
-        Relative signed step like volume, plus an absolute `to` (snapshot
+        Relative signed step like volume, plus an absolute `to` (playback status
         already reports time/totaltime).
 
 [ ] 9 Prompts / resources — on hold, not shipping now; tools are the
@@ -522,9 +522,9 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
              honestly means "unknown") rather than stored as [""].
         With both fixed, history carries an artist whenever Kodi knows one,
         and the 15 artist filter becomes meaningful. Note: the artist
-        also rides on the live snapshot returned by play/playfile/etc.,
+        also rides on the live playback status returned by play/playfile/etc.,
         so this improves those replies too, not just history. Unit cases:
-        a song snapshot with empty `artist` but populated `albumartist` /
+        a song playback status with empty `artist` but populated `albumartist` /
         `displayartist` records the fallback; an all-empty artist array is
         omitted.
 
@@ -535,7 +535,7 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
         match/id/count/offset/order filters.
     [x] 16.2 instances tool-table @return omits allow_rpc, though
         instances_list() reports it (read-only).
-    [x] 16.3 README snapshot field list misses the 15.1 artist
+    [x] 16.3 README playback status field list misses the 15.1 artist
         (and type) fields.
     [x] 16.4 play description should say "resumes only — cannot start
         new content; use playfile" (with nothing loaded it is a no-op).
