@@ -127,6 +127,16 @@ envelope_payload (JsonNode *res, gboolean *is_error)
   return json_from_string (text, NULL);
 }
 
+/* The nested `nowplaying` of a player-state snapshot object (TODO 7.2); the
+ * loaded media identity lives here, not at the top alongside state/type/time. */
+static JsonObject *
+state_item (JsonObject *snap)
+{
+  if (snap == NULL || !json_object_has_member (snap, "nowplaying"))
+    return NULL;
+  return json_object_get_object_member (snap, "nowplaying");
+}
+
 /* ---- searchmedia ----------------------------------------------------------- */
 
 static void
@@ -1248,9 +1258,11 @@ case_playfile (void)
       JsonObject *p = json_node_get_object (payload);
       MK_CHECK_STR_EQ (json_object_get_string_member (p, "state"), "playing");
       MK_CHECK_STR_EQ (json_object_get_string_member (p, "type"), "video");
-      MK_CHECK_STR_EQ (json_object_get_string_member (p, "media"), "movie");
-      MK_CHECK_INT_EQ (json_object_get_int_member (p, "id"), 1);
-      MK_CHECK_STR_EQ (json_object_get_string_member (p, "file"), "/m/heat.mkv");
+      JsonObject *it = state_item (p);
+      MK_CHECK (it != NULL);
+      MK_CHECK_STR_EQ (json_object_get_string_member (it, "media"), "movie");
+      MK_CHECK_INT_EQ (json_object_get_int_member (it, "id"), 1);
+      MK_CHECK_STR_EQ (json_object_get_string_member (it, "file"), "/m/heat.mkv");
     }
 
   /* Player.Open then a player_state() snapshot. */
@@ -1517,7 +1529,7 @@ case_queue_append (void)
       JsonObject *p = json_node_get_object (payload);
       /* playback unchanged: the snapshot still shows the current episode. */
       MK_CHECK_STR_EQ (json_object_get_string_member (p, "state"), "playing");
-      MK_CHECK_INT_EQ (json_object_get_int_member (p, "id"), 30584);
+      MK_CHECK_INT_EQ (json_object_get_int_member (state_item (p), "id"), 30584);
     }
 
   /* resolve the player, read its playlist, disk-check the id's file,
@@ -2133,7 +2145,8 @@ case_dropplaylists (void)
     {
       JsonObject *p = json_node_get_object (payload);
       MK_CHECK_STR_EQ (json_object_get_string_member (p, "state"), "playing");
-      MK_CHECK_STR_EQ (json_object_get_string_member (p, "file"), "/s/a.flac");
+      MK_CHECK_STR_EQ (json_object_get_string_member (state_item (p), "file"),
+                       "/s/a.flac");
     }
 
   /* One clear per fixed playlist, all before the state snapshot. */

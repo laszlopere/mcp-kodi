@@ -80,10 +80,13 @@ boxes when `instance` is omitted).
 | `rpc`       | **Escape hatch** — send a raw JSON-RPC method to Kodi and return its reply unchanged. Off by default; opt-in per instance (see below). |
 
 Most action tools return a small player-state snapshot — `{ "state":
-"playing"|"paused"|"stopped", "type", "media", "id", "file", "label", "title",
-"time", "totaltime" }`, plus per-media fields where they apply (`artist`,
-`album`, `track`, `showtitle`, `season`, `episode`) —
-so the assistant always sees the effect of its action: this covers
+"playing"|"paused"|"stopped", "type", "time", "totaltime", "progress",
+"nowplaying": { "media", "id", "file", "label", "title", … } }` — keeping the
+player status (`state`/`type`/`time`/`totaltime` plus a legible `progress` clause
+like `"15:38 / 46:40 (33%)"`) at the top and nesting the loaded media under
+`nowplaying`, with its per-media fields where they apply (`artist`, `album`,
+`track`, `showtitle`, `season`, `episode`) — so the assistant always sees the
+effect of its action: this covers
 `play`/`pause`/`stop`, `playfile`, `queue`, `dropplaylists`, and `nowplaying`. The
 audio tools `volume`/`mute`/`unmute` return `{ "muted", "volume" }` (`volume`
 also adds the `min`/`max` bounds). The read tools (`searchmedia`,

@@ -499,6 +499,96 @@ player_props (gint64 playerid, const char *const *fields)
 }
 
 /**
+ * hms_to_ms:
+ * @t: a Kodi time object `{ hours, minutes, seconds, milliseconds }`.
+ *
+ * Flattens one of Kodi's split clock objects into a single millisecond count.
+ *
+ * @return the total milliseconds (0 for a NULL or all-zero object).
+ */
+static gint64
+hms_to_ms (JsonObject *t)
+{
+  if (t == NULL)
+    return 0;
+  gint64 h = json_object_get_int_member_with_default (t, "hours", 0);
+  gint64 m = json_object_get_int_member_with_default (t, "minutes", 0);
+  gint64 s = json_object_get_int_member_with_default (t, "seconds", 0);
+  gint64 ms = json_object_get_int_member_with_default (t, "milliseconds", 0);
+  return ((h * 60 + m) * 60 + s) * 1000 + ms;
+}
+
+/**
+ * append_clock:
+ * @out: the string to append to.
+ * @ms: a duration in milliseconds.
+ *
+ * Appends @ms as a human clock — `H:MM:SS` when there is an hour or more, else
+ * `M:SS`. Sub-second precision is dropped: the legible form answers "how far
+ * in / how long", not frame-accurate position.
+ */
+static void
+append_clock (GString *out, gint64 ms)
+{
+  gint64 total = ms / 1000;
+  gint64 h = total / 3600;
+  gint64 m = (total % 3600) / 60;
+  gint64 s = total % 60;
+  if (h > 0)
+    g_string_append_printf (out,
+                            "%" G_GINT64_FORMAT ":%02" G_GINT64_FORMAT
+                            ":%02" G_GINT64_FORMAT,
+                            h, m, s);
+  else
+    g_string_append_printf (out, "%" G_GINT64_FORMAT ":%02" G_GINT64_FORMAT, m,
+                            s);
+}
+
+/**
+ * append_progress:
+ * @b: the builder, positioned inside the snapshot object.
+ * @props: the `Player.GetProperties` reply (carries `time`/`totaltime`).
+ *
+ * Surfaces playback position legibly (TODO 7.1): the bare
+ * `{hours,minutes,seconds,milliseconds}` time objects don't read as "how far
+ * in", so this derives a single human clause — `"15:38 / 46:40 (33%)"` —
+ * the elapsed/total pair plus a rounded percentage, so an assistant can answer
+ * "how much is left" without doing clock arithmetic itself. Emitted only when
+ * both times are present and the item has a real duration; a live stream
+ * (totaltime 0) carries no `progress`, matching "fields appear only where they
+ * apply".
+ */
+static void
+append_progress (JsonBuilder *b, JsonObject *props)
+{
+  JsonObject *t = json_object_has_member (props, "time")
+                    ? json_object_get_object_member (props, "time")
+                    : NULL;
+  JsonObject *tt = json_object_has_member (props, "totaltime")
+                     ? json_object_get_object_member (props, "totaltime")
+                     : NULL;
+  if (t == NULL || tt == NULL)
+    return;
+
+  gint64 cur = hms_to_ms (t);
+  gint64 tot = hms_to_ms (tt);
+  if (tot <= 0)
+    return; /* unknown length (live stream): no meaningful progress */
+  if (cur > tot)
+    cur = tot;
+  gint64 pct = (cur * 100 + tot / 2) / tot; /* rounded to nearest percent */
+
+  g_autoptr (GString) s = g_string_new (NULL);
+  append_clock (s, cur);
+  g_string_append (s, " / ");
+  append_clock (s, tot);
+  g_string_append_printf (s, " (%" G_GINT64_FORMAT "%%)", pct);
+
+  json_builder_set_member_name (b, "progress");
+  json_builder_add_string_value (b, s->str);
+}
+
+/**
  * player_state:
  * @self: the tool table.
  * @instance: target instance name, or NULL for the configured default.
@@ -539,26 +629,42 @@ player_props (gint64 playerid, const char *const *fields)
  * There is no single Kodi method for it, so it combines three calls:
  * `Player.GetActivePlayers` to find the active player, then
  * `Player.GetProperties` (speed/time/totaltime) and `Player.GetItem`
- * (file/label/title) on it. Progress is reported as `time`/`totaltime`
- * only; a percentage is just `time / totaltime` and is left for the caller to
- * compute rather than returned redundantly.
+ * (file/label/title) on it.
+ *
+ * The response separates **how the player is doing** from **what is loaded**
+ * (TODO 7.2): `state`/`type`/`time`/`totaltime`/`progress` stay at the top,
+ * while the item-identity fields (media/id/file/label/title and the per-media
+ * identifiers) are nested under a single `nowplaying` object. Position is also
+ * made legible (TODO 7.1): alongside the bare `time`/`totaltime` clock objects a
+ * derived `progress` string ("15:38 / 46:40 (33%)") spells out elapsed/total
+ * and percent, so an assistant can answer "how much is left" without doing the
+ * arithmetic. See append_progress().
  *
  * @return a newly allocated object node — `{ "state": "stopped" }` when nothing
- *         is active, else `{ "state": "playing"|"paused", "type"?, "media"?,
- *         "id"?, "file"?, "label"?, "title"?, "showtitle"?, "season"?,
- *         "episode"?, "album"?, "artist"?, "track"?, "time"?, "totaltime"? }`
- *         (`media`/`id` whenever an item is loaded; the per-media
- *         fields present only where they apply) — or NULL with @error
- *         set if a call fails. Example, a video paused 15:38 into 46:40 (≈33%):
+ *         is active, else `{ "state": "playing"|"paused", "type"?, "time"?,
+ *         "totaltime"?, "progress"?, "nowplaying": { "media"?, "id"?, "file"?,
+ *         "label"?, "title"?, "showtitle"?, "season"?, "episode"?, "album"?,
+ *         "artist"?, "track"? } }` (`nowplaying` whenever something is loaded,
+ *         with `media`/`id` always and the per-media fields only where they
+ *         apply) — or NULL with @error set if a call fails. Example, a video
+ *         paused 15:38 into 46:40:
  * @code{.json}
  * {
  *   "state": "paused",
  *   "type": "video",
- *   "file": "/storage/Serials/Law & Order/Season 4/Law & Order 4x01 Sweeps.avi",
- *   "label": "Law & Order 4x01 Sweeps.avi",
- *   "title": "",
  *   "time":      { "hours": 0, "minutes": 15, "seconds": 38, "milliseconds": 507 },
- *   "totaltime": { "hours": 0, "minutes": 46, "seconds": 40, "milliseconds": 633 }
+ *   "totaltime": { "hours": 0, "minutes": 46, "seconds": 40, "milliseconds": 633 },
+ *   "progress":  "15:38 / 46:40 (33%)",
+ *   "nowplaying": {
+ *     "media": "episode",
+ *     "id":    1234,
+ *     "file":  "/storage/Serials/Law & Order/Season 4/Law & Order 4x01.avi",
+ *     "label": "Law & Order 4x01 Sweeps.avi",
+ *     "title": "Sweeps",
+ *     "showtitle": "Law & Order",
+ *     "season":    4,
+ *     "episode":   1
+ *   }
  * }
  * @endcode
  */
@@ -624,10 +730,20 @@ player_state (MkTools *self, const char *instance, GError **error)
       json_builder_set_member_name (b, "type");
       json_builder_add_string_value (b, ptype);
     }
+  /* "How the player is doing" stays at the top: the bare clock objects plus the
+   * legible `progress` clause derived from them (TODO 7.1). */
+  copy_member (b, props, "time");
+  copy_member (b, props, "totaltime");
+  append_progress (b, props);
+
+  /* "What is loaded" is nested under a single `nowplaying` object (TODO 7.2), so
+   * the item identity is visibly distinct from the player status above. */
+  json_builder_set_member_name (b, "nowplaying");
+  json_builder_begin_object (b);
   /* The real media type and library id, surfaced under keys distinct
    * from `type` (which the snapshot spends on the player kind above). Both are
    * identity fields Kodi auto-injects into every Player.GetItem reply — free,
-   * not requestable properties — so player_state() now carries them too: status
+   * not requestable properties — so player_state() carries them too: status
    * and transport replies read richer ("episode 4838"), and the history log
    * copies them straight from this snapshot. An off-library file (a
    * `playfile` of a path absent from the library) reports media "unknown" and
@@ -657,9 +773,8 @@ player_state (MkTools *self, const char *instance, GError **error)
   /* artist with album-artist / display-artist fallback for untagged rips. */
   copy_best_artist (b, item);
   copy_member_nonempty (b, item, "track");
-  copy_member (b, props, "time");
-  copy_member (b, props, "totaltime");
-  json_builder_end_object (b);
+  json_builder_end_object (b); /* nowplaying */
+  json_builder_end_object (b); /* snapshot */
   JsonNode *root = json_builder_get_root (b);
 
   /* Feed the playback-history log from this very snapshot — the
@@ -4913,9 +5028,11 @@ handler_history (MkTools *self, const MkToolDef *def, JsonObject *args,
  * @self: the table (unused; the shape is fixed).
  *
  * Output schema of the player-state snapshot (player_state()) shared by every
- * playback-affecting tool and `nowplaying`. Only `state` is guaranteed: the rest
- * appears when a player is active, the per-media fields only where they
- * apply, and an empty field is omitted rather than emitted blank.
+ * playback-affecting tool and `nowplaying`. Only `state` is guaranteed: the
+ * top-level player status (`type`/`time`/`totaltime`/`progress`) appears when a
+ * player is active, the loaded media nests under `nowplaying` (TODO 7.2) with
+ * its per-media fields present only where they apply, and an empty field is
+ * omitted rather than emitted blank.
  *
  * @return a newly allocated schema node.
  */
@@ -4931,25 +5048,24 @@ out_schema_snapshot (MkTools *self)
              "Playback state; \"stopped\" means nothing is loaded.");
   static const char *const players[] = { "audio", "video", "picture", NULL };
   prop_enum (b, "type", players, "The active player kind.");
-  prop_typed (b, "media", "string",
-              "Real media type (song/episode/movie/musicvideo/…); \"unknown\" "
-              "for an off-library file.");
-  prop_typed (b, "id", "integer",
-              "Library id of the playing item; -1 when off-library.");
-  prop_typed (b, "file", "string", "Path of the playing item.");
-  prop_typed (b, "label", "string", "Kodi's display label for the item.");
-  prop_typed (b, "title", "string", "The item's title (may be empty).");
-  prop_typed (b, "showtitle", "string", "TV episode: the show's name.");
-  prop_typed (b, "season", "integer", "TV episode: season number.");
-  prop_typed (b, "episode", "integer", "TV episode: episode number.");
-  prop_typed (b, "album", "string", "Song: the album name.");
-  prop_typed (b, "artist", "array",
-              "Song: the performers, an array of strings.");
-  prop_typed (b, "track", "integer", "Song: track number on the album.");
   prop_typed (b, "time", "object",
               "Playback position { hours, minutes, seconds, milliseconds }.");
   prop_typed (b, "totaltime", "object",
               "The item's duration, same shape as time.");
+  prop_typed (b, "progress", "string",
+              "Legible position derived from time/totaltime, "
+              "\"elapsed / total (NN%)\" e.g. \"15:38 / 46:40 (33%)\"; absent "
+              "for live streams with no fixed length.");
+
+  /* The loaded media, nested (TODO 7.2). Members vary per media type, so the
+   * object stays open (no fixed sub-property list), described in prose — the
+   * prop_array_obj() treatment, minus the array wrapper. */
+  prop_typed (b, "nowplaying", "object",
+              "The loaded media (present whenever something is loaded): "
+              "{ media (song/episode/movie/…; \"unknown\" off-library), "
+              "id (library id, -1 off-library), file, label, title; and where "
+              "they apply showtitle/season/episode (TV), album/artist/track "
+              "(song) }.");
 
   static const char *const required[] = { "state", NULL };
   schema_end (b, required);
@@ -5407,16 +5523,18 @@ static const MkToolDef mk_tool_defs[] = {
    * @param instance (optional): name of the Kodi instance to target; omitted
    *        uses the configured default.
    * @return the resulting player-state snapshot: `{ "state":
-   *         "playing"|"paused"|"stopped", "file", "label", "title", "time",
-   *         "totaltime" }` (fields present when a player is active). With
-   *         nothing loaded the action is a no-op and the reply is
-   *         `{ "state": "stopped" }`.
+   *         "playing"|"paused"|"stopped", "type", "time", "totaltime",
+   *         "progress", "nowplaying": { "media", "id", "file", "label",
+   *         "title", … } }` (fields present when a player is active). With
+   *         nothing loaded the
+   *         action is a no-op and the reply is `{ "state": "stopped" }`.
    */
   { "play", "Press Play on the Kodi remote: resumes paused playback only — it "
             "cannot start new content (with nothing loaded it is a no-op); "
             "use playfile to start something. Returns the player-state "
-            "snapshot { \"state\", \"media\", \"id\", \"title\", \"artist\", "
-            "\"time\", \"totaltime\", … }.",
+            "snapshot { \"state\", \"type\", \"time\", \"totaltime\", "
+            "\"progress\", \"nowplaying\": { \"media\", \"id\", \"title\", "
+            "\"artist\", … } }.",
     schema_instance_only, handler_button, "play", out_schema_snapshot },
 
   /**
@@ -5435,8 +5553,8 @@ static const MkToolDef mk_tool_defs[] = {
    */
   { "pause", "Press Pause on the Kodi remote: pause the active player on the "
              "target instance. Returns the player-state snapshot { \"state\", "
-             "\"media\", \"id\", \"title\", \"artist\", \"time\", "
-             "\"totaltime\", … }.",
+             "\"type\", \"time\", \"totaltime\", \"progress\", \"nowplaying\": "
+             "{ \"media\", \"id\", \"title\", \"artist\", … } }.",
     schema_instance_only, handler_button, "pause", out_schema_snapshot },
 
   /**
@@ -5484,8 +5602,9 @@ static const MkToolDef mk_tool_defs[] = {
                 "advance the active player to the next item in its playlist "
                 "(or next chapter). A remote keypress, not a player command; "
                 "with nothing loaded it is a no-op. Returns the player-state "
-                "snapshot { \"state\", \"media\", \"id\", \"title\", "
-                "\"artist\", \"time\", \"totaltime\", … }.",
+                "snapshot { \"state\", \"type\", \"time\", \"totaltime\", "
+                "\"progress\", \"nowplaying\": { \"media\", \"id\", \"title\", "
+                "\"artist\", … } }.",
     schema_instance_only, handler_button, "skipnext", out_schema_snapshot },
 
   /**
@@ -5508,8 +5627,9 @@ static const MkToolDef mk_tool_defs[] = {
                     "restart the current item, matching Kodi's own button). A "
                     "remote keypress, not a player command; with nothing loaded "
                     "it is a no-op. Returns the player-state snapshot "
-                    "{ \"state\", \"media\", \"id\", \"title\", \"artist\", "
-                    "\"time\", \"totaltime\", … }.",
+                    "{ \"state\", \"type\", \"time\", \"totaltime\", "
+                    "\"progress\", \"nowplaying\": { \"media\", \"id\", \"title\", "
+                    "\"artist\", … } }.",
     schema_instance_only, handler_button, "skipprevious", out_schema_snapshot },
 
   /**
@@ -5593,8 +5713,9 @@ static const MkToolDef mk_tool_defs[] = {
    */
   { "nowplaying", "Report what is playing on the target instance without "
                   "changing anything — also a reachability and state probe. "
-                  "Returns the player-state snapshot { \"state\", \"media\", "
-                  "\"id\", \"title\", \"artist\", \"time\", \"totaltime\", … }; "
+                  "Returns the player-state snapshot { \"state\", \"type\", "
+                  "\"time\", \"totaltime\", \"progress\", \"nowplaying\": "
+                  "{ \"media\", \"id\", \"title\", \"artist\", … } }; "
                   "{ \"state\": \"stopped\" } when idle.",
     schema_instance_only, handler_noop, NULL, out_schema_snapshot },
 
@@ -5759,16 +5880,18 @@ static const MkToolDef mk_tool_defs[] = {
    * @param instance (optional): name of the Kodi instance to target; omitted
    *        uses the configured default.
    * @return the resulting player-state snapshot (player_state()): `{ "state":
-   *         "playing"|"paused", "type", "file", "label", "title", "time",
-   *         "totaltime" }` — a missing or never-starting file is an error,
-   *         not a "stopped" snapshot.
+   *         "playing"|"paused", "type", "time", "totaltime", "progress",
+   *         "nowplaying": { "media", "id", "file", "label", "title", … } }` — a
+   *         missing or never-starting file is an error, not a "stopped"
+   *         snapshot.
    */
   { "playfile", "Play one file by path (e.g. a `searchmedia` result's `file`): "
                 "Player.Open auto-selects the audio/video player. Works for any "
                 "reachable path, in-library or not. A file missing from disk "
                 "(stale library entry) is reported as an error. Returns the "
-                "player-state snapshot { \"state\", \"media\", \"id\", "
-                "\"title\", \"artist\", \"time\", \"totaltime\", … }.",
+                "player-state snapshot { \"state\", \"type\", \"time\", "
+                "\"totaltime\", \"progress\", \"nowplaying\": { \"media\", "
+                "\"id\", \"title\", \"artist\", … } }.",
     schema_playfile, handler_playfile, NULL, out_schema_snapshot },
 
   /**

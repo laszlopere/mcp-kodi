@@ -72,15 +72,63 @@ cleanup (char *dir, char *path)
   g_free (path);
 }
 
-/* Parse a JSON object literal into a snapshot node; checks it parsed. */
+/* Parse a flat snapshot literal and reshape it into player_state()'s real form:
+ * the player-status keys (state/type/time/totaltime/progress) stay at the top
+ * and every other key — the media identity (media/id/file/title/album/…) — moves
+ * under a nested `nowplaying` object (TODO 7.2). Writing the literals flat keeps
+ * the cases terse; this builds the shape mk_history_record() actually consumes. */
 static JsonNode *
 snap (const char *json)
 {
   GError *err = NULL;
-  JsonNode *n = json_from_string (json, &err);
+  g_autoptr (JsonNode) n = json_from_string (json, &err);
   MK_CHECK (n != NULL);
   g_clear_error (&err);
-  return n;
+  if (n == NULL || !JSON_NODE_HOLDS_OBJECT (n))
+    return g_steal_pointer (&n);
+
+  static const char *const top[] = { "state", "type", "time",
+                                     "totaltime", "progress", NULL };
+  JsonObject *flat = json_node_get_object (n);
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  /* top-level player-status keys, in declaration order */
+  for (gsize i = 0; top[i] != NULL; i++)
+    if (json_object_has_member (flat, top[i]))
+      {
+        json_builder_set_member_name (b, top[i]);
+        json_builder_add_value (
+          b, json_node_copy (json_object_get_member (flat, top[i])));
+      }
+  /* everything else nests under `nowplaying` */
+  gboolean opened = FALSE;
+  GList *members = json_object_get_members (flat);
+  for (GList *l = members; l != NULL; l = l->next)
+    {
+      const char *k = l->data;
+      gboolean is_top = FALSE;
+      for (gsize i = 0; top[i] != NULL; i++)
+        if (g_strcmp0 (k, top[i]) == 0)
+          is_top = TRUE;
+      if (is_top)
+        continue;
+      if (!opened)
+        {
+          json_builder_set_member_name (b, "nowplaying");
+          json_builder_begin_object (b);
+          opened = TRUE;
+        }
+      json_builder_set_member_name (b, k);
+      json_builder_add_value (b,
+                              json_node_copy (json_object_get_member (flat, k)));
+    }
+  if (opened)
+    json_builder_end_object (b);
+  g_list_free (members);
+  json_builder_end_object (b);
+
+  return json_builder_get_root (b);
 }
 
 /* The read array's length, NULL-safe. */

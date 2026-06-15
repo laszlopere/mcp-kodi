@@ -38,32 +38,46 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
     outputSchema). The shared playback status — returned by every transport
     Button plus seek/skip/speed/handoff/status/… — looks like this, e.g. a
     video paused 15:38 into 46:40; nothing active collapses to
-    { "state": "stopped" }, and optional fields appear only where they apply:
+    { "state": "stopped" }, and optional fields appear only where they apply
+    (player status at the top, the loaded media nested under `nowplaying` —
+    see 7.2; the legible `progress` clause — see 7.1):
         {
           "state": "paused",
           "type":  "video",
-          "media": "episode",
-          "id":    1234,
-          "file":  "/storage/Serials/Law & Order/Season 4/Law & Order 4x01 Sweeps.avi",
-          "label": "Law & Order 4x01 Sweeps.avi",
-          "title": "Sweeps",
-          "showtitle": "Law & Order",
-          "season":    4,
-          "episode":   1,
           "time":      { "hours": 0, "minutes": 15, "seconds": 38, "milliseconds": 507 },
-          "totaltime": { "hours": 0, "minutes": 46, "seconds": 40, "milliseconds": 633 }
+          "totaltime": { "hours": 0, "minutes": 46, "seconds": 40, "milliseconds": 633 },
+          "progress":  "15:38 / 46:40 (33%)",
+          "nowplaying": {
+            "media": "episode",
+            "id":    1234,
+            "file":  "/storage/Serials/Law & Order/Season 4/Law & Order 4x01 Sweeps.avi",
+            "label": "Law & Order 4x01 Sweeps.avi",
+            "title": "Sweeps",
+            "showtitle": "Law & Order",
+            "season":    4,
+            "episode":   1
+          }
         }
-    [ ] 7.1 Make playback position recognizable. `time`/`totaltime` are
+    [x] 7.1 Make playback position recognizable. `time`/`totaltime` are
         already in the playback status (current position and total length), but as
         bare {hours,minutes,seconds,milliseconds} objects the model does not
         read them as "how far in / how long". Surface them legibly — a
         derived percentage and/or human-readable elapsed/total clause in the
         shape description — so an assistant can answer "how much is left".
-    [ ] 7.2 Structure the return data: the played item is currently a flat
+        DONE: player_state() now emits a top-level `progress` string
+        ("15:38 / 46:40 (33%)" — elapsed/total plus rounded percent, H:MM:SS
+        when ≥1h else M:SS) derived from time/totaltime; omitted for live
+        streams with no fixed length (totaltime 0). See append_progress().
+    [x] 7.2 Structure the return data: the played item is currently a flat
         spray of top-level keys (file/label/title/media/id/showtitle/season/
         episode/album/artist/track). Nest the item-identity fields into a
         single `item` object, leaving `state`/`time`/`totaltime` at the top —
         so what is loaded vs. how the player is doing are visibly distinct.
+        DONE: player_state() nests the identity fields under `nowplaying`
+        (present whenever something is loaded; `item` was rejected as
+        uninformative); `type` stays at the top as the player kind. The history
+        log reads its enrichment from snap.nowplaying now
+        (compose_entry/record_locked); the stored entry shape is unchanged.
     [ ] 7.3 Add the available audio tracks and subtitles to the playback status
         where they apply (video playback). Keep these fields brief — a short
         summary of what is on offer plus the current selection, not the full

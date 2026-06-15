@@ -173,18 +173,28 @@ noop_snapshot (MkTools *tools)
   return json_from_string (text, NULL);
 }
 
-/* Assert the snapshot's `artist` is a one-element array holding @expected. */
+/* The nested `nowplaying` object of a snapshot (TODO 7.2), or NULL. */
+static JsonObject *
+snap_item (JsonNode *snap)
+{
+  if (snap == NULL || !JSON_NODE_HOLDS_OBJECT (snap))
+    return NULL;
+  JsonObject *s = json_node_get_object (snap);
+  return json_object_has_member (s, "nowplaying")
+           ? json_object_get_object_member (s, "nowplaying")
+           : NULL;
+}
+
+/* Assert the loaded item's `artist` is a one-element array holding @expected. */
 static void
 check_artist (JsonNode *snap, const char *expected)
 {
   MK_CHECK (snap != NULL && JSON_NODE_HOLDS_OBJECT (snap));
-  if (snap == NULL || !JSON_NODE_HOLDS_OBJECT (snap))
+  JsonObject *item = snap_item (snap);
+  MK_CHECK (item != NULL && json_object_has_member (item, "artist"));
+  if (item == NULL || !json_object_has_member (item, "artist"))
     return;
-  JsonObject *s = json_node_get_object (snap);
-  MK_CHECK (json_object_has_member (s, "artist"));
-  if (!json_object_has_member (s, "artist"))
-    return;
-  JsonArray *a = json_object_get_array_member (s, "artist");
+  JsonArray *a = json_object_get_array_member (item, "artist");
   MK_CHECK (a != NULL && json_array_get_length (a) >= 1);
   if (a != NULL && json_array_get_length (a) >= 1)
     MK_CHECK_STR_EQ (json_array_get_string_element (a, 0), expected);
@@ -274,8 +284,9 @@ case_artist_all_empty_is_omitted (void)
 
   g_autoptr (JsonNode) snap = noop_snapshot (tools);
   MK_CHECK (snap != NULL && JSON_NODE_HOLDS_OBJECT (snap));
-  if (snap != NULL && JSON_NODE_HOLDS_OBJECT (snap))
-    MK_CHECK (!json_object_has_member (json_node_get_object (snap), "artist"));
+  /* all-empty artist with no fallback → omitted from the nested item */
+  JsonObject *item = snap_item (snap);
+  MK_CHECK (item != NULL && !json_object_has_member (item, "artist"));
 
   mk_tools_free (tools);
   mk_kodi_free (kodi);
@@ -346,6 +357,53 @@ case_noop_routes_through_stub (void)
   mk_config_free (cfg);
 }
 
+/* The snapshot separates player status from the loaded media (TODO 7.2) and
+ * surfaces a legible position clause (TODO 7.1): with the stub's 1:12-of-3:30
+ * song, `progress` reads "1:12 / 3:30 (34%)", `time`/`totaltime` stay at the
+ * top, and the media identity nests under `nowplaying` rather than spraying
+ * across the top level. */
+static void
+case_snapshot_progress_and_item (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  g_autoptr (JsonNode) snap = noop_snapshot (tools);
+  MK_CHECK (snap != NULL && JSON_NODE_HOLDS_OBJECT (snap));
+  if (snap != NULL && JSON_NODE_HOLDS_OBJECT (snap))
+    {
+      JsonObject *s = json_node_get_object (snap);
+
+      /* player status, including the derived progress clause, at the top */
+      MK_CHECK (json_object_has_member (s, "time"));
+      MK_CHECK (json_object_has_member (s, "totaltime"));
+      MK_CHECK (json_object_has_member (s, "progress"));
+      MK_CHECK_STR_EQ (json_object_get_string_member (s, "progress"),
+                       "1:12 / 3:30 (34%)");
+
+      /* the loaded item is nested, not at the top */
+      MK_CHECK (!json_object_has_member (s, "file"));
+      MK_CHECK (!json_object_has_member (s, "title"));
+      JsonObject *item = snap_item (snap);
+      MK_CHECK (item != NULL);
+      if (item != NULL)
+        {
+          MK_CHECK_STR_EQ (json_object_get_string_member (item, "media"),
+                           "song");
+          MK_CHECK_INT_EQ (json_object_get_int_member (item, "id"), 42);
+          MK_CHECK_STR_EQ (json_object_get_string_member (item, "file"),
+                           "/music/test.flac");
+          MK_CHECK_STR_EQ (json_object_get_string_member (item, "title"),
+                           "Test Track");
+        }
+    }
+
+  mk_tools_free (tools);
+  mk_kodi_free (kodi);
+  mk_config_free (cfg);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -357,6 +415,7 @@ main (int argc, char **argv)
     { "artist-fallback-displayartist", case_artist_falls_back_to_displayartist },
     { "artist-all-empty-omitted",    case_artist_all_empty_is_omitted },
     { "noop-routes-through-stub",    case_noop_routes_through_stub },
+    { "snapshot-progress-and-item",  case_snapshot_progress_and_item },
   };
   return mk_test_run (argc, argv, cases, G_N_ELEMENTS (cases));
 }

@@ -214,10 +214,12 @@ hist_copy_as (JsonBuilder *b, JsonObject *src, const char *from, const char *to)
  *
  * Builds one history entry from the snapshot plus the instance
  * key/name and capture time: `at`/`instance`/`name`, the player kind as `kind`
- * (from the snapshot's `type`), then `media`/`id` and the per-media
- * identifiers copied straight across — present only where the
- * snapshot carries them. `state`/`time`/`totaltime` are deliberately not
- * stored: the entry asserts only "this was played at `at`".
+ * (from the snapshot's top-level `type`), then `media`/`id` and the per-media
+ * identifiers — these now live nested under the snapshot's `nowplaying` object
+ * (player status vs. loaded media, TODO 7.2) and are copied straight across into
+ * the flat entry, present only where the media carries them. `state`/`time`/
+ * `totaltime`/`progress` are deliberately not stored: the entry asserts only
+ * "this was played at `at`".
  *
  * @return a newly allocated object node; free with json_node_unref().
  */
@@ -225,6 +227,10 @@ static JsonNode *
 compose_entry (JsonObject *snap, const char *instance, const char *name,
                const char *at)
 {
+  JsonObject *item = json_object_has_member (snap, "nowplaying")
+                       ? json_object_get_object_member (snap, "nowplaying")
+                       : NULL;
+
   g_autoptr (JsonBuilder) b = json_builder_new ();
   json_builder_begin_object (b);
   json_builder_set_member_name (b, "at");
@@ -236,18 +242,21 @@ compose_entry (JsonObject *snap, const char *instance, const char *name,
       json_builder_set_member_name (b, "name");
       json_builder_add_string_value (b, name);
     }
-  hist_copy_as (b, snap, "type", "kind"); /* player kind */
-  hist_copy (b, snap, "media");           /* real media type */
-  hist_copy (b, snap, "id");              /* library id */
-  hist_copy (b, snap, "title");
-  hist_copy (b, snap, "showtitle"); /* per-media identifiers from here on */
-  hist_copy (b, snap, "season");
-  hist_copy (b, snap, "episode");
-  hist_copy (b, snap, "album");
-  hist_copy (b, snap, "artist");
-  hist_copy (b, snap, "track");
-  hist_copy (b, snap, "file");
-  hist_copy (b, snap, "label");
+  hist_copy_as (b, snap, "type", "kind"); /* player kind (top-level) */
+  if (item != NULL)
+    {
+      hist_copy (b, item, "media"); /* real media type */
+      hist_copy (b, item, "id");    /* library id */
+      hist_copy (b, item, "title");
+      hist_copy (b, item, "showtitle"); /* per-media identifiers from here on */
+      hist_copy (b, item, "season");
+      hist_copy (b, item, "episode");
+      hist_copy (b, item, "album");
+      hist_copy (b, item, "artist");
+      hist_copy (b, item, "track");
+      hist_copy (b, item, "file");
+      hist_copy (b, item, "label");
+    }
   json_builder_end_object (b);
   return json_builder_get_root (b);
 }
@@ -547,13 +556,19 @@ record_locked (MkHistory *self, JsonObject *snap, const char *instance,
       /* root == NULL: an empty file, treated as no entries. */
     }
 
-  /* Dedup key: prefer file, fall back to the library id. */
+  /* Dedup key: prefer file, fall back to the library id — both nested under the
+   * snapshot's `nowplaying` object since TODO 7.2. */
+  JsonObject *item = json_object_has_member (snap, "nowplaying")
+                       ? json_object_get_object_member (snap, "nowplaying")
+                       : NULL;
   const char *file =
-    json_object_get_string_member_with_default (snap, "file", NULL);
+    item ? json_object_get_string_member_with_default (item, "file", NULL)
+         : NULL;
   if (file != NULL && *file == '\0')
     file = NULL;
-  gboolean have_id = json_object_has_member (snap, "id");
-  gint64 id = json_object_get_int_member_with_default (snap, "id", -1);
+  gboolean have_id = item && json_object_has_member (item, "id");
+  gint64 id =
+    item ? json_object_get_int_member_with_default (item, "id", -1) : -1;
   if (file == NULL && !have_id)
     return FALSE; /* nothing identifies this item — can't dedup, don't log */
 
