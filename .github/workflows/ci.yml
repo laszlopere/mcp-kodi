@@ -1,0 +1,54 @@
+name: CI
+
+# Build the server, run the C unit tests, and run the functional suite. The
+# functional tests need a live Kodi; with none reachable they self-skip
+# (automake exit 77), so this job stays green without one — it still proves the
+# binary builds, the unit tests pass, and every .test script parses and reaches
+# its skip gate cleanly. Standing up a seeded Kodi for full functional runs is a
+# separate, heavier follow-up.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf automake libtool pkg-config \
+            libglib2.0-dev libjson-glib-dev libsoup-3.0-dev \
+            jq curl
+
+      - name: Bootstrap (autoreconf)
+        run: ./autogen.sh
+
+      - name: Configure
+        run: ./configure
+
+      - name: Build
+        run: make
+
+      - name: Unit tests
+        run: ./tests/unit/run-unit-tests.sh
+
+      - name: Functional tests (self-skip without a live Kodi)
+        run: make check
+
+      - name: Dump test logs on failure
+        if: failure()
+        run: |
+          echo "===== test-suite.log ====="
+          cat tests/test-suite.log 2>/dev/null || true
+          for f in tests/*.log; do
+            [ -f "$f" ] || continue
+            echo "===== $f ====="
+            cat "$f"
+          done
