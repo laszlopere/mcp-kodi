@@ -32,6 +32,45 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     / tools/list / tools/call; tool failures return isError results, never
     protocol errors; no response to notifications.
 
+[x] 11.16 Result shapes were invisible to the model (envelopes lived only in
+    Doxygen/README). Fixed both ways: every tool but rpc declares an
+    outputSchema, and every description carries a "Returns {...}" shape clause
+    (the only channel that reaches the model, since Claude Code hides
+    outputSchema). The shared status snapshot — returned by every transport
+    Button plus seek/skip/speed/handoff/status/… — looks like this, e.g. a
+    video paused 15:38 into 46:40; nothing active collapses to
+    { "state": "stopped" }, and optional fields appear only where they apply:
+        {
+          "state": "paused",
+          "type":  "video",
+          "media": "episode",
+          "id":    1234,
+          "file":  "/storage/Serials/Law & Order/Season 4/Law & Order 4x01 Sweeps.avi",
+          "label": "Law & Order 4x01 Sweeps.avi",
+          "title": "Sweeps",
+          "showtitle": "Law & Order",
+          "season":    4,
+          "episode":   1,
+          "time":      { "hours": 0, "minutes": 15, "seconds": 38, "milliseconds": 507 },
+          "totaltime": { "hours": 0, "minutes": 46, "seconds": 40, "milliseconds": 633 }
+        }
+    [ ] 11.16.1 Make playback position recognizable. `time`/`totaltime` are
+        already in the snapshot (current position and total length), but as
+        bare {hours,minutes,seconds,milliseconds} objects the model does not
+        read them as "how far in / how long". Surface them legibly — a
+        derived percentage and/or human-readable elapsed/total clause in the
+        shape description — so an assistant can answer "how much is left".
+    [ ] 11.16.2 Structure the return data: the played item is currently a flat
+        spray of top-level keys (file/label/title/media/id/showtitle/season/
+        episode/album/artist/track). Nest the item-identity fields into a
+        single `item` object, leaving `state`/`time`/`totaltime` at the top —
+        so what is loaded vs. how the player is doing are visibly distinct.
+    [ ] 11.16.3 Add the available audio tracks and subtitles to the snapshot
+        where they apply (video playback). Keep these fields brief — a short
+        summary of what is on offer plus the current selection, not the full
+        per-stream dump (audio_and_subtitle_info already covers the detailed
+        view); we do not want to spam the caller on every status reply.
+
 [ ] 11.6 Design tool tables
     [ ] 11.6.1 Buttons — argument-free actions, modeled as remote keypresses
         via Input.ExecuteAction (no playerid, no active-player resolution)
@@ -506,16 +545,6 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     noop reply or instances get envelope), so an assistant can detect it is
     talking to a stale binary (live session today still served the
     pre-11.13 history schema).
-
-[x] 11.16 Result shapes are invisible to the model: envelopes (total/
-    returned/offset/truncated, approximate, resolved, has_auth, last_seen)
-    live only in Doxygen/README. Adopt MCP outputSchema, or add a short
-    shape clause to each description (volume already does this).
-    Done as both: every tool but rpc declares an outputSchema (out_schema
-    table member; structuredContent mirrors successful results), and every
-    description carries a "Returns {...}" shape clause — the only channel
-    guaranteed to reach the model (Claude Code does not surface
-    outputSchema in the model-visible tool definition).
 
 [ ] 11.20 seek — no "skip ahead 5 min" / "restart" / "go to 1:12:00".
     Relative signed step like volume, plus an absolute `to` (snapshot
