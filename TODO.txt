@@ -288,6 +288,9 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
             hard: a queued item carries no preference, so it needs a real-time
             OnAVStart notification (not polling) per item — a persistent
             listener outliving the tool call that queued it
+    [ ] 8.10 seek — no "skip ahead 5 min" / "restart" / "go to 1:12:00".
+        Relative signed step like volume, plus an absolute `to` (snapshot
+        already reports time/totaltime).
 
 [ ] 9 Prompts / resources — on hold, not shipping now; tools are the
     whole server surface, initialize advertises only {tools:{}}. Revisit
@@ -544,10 +547,6 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
     noop reply or instances get envelope), so an assistant can detect it is
     talking to a stale binary (live session today still served the
     pre-15 history schema).
-
-[ ] 18 seek — no "skip ahead 5 min" / "restart" / "go to 1:12:00".
-    Relative signed step like volume, plus an absolute `to` (snapshot
-    already reports time/totaltime).
 
 [ ] 19 Play/queue a whole container in one call — playfile is one file,
     queue needs playback already running, so "play the album Animals" is
