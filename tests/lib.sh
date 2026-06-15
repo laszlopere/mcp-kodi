@@ -101,6 +101,54 @@ mk_state_dir () {
   trap 'rm -rf "$STATE_DIR"' EXIT
 }
 
+# ---- player idle gate -----------------------------------------------------
+# Stop every active player on the target instance and wait until Kodi reports
+# none, so a playback test starts from a clean idle state regardless of what a
+# preceding test left running. Bounded poll (~3s); returns 0 once idle, 1 on
+# timeout. Requires kodi_rpc (a live Kodi).
+mk_wait_idle () {
+  for id in $(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[].playerid' 2>/dev/null); do
+    kodi_rpc Player.Stop "{\"playerid\":$id}" >/dev/null 2>&1
+  done
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    n=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result | length' 2>/dev/null)
+    if [ "${n:-1}" -eq 0 ]; then
+      # Kodi reports "no active players" a beat before a just-stopped player
+      # (especially a video one) has fully torn down; a Player.Open issued in
+      # that window can transiently fail. A short settle closes the race.
+      sleep 0.5
+      return 0
+    fi
+    sleep 0.3
+  done
+  return 1
+}
+
+# ---- starting real playback (transient-tolerant) --------------------------
+# Start a file via the playfile tool, returning the tool result object. Kodi can
+# transiently report "playback never started" when it is still switching media
+# types (e.g. the previous test played a video and this one opens audio): the
+# play does take, just not inside playfile's verification window. Retry a few
+# times on THAT specific transient only — any other error is returned as-is.
+# Use this for tests that start playback as a fixture (skip/stop/play_pause/…);
+# tests that assert playfile's OWN error paths must call mcp_tool playfile
+# directly so the retry does not mask the very error they check.
+mk_playfile () { # arguments-json -> result object
+  _r=$(mcp_tool playfile "$1")
+  _try=0
+  while [ "$(res_err "$_r")" = true ] && [ "$_try" -lt 4 ]; do
+    case "$(g "$(res_body "$_r")" '.error // empty')" in
+      *"playback never started"*)
+        sleep 1
+        _r=$(mcp_tool playfile "$1")
+        _try=$((_try + 1))
+        ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$_r"
+}
+
 # ---- assertions -----------------------------------------------------------
 PASS=0
 FAIL=0

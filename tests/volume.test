@@ -1,0 +1,108 @@
+#!/bin/sh
+# Functional test for the `volume` tool.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi. `volume` is a RELATIVE adjustment, never an absolute set: `step` is a
+# signed integer of percentage points — 0 (or omitted) reads without changing,
+# +N/-N nudges, and the result is clamped to [0,100]. It returns the audio
+# snapshot extended with the bounds: { "muted", "volume", "min", "max" }.
+#
+# The test saves the box's real volume up front, drives it from a known mid
+# level, exercises read-only / up / down / both clamps, and restores the
+# original on every exit so it leaves a real device as it found it.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+# Shared harness: target-Kodi defaults, skip gates, kodi_rpc / mcp_tool, the jq
+# helpers, and the ok/no/eq assertion framework. See tests/lib.sh.
+. "$(dirname "$0")/lib.sh"
+
+# Dependencies (jq, curl), locate the binary into $MCP, require a live Kodi.
+mk_preflight
+
+# ---- volume guard ----------------------------------------------------------
+# Remember the box's real volume and restore it on every exit.
+vol0=$(kodi_rpc Application.GetProperties '{"properties":["volume"]}' \
+        | jq -r '.result.volume // empty')
+restore_volume () {
+  [ -n "$vol0" ] && kodi_rpc Application.SetVolume "{\"volume\":$vol0}" >/dev/null 2>&1
+}
+trap 'restore_volume' EXIT
+
+# Tool wrapper + a direct reader of Kodi's own view of the volume.
+volume     () { mcp_tool volume "$1"; }
+kodi_vol   () { kodi_rpc Application.GetProperties '{"properties":["volume"]}' | jq -r '.result.volume'; }
+
+echo "volume functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ===========================================================================
+# 1. Caller mistakes: an unconfigured instance is a clean tool error with the
+#    no_instance category and a setup hint.
+# ===========================================================================
+echo "-- errors / edges"
+
+b=$(volume '{"instance":"no-such-box","step":1}')
+eq "unknown instance -> tool error" true "$(res_err "$b")"
+eq "unknown instance -> category no_instance" no_instance \
+   "$(g "$(res_body "$b")" '.category')"
+is_true "unknown instance -> carries a setup hint" \
+        "$(j "$(res_body "$b")" 'has("hint") and (.hint|length>0)')"
+
+# ===========================================================================
+# 2. Read-only: step:0 (and omitted step) report the live volume and change
+#    nothing. Drive to a known mid level first so the deltas have headroom.
+# ===========================================================================
+echo "-- read-only (step:0)"
+kodi_rpc Application.SetVolume '{"volume":50}' >/dev/null 2>&1
+
+b=$(volume '{"step":0}')
+eq "step:0 is not an error"        false "$(res_err "$b")"
+pb=$(res_body "$b")
+is_true "snapshot carries muted/volume/min/max" \
+        "$(j "$pb" 'has("muted") and has("volume") and has("min") and has("max")')"
+eq "step:0 reports the live volume (50)" 50 "$(g "$pb" '.volume')"
+eq "min bound is 0"   0   "$(g "$pb" '.min')"
+eq "max bound is 100" 100 "$(g "$pb" '.max')"
+eq "step:0 changed nothing on the box" 50 "$(kodi_vol)"
+
+# Omitted step behaves the same as step:0 (read-only).
+eq "omitted step also reads 50" 50 "$(g "$(res_body "$(volume '{}')")" '.volume')"
+
+# ===========================================================================
+# 3. Relative up / down: the new volume is old +/- step, and Kodi agrees.
+# ===========================================================================
+echo "-- relative adjust"
+
+b=$(volume '{"step":10}')
+eq "step:+10 -> 60 in the snapshot" 60 "$(g "$(res_body "$b")" '.volume')"
+eq "step:+10 -> Kodi reads 60"      60 "$(kodi_vol)"
+
+b=$(volume '{"step":-25}')
+eq "step:-25 -> 35 in the snapshot" 35 "$(g "$(res_body "$b")" '.volume')"
+eq "step:-25 -> Kodi reads 35"      35 "$(kodi_vol)"
+
+# ===========================================================================
+# 4. Clamping to [0,100]: a huge step in either direction saturates, never
+#    overshoots, and never errors.
+# ===========================================================================
+echo "-- clamping"
+
+b=$(volume '{"step":1000}')
+eq "huge +step clamps to 100" 100 "$(g "$(res_body "$b")" '.volume')"
+eq "Kodi reads the clamped 100" 100 "$(kodi_vol)"
+
+b=$(volume '{"step":-1000}')
+eq "huge -step clamps to 0" 0 "$(g "$(res_body "$b")" '.volume')"
+eq "Kodi reads the clamped 0" 0 "$(kodi_vol)"
+
+mk_tally "volume functional test"

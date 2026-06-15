@@ -10,6 +10,8 @@
 TESTS = searchmedia.test contributors.test playfile.test queue.test \
         getplaylist.test dropplaylists.test notify.test rpc.test \
         history.test monitor.test audio_and_subtitle_info.test \
-        set_audio_and_subtitle.test playfile_with_audio_and_subtitle.test
+        set_audio_and_subtitle.test playfile_with_audio_and_subtitle.test \
+        mute.test volume.test instances.test nowplaying.test stop.test \
+        play_pause.test skip.test
 
 EXTRA_DIST = $(TESTS) lib.sh

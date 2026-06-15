@@ -1,0 +1,95 @@
+#!/bin/sh
+# Functional test for the `mute` tool.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi. `mute` is an ABSOLUTE set (Application.SetMute {mute:true}), never a
+# toggle, so it is idempotent: calling it twice leaves muted:true both times.
+# It returns the app-audio snapshot { "muted", "volume" }. The test saves the
+# box's real mute state up front and restores it on exit, so it never leaves a
+# real device muted.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+# Shared harness: target-Kodi defaults, skip gates, kodi_rpc / mcp_tool, the jq
+# helpers, and the ok/no/eq assertion framework. See tests/lib.sh.
+. "$(dirname "$0")/lib.sh"
+
+# Dependencies (jq, curl), locate the binary into $MCP, require a live Kodi.
+mk_preflight
+
+# ---- mute guard ------------------------------------------------------------
+# Remember the box's real mute state and restore it on every exit, so a real
+# device is never left muted by the test.
+mute0=$(kodi_rpc Application.GetProperties '{"properties":["muted"]}' \
+         | jq -r '.result.muted')
+restore_mute () {
+  case "$mute0" in
+    true)  kodi_rpc Application.SetMute '{"mute":true}'  >/dev/null 2>&1;;
+    false) kodi_rpc Application.SetMute '{"mute":false}' >/dev/null 2>&1;;
+  esac
+}
+trap 'restore_mute' EXIT
+
+# Tool wrappers for this test.
+mute   () { mcp_tool mute   "$1"; }
+unmute () { mcp_tool unmute "$1"; }
+
+echo "mute functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ===========================================================================
+# 1. Caller mistakes: an unconfigured instance is a clean tool error with the
+#    no_instance category and a setup hint. (The schema has no other args.)
+# ===========================================================================
+echo "-- errors / edges"
+
+b=$(mute '{"instance":"no-such-box"}')
+eq "unknown instance -> tool error" true "$(res_err "$b")"
+eq "unknown instance -> category no_instance" no_instance \
+   "$(g "$(res_body "$b")" '.category')"
+is_true "unknown instance -> carries a setup hint" \
+        "$(j "$(res_body "$b")" 'has("hint") and (.hint|length>0)')"
+
+# ===========================================================================
+# 2. Mute: the snapshot reports muted:true, and Kodi independently agrees.
+# ===========================================================================
+echo "-- mute"
+
+b=$(mute '{}')
+eq "mute is not an error" false "$(res_err "$b")"
+pb=$(res_body "$b")
+is_true "snapshot reports a muted field"  "$(j "$pb" 'has("muted")')"
+eq      "snapshot says muted:true"        true "$(g "$pb" '.muted')"
+is_true "snapshot carries a volume"       "$(j "$pb" 'has("volume") and (.volume|type=="number")')"
+eq      "Kodi confirms muted:true"        true \
+        "$(kodi_rpc Application.GetProperties '{"properties":["muted"]}' | jq -r '.result.muted')"
+
+# Idempotent: an absolute set, not a toggle — muting again stays muted.
+b=$(mute '{}')
+eq "second mute still not an error" false "$(res_err "$b")"
+eq "second mute stays muted:true"   true  "$(g "$(res_body "$b")" '.muted')"
+
+# ===========================================================================
+# 3. Unmute round-trips it back: muted:false, Kodi agrees, still idempotent.
+# ===========================================================================
+echo "-- unmute"
+
+b=$(unmute '{}')
+eq "unmute is not an error"        false "$(res_err "$b")"
+eq "snapshot says muted:false"     false "$(g "$(res_body "$b")" '.muted')"
+eq "Kodi confirms muted:false"     false \
+   "$(kodi_rpc Application.GetProperties '{"properties":["muted"]}' | jq -r '.result.muted')"
+
+b=$(unmute '{}')
+eq "second unmute stays muted:false" false "$(g "$(res_body "$b")" '.muted')"
+
+mk_tally "mute functional test"

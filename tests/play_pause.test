@@ -1,0 +1,123 @@
+#!/bin/sh
+# Functional test for the `pause` and `play` transport buttons.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi. These two are remote keypresses (Input.ExecuteAction) that return the
+# resulting player_state() snapshot. They are an inseparable pair: `pause` halts
+# the active player (state -> "paused", Kodi speed 0) WITHOUT clearing the queue,
+# and `play` resumes paused playback (state -> "playing", speed 1). The test
+# starts a file, pauses it, asserts the snapshot AND Kodi agree, then resumes and
+# asserts both flip back — and that pausing never touched the queue.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#   - at least one playable movie or song (else the transport half is skipped)
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+# Shared harness. See tests/lib.sh.
+. "$(dirname "$0")/lib.sh"
+
+# Keep playback OUT of the user's real history log. (EXIT cleanup is folded into
+# the volume guard's trap, set below.)
+STATE_DIR=$(mktemp -d) || skip "cannot mktemp"
+export XDG_STATE_HOME="$STATE_DIR"
+
+mk_preflight
+
+# ---- volume guard ----------------------------------------------------------
+vol0=$(kodi_rpc Application.GetProperties '{"properties":["volume"]}' \
+        | jq -r '.result.volume // empty')
+restore_volume () {
+  [ -n "$vol0" ] && kodi_rpc Application.SetVolume "{\"volume\":$vol0}" >/dev/null 2>&1
+}
+trap 'restore_volume; rm -rf "$STATE_DIR"' EXIT
+[ -n "$vol0" ] && kodi_rpc Application.SetVolume '{"volume":2}' >/dev/null 2>&1
+
+# Tool wrappers.
+play_t      () { mcp_tool play        "$1"; }
+pause_t     () { mcp_tool pause       "$1"; }
+stop_t      () { mcp_tool stop        "$1"; }
+playfile    () { mk_playfile          "$1"; }  # transient-tolerant (see lib.sh)
+searchmedia () { mcp_tool searchmedia "$1"; }
+
+kodi_speed () { # -> the active player's speed (empty if none)
+  pid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+  [ -z "$pid" ] && return 0
+  kodi_rpc Player.GetProperties "{\"playerid\":$pid,\"properties\":[\"speed\"]}" \
+    | jq -r '.result.speed'
+}
+
+echo "play/pause functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ===========================================================================
+# 1. Caller mistakes: an unconfigured instance is a clean tool error for both.
+# ===========================================================================
+echo "-- errors / edges"
+b=$(pause_t '{"instance":"no-such-box"}')
+eq "pause unknown instance -> tool error" true "$(res_err "$b")"
+eq "pause unknown instance -> category no_instance" no_instance \
+   "$(g "$(res_body "$b")" '.category')"
+b=$(play_t '{"instance":"no-such-box"}')
+eq "play unknown instance -> tool error" true "$(res_err "$b")"
+
+# ===========================================================================
+# 2. Discover a playable file (movie, else a song).
+# ===========================================================================
+file=""
+b=$(res_body "$(searchmedia '{"type":"movie","limit":1}')")
+if [ "$(j "$b" '.returned >= 1')" = true ]; then
+  file=$(g "$b" '.rows[0].file')
+else
+  artist=$(kodi_rpc AudioLibrary.GetArtists '{"limits":{"start":0,"end":1}}' \
+            | jq -r '.result.artists[0].artist // empty')
+  if [ -n "$artist" ]; then
+    b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:1}')")")
+    [ "$(j "$b" '.returned >= 1')" = true ] && file=$(g "$b" '.rows[0].file')
+  fi
+fi
+
+if [ -z "$file" ]; then
+  echo "   (no playable movie or song in library — transport assertions skipped)"
+  mk_tally "play/pause functional test"
+fi
+
+# ===========================================================================
+# 3. Play a file, then pause -> paused (queue intact), then play -> playing.
+# ===========================================================================
+echo "-- pause then resume"
+echo "   (file: $file)"
+mk_wait_idle   # start from a clean idle player, whatever ran before us
+b=$(playfile "$(jargs --arg f "$file" '{file:$f}')")
+eq "playfile starts playing" playing "$(g "$(res_body "$b")" '.state')"
+
+# Record the playlist the player is consuming, to prove pause leaves it intact.
+playerid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+plid=$(kodi_rpc Player.GetProperties \
+        "{\"playerid\":$playerid,\"properties\":[\"playlistid\"]}" | jq -r '.result.playlistid')
+items_before=$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" | jq -r '.result.items // [] | length')
+
+b=$(pause_t '{}')
+eq "pause is not an error"      false  "$(res_err "$b")"
+eq "pause -> snapshot paused"   paused "$(g "$(res_body "$b")" '.state')"
+eq "pause -> Kodi speed is 0"   0      "$(kodi_speed)"
+eq "pause left the queue intact" "$items_before" \
+   "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" | jq -r '.result.items // [] | length')"
+
+b=$(play_t '{}')
+eq "play is not an error"        false   "$(res_err "$b")"
+eq "play -> snapshot playing"    playing "$(g "$(res_body "$b")" '.state')"
+eq "play -> Kodi speed is 1"     1       "$(kodi_speed)"
+eq "resume kept the same file"   "$file" "$(g "$(res_body "$(pause_t '{}')")" '.nowplaying.file')"
+
+# Cleanup: leave the player stopped (the safe neutral state).
+stop_t '{}' >/dev/null
+
+mk_tally "play/pause functional test"

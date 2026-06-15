@@ -1,0 +1,150 @@
+#!/bin/sh
+# Functional test for the `instances` config tool.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport. Like history,
+# this tool needs NO live Kodi: it reads and writes the server's OWN instance
+# config (config.json) and makes no Kodi call. The test materialises a private
+# config under a throwaway XDG_CONFIG_HOME and drives the server against it, so
+# it never touches the user's real ~/.config/mcp-kodi/config.json.
+#
+# Each tool call is a separate server process that reads config from disk at
+# startup, so a `set` in one call and a `get` in the next prove the change was
+# PERSISTED, not merely held in memory.
+#
+# Covers: get/set/remove, default switching, the merge-on-set semantics, and
+# every error path (missing action/key, removing the default, removing an
+# unknown key, an unknown action).
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq on PATH
+#   - the mcp-kodi binary built
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+# Shared harness: skip gate, find_binary, the jq helpers, and the ok/no/eq/
+# contains assertion framework. See tests/lib.sh. This tool needs NO live Kodi,
+# so it does NOT call mk_preflight/mk_require_ping — only jq + the binary — and
+# drives the server through its own env-scrubbed `inst` wrapper below.
+. "$(dirname "$0")/lib.sh"
+
+command -v jq >/dev/null 2>&1 || skip "jq not found"
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# ---- a private config the test owns ---------------------------------------
+WORK=$(mktemp -d) || skip "cannot mktemp"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/cfg/mcp-kodi"
+
+# Start from a two-instance config: "living" is the default, "spare" a second
+# box. allow_rpc is hand-edit-only; "living" carries it so we can prove `get`
+# reports it read-only and `set` never changes it.
+cat > "$WORK/cfg/mcp-kodi/config.json" <<'EOF'
+{"version":2,"default":"living","instances":{
+  "living":{"name":"Living Room","host":"127.0.0.1:8080","auth":"k:k","scheme":"http","allow_rpc":true},
+  "spare":{"host":"10.0.0.9:8080","scheme":"http"}}}
+EOF
+
+# ---- talking to the server under test (MCP over stdio) --------------------
+# One invocation per call (the server exits on stdin EOF) keeps assertions
+# isolated AND forces each to re-read config from disk. env -i scrubs the
+# environment so only our private XDG_CONFIG_HOME is seen.
+inst () { # arguments-json -> tool result object
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"instances\",\"arguments\":$1}}" \
+    | env -i PATH="$PATH" XDG_CONFIG_HOME="$WORK/cfg" "$MCP" 2>/dev/null \
+    | jq -c 'select(.id==2) | .result'
+}
+
+echo "instances functional test — binary $MCP"
+
+# ===========================================================================
+# 1. Error paths: every bad request is a clean tool error that names what is
+#    wrong, never a crash.
+# ===========================================================================
+echo "-- errors / edges"
+
+b=$(inst '{}')
+eq       "missing action -> tool error" true "$(res_err "$b")"
+contains "missing-action error names action" "action" "$(g "$(res_body "$b")" '.error')"
+
+b=$(inst '{"action":"set"}')
+eq       "set without key -> tool error" true "$(res_err "$b")"
+contains "set-no-key error names key" "key" "$(g "$(res_body "$b")" '.error')"
+
+b=$(inst '{"action":"remove"}')
+eq       "remove without key -> tool error" true "$(res_err "$b")"
+contains "remove-no-key error names key" "key" "$(g "$(res_body "$b")" '.error')"
+
+b=$(inst '{"action":"remove","key":"living"}')
+eq       "removing the default -> tool error" true "$(res_err "$b")"
+contains "default-removal error explains why" "default" "$(g "$(res_body "$b")" '.error')"
+
+b=$(inst '{"action":"remove","key":"ghost"}')
+eq       "removing an unknown key -> tool error" true "$(res_err "$b")"
+contains "unknown-key error names the key" "ghost" "$(g "$(res_body "$b")" '.error')"
+
+b=$(inst '{"action":"bogus"}')
+eq       "unknown action -> tool error" true "$(res_err "$b")"
+contains "unknown-action error names the action" "bogus" "$(g "$(res_body "$b")" '.error')"
+
+# ===========================================================================
+# 2. get: lists both instances in sorted key order, reports the default, and
+#    surfaces allow_rpc read-only while keeping auth write-only (only has_auth).
+# ===========================================================================
+echo "-- get"
+pb=$(res_body "$(inst '{"action":"get"}')")
+eq "get is not an error"            false "$(res_err "$(inst '{"action":"get"}')")"
+eq "default is living"              living "$(g "$pb" '.default')"
+eq "lists both instances"           2      "$(g "$pb" '.instances | length')"
+eq "sorted key order: living first" living "$(g "$pb" '.instances[0].key')"
+eq "sorted key order: spare second" spare  "$(g "$pb" '.instances[1].key')"
+eq "living reports allow_rpc:true"  true   "$(g "$pb" '.instances[] | select(.key=="living") | .allow_rpc')"
+eq "spare defaults allow_rpc:false" false  "$(g "$pb" '.instances[] | select(.key=="spare") | .allow_rpc')"
+is_true "living has_auth is true"  "$(j "$pb" '.instances[] | select(.key=="living") | .has_auth')"
+is_true "no raw auth is ever returned" \
+        "$(j "$pb" '[.. | objects | has("auth")] | any | not')"
+
+# ===========================================================================
+# 3. set: add a new instance; a SEPARATE get proves it was persisted to disk.
+# ===========================================================================
+echo "-- set (persisted)"
+b=$(inst '{"action":"set","key":"attic","host":"10.0.0.7:8080","scheme":"http","name":"Attic"}')
+eq "set is not an error" false "$(res_err "$b")"
+
+pb=$(res_body "$(inst '{"action":"get"}')")
+eq "set persisted: three instances now" 3 "$(g "$pb" '.instances | length')"
+eq "set persisted: attic host"   "10.0.0.7:8080" "$(g "$pb" '.instances[] | select(.key=="attic") | .host')"
+eq "set persisted: attic name"   "Attic"         "$(g "$pb" '.instances[] | select(.key=="attic") | .name')"
+eq "default unchanged by set"    living          "$(g "$pb" '.default')"
+
+# Merge-on-set: updating only the host keeps the previously set name.
+b=$(inst '{"action":"set","key":"attic","host":"10.0.0.8:8080"}')
+pb=$(res_body "$(inst '{"action":"get"}')")
+eq "merge-set updated the host" "10.0.0.8:8080" "$(g "$pb" '.instances[] | select(.key=="attic") | .host')"
+eq "merge-set kept the name"    "Attic"         "$(g "$pb" '.instances[] | select(.key=="attic") | .name')"
+
+# set cannot grant allow_rpc (hand-edit-only): asking for it is ignored.
+b=$(inst '{"action":"set","key":"attic","allow_rpc":true}')
+pb=$(res_body "$(inst '{"action":"get"}')")
+eq "set cannot grant allow_rpc" false "$(g "$pb" '.instances[] | select(.key=="attic") | .allow_rpc')"
+
+# ===========================================================================
+# 4. default switching, then remove the now-non-default old default.
+# ===========================================================================
+echo "-- default switch + remove"
+b=$(inst '{"action":"set","key":"attic","default":true}')
+pb=$(res_body "$(inst '{"action":"get"}')")
+eq "default switched to attic" attic "$(g "$pb" '.default')"
+
+# living is no longer the default, so it can now be removed.
+b=$(inst '{"action":"remove","key":"living"}')
+eq "removing the old default now succeeds" false "$(res_err "$b")"
+pb=$(res_body "$(inst '{"action":"get"}')")
+eq "remove persisted: living is gone" 0 \
+   "$(g "$pb" '[.instances[] | select(.key=="living")] | length')"
+eq "remove persisted: two instances left" 2 "$(g "$pb" '.instances | length')"
+
+mk_tally "instances functional test"

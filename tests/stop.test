@@ -1,0 +1,125 @@
+#!/bin/sh
+# Functional test for the `stop` tool.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi. `stop` is more than a bare Stop keypress: Kodi's stop ends playback but
+# leaves the queue intact, so `stop` ALSO clears the playlist the player was
+# consuming (its load-bearing extra behaviour — see handler_stop). It returns
+# the player_state() snapshot ({ "state": "stopped" }). The test grows a real
+# queue, stops, and asserts both halves: playback ended AND the queue is empty.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#   - at least two playable movies or songs (else the clear-queue half is skipped)
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+# Shared harness. See tests/lib.sh.
+. "$(dirname "$0")/lib.sh"
+
+# Keep playback OUT of the user's real history log. (EXIT cleanup is folded into
+# the volume guard's trap, set below.)
+STATE_DIR=$(mktemp -d) || skip "cannot mktemp"
+export XDG_STATE_HOME="$STATE_DIR"
+
+mk_preflight
+
+# ---- volume guard ----------------------------------------------------------
+vol0=$(kodi_rpc Application.GetProperties '{"properties":["volume"]}' \
+        | jq -r '.result.volume // empty')
+restore_volume () {
+  [ -n "$vol0" ] && kodi_rpc Application.SetVolume "{\"volume\":$vol0}" >/dev/null 2>&1
+}
+trap 'restore_volume; rm -rf "$STATE_DIR"' EXIT
+[ -n "$vol0" ] && kodi_rpc Application.SetVolume '{"volume":2}' >/dev/null 2>&1
+
+# Tool wrappers.
+stop_t      () { mcp_tool stop        "$1"; }
+queue       () { mcp_tool queue       "$1"; }
+playfile    () { mk_playfile          "$1"; }  # transient-tolerant (see lib.sh)
+searchmedia () { mcp_tool searchmedia "$1"; }
+
+echo "stop functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ===========================================================================
+# 1. Caller mistakes: an unconfigured instance is a clean tool error with the
+#    no_instance category and a setup hint.
+# ===========================================================================
+echo "-- errors / edges"
+b=$(stop_t '{"instance":"no-such-box"}')
+eq "unknown instance -> tool error" true "$(res_err "$b")"
+eq "unknown instance -> category no_instance" no_instance \
+   "$(g "$(res_body "$b")" '.category')"
+
+# ===========================================================================
+# 2. Stop on an idle player is harmless: not an error, reports stopped.
+# ===========================================================================
+echo "-- stop while idle"
+for id in $(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[].playerid'); do
+  kodi_rpc Player.Stop "{\"playerid\":$id}" >/dev/null 2>&1
+done
+b=$(stop_t '{}')
+eq "idle stop is not an error" false "$(res_err "$b")"
+eq "idle stop reports stopped" stopped "$(g "$(res_body "$b")" '.state')"
+
+# ===========================================================================
+# 3. Discover TWO playable leaves of the same type, grow a queue, then stop and
+#    assert it both ended playback AND cleared the queue it was consuming.
+# ===========================================================================
+kind=""
+b=$(res_body "$(searchmedia '{"type":"movie","limit":2}')")
+if [ "$(j "$b" '.returned >= 2')" = true ]; then
+  kind=movie idkey=movieid
+else
+  artist=$(kodi_rpc AudioLibrary.GetArtists '{"limits":{"start":0,"end":1}}' \
+            | jq -r '.result.artists[0].artist // empty')
+  if [ -n "$artist" ]; then
+    b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:2}')")")
+    [ "$(j "$b" '.returned >= 2')" = true ] && { kind=song idkey=songid; }
+  fi
+fi
+
+if [ -z "$kind" ]; then
+  echo "   (library holds fewer than two movies or songs — clear-queue assertions skipped)"
+  mk_tally "stop functional test"
+fi
+
+file1=$(g "$b" '.rows[0].file')
+id2=$(g "$b" ".rows[1].$idkey")
+
+echo "-- stop clears the queue ($kind)"
+echo "   (playing: $file1)"
+
+mk_wait_idle   # start from a clean idle player, whatever ran before us
+b=$(playfile "$(jargs --arg f "$file1" '{file:$f}')")
+eq "playfile starts the first leaf" false "$(res_err "$b")"
+
+playerid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+plid=$(kodi_rpc Player.GetProperties \
+        "{\"playerid\":$playerid,\"properties\":[\"playlistid\"]}" \
+        | jq -r '.result.playlistid')
+
+# Queue the second leaf so the playlist has more than the single auto-play item.
+queue "$(jargs --arg t "$kind" --argjson i "$id2" '{type:$t,id:$i}')" >/dev/null
+grew=$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" | jq -r '.result.items | length')
+is_true "the queue grew past one item before stop" \
+        "$([ "${grew:-0}" -ge 2 ] && echo true || echo false)"
+
+# Stop: snapshot says stopped, Kodi has no active player, and the playlist the
+# player was consuming is now empty (stop's load-bearing extra behaviour).
+b=$(stop_t '{}')
+eq "stop is not an error"        false   "$(res_err "$b")"
+eq "stop reports the stopped state" stopped "$(g "$(res_body "$b")" '.state')"
+eq "Kodi has no active player after stop" 0 \
+   "$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result | length')"
+eq "stop cleared the queue it was consuming" 0 \
+   "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" | jq -r '.result.items // [] | length')"
+
+mk_tally "stop functional test"

@@ -1,0 +1,143 @@
+#!/bin/sh
+# Functional test for the `skipnext` and `skipprevious` transport buttons.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi. Both are remote keypresses (Input.ExecuteAction Next/Previous) that
+# return the resulting player_state() snapshot. They are a pair, tested over a
+# two-item queue: from the first item, skipnext advances to the second; from
+# there, skipprevious returns to the first. The test verifies the move against
+# both the snapshot's nowplaying.file AND Kodi's own playlist position.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#   - at least two playable movies or songs (else the skip half is skipped)
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+# Shared harness. See tests/lib.sh.
+. "$(dirname "$0")/lib.sh"
+
+# Keep playback OUT of the user's real history log. (EXIT cleanup is folded into
+# the volume guard's trap, set below.)
+STATE_DIR=$(mktemp -d) || skip "cannot mktemp"
+export XDG_STATE_HOME="$STATE_DIR"
+
+mk_preflight
+
+# ---- volume guard ----------------------------------------------------------
+vol0=$(kodi_rpc Application.GetProperties '{"properties":["volume"]}' \
+        | jq -r '.result.volume // empty')
+restore_volume () {
+  [ -n "$vol0" ] && kodi_rpc Application.SetVolume "{\"volume\":$vol0}" >/dev/null 2>&1
+}
+trap 'restore_volume; rm -rf "$STATE_DIR"' EXIT
+[ -n "$vol0" ] && kodi_rpc Application.SetVolume '{"volume":2}' >/dev/null 2>&1
+
+# Tool wrappers.
+skipnext     () { mcp_tool skipnext     "$1"; }
+skipprevious () { mcp_tool skipprevious "$1"; }
+stop_t       () { mcp_tool stop         "$1"; }
+queue        () { mcp_tool queue        "$1"; }
+playfile     () { mk_playfile           "$1"; }  # transient-tolerant (see lib.sh)
+searchmedia  () { mcp_tool searchmedia  "$1"; }
+
+# Poll until the active player's nowplaying file is $1 (or timeout) — the skip
+# keypress settles asynchronously, so we wait on the observable move rather than
+# assume a fixed delay.
+wait_for_file () { # wanted-file
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+    if [ -n "$pid" ]; then
+      cur=$(kodi_rpc Player.GetItem "{\"playerid\":$pid,\"properties\":[\"file\"]}" \
+             | jq -r '.result.item.file // empty')
+      [ "$cur" = "$1" ] && return 0
+    fi
+    sleep 0.3
+  done
+  return 1
+}
+
+echo "skip functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ===========================================================================
+# 1. Caller mistakes: an unconfigured instance is a clean tool error for both.
+# ===========================================================================
+echo "-- errors / edges"
+b=$(skipnext '{"instance":"no-such-box"}')
+eq "skipnext unknown instance -> tool error" true "$(res_err "$b")"
+eq "skipnext unknown instance -> category no_instance" no_instance \
+   "$(g "$(res_body "$b")" '.category')"
+b=$(skipprevious '{"instance":"no-such-box"}')
+eq "skipprevious unknown instance -> tool error" true "$(res_err "$b")"
+
+# ===========================================================================
+# 2. Discover TWO playable leaves of the same type.
+# ===========================================================================
+kind=""
+b=$(res_body "$(searchmedia '{"type":"movie","limit":2}')")
+if [ "$(j "$b" '.returned >= 2')" = true ]; then
+  kind=movie idkey=movieid
+else
+  artist=$(kodi_rpc AudioLibrary.GetArtists '{"limits":{"start":0,"end":1}}' \
+            | jq -r '.result.artists[0].artist // empty')
+  if [ -n "$artist" ]; then
+    b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:2}')")")
+    [ "$(j "$b" '.returned >= 2')" = true ] && { kind=song idkey=songid; }
+  fi
+fi
+
+if [ -z "$kind" ]; then
+  echo "   (library holds fewer than two movies or songs — skip assertions skipped)"
+  mk_tally "skip functional test"
+fi
+
+file1=$(g "$b" '.rows[0].file')
+file2=$(g "$b" '.rows[1].file')
+id2=$(g "$b" ".rows[1].$idkey")
+
+# ===========================================================================
+# 3. Build a two-item queue, then skipnext -> second item, skipprevious -> first.
+# ===========================================================================
+echo "-- skip across a two-item queue ($kind)"
+echo "   (item 1: $file1)"
+echo "   (item 2: $file2)"
+
+mk_wait_idle   # start from a clean idle player, whatever ran before us
+b=$(playfile "$(jargs --arg f "$file1" '{file:$f}')")
+eq "playfile starts the first leaf" false "$(res_err "$b")"
+queue "$(jargs --arg t "$kind" --argjson i "$id2" '{type:$t,id:$i}')" >/dev/null
+
+playerid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+plid=$(kodi_rpc Player.GetProperties \
+        "{\"playerid\":$playerid,\"properties\":[\"playlistid\"]}" | jq -r '.result.playlistid')
+held=$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" | jq -r '.result.items // [] | length')
+is_true "the queue holds at least two items" \
+        "$([ "${held:-0}" -ge 2 ] && echo true || echo false)"
+
+# skipnext -> the second item.
+b=$(skipnext '{}')
+eq "skipnext is not an error" false "$(res_err "$b")"
+if wait_for_file "$file2"; then ok "skipnext advanced to the second item (Kodi)"; else
+  no "skipnext advanced to the second item (Kodi)" "still on $(kodi_rpc Player.GetItem "{\"playerid\":$playerid,\"properties\":[\"file\"]}" | jq -r '.result.item.file')"; fi
+eq "skipnext snapshot names the second file" "$file2" \
+   "$(g "$(res_body "$(mcp_tool nowplaying '{}')")" '.nowplaying.file')"
+
+# skipprevious -> back to the first item.
+b=$(skipprevious '{}')
+eq "skipprevious is not an error" false "$(res_err "$b")"
+if wait_for_file "$file1"; then ok "skipprevious returned to the first item (Kodi)"; else
+  no "skipprevious returned to the first item (Kodi)" "now on $(kodi_rpc Player.GetItem "{\"playerid\":$playerid,\"properties\":[\"file\"]}" | jq -r '.result.item.file')"; fi
+eq "skipprevious snapshot names the first file" "$file1" \
+   "$(g "$(res_body "$(mcp_tool nowplaying '{}')")" '.nowplaying.file')"
+
+# Cleanup: leave the player stopped (the safe neutral state).
+stop_t '{}' >/dev/null
+
+mk_tally "skip functional test"
