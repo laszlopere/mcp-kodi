@@ -1,38 +1,37 @@
 mcp-kodi — TODO
 
-Tasks only: [x] done, [ ] pending or on hold. Numbering is carried over from
-the original TODO.md spec (see git history) so existing references stay
-valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
-12.x.y" points there.
+Tasks only: [x] done, [ ] pending or on hold. Renumbered sequentially; the
+original TODO.md spec numbering is in git history. The Kodi JSON-RPC method
+inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
 
-[x] 4.6 Document the server-side setup for end users — enabling Kodi's
+[x] 1 Document the server-side setup for end users — enabling Kodi's
     JSON-RPC web server and fronting it with the Caddy HTTPS reverse proxy
     (tls internal, self-signed) — in docs/kodi-server-setup.md.
 
-[x] 11.1 Spec — the original TODO.md design document (now in git history).
+[x] 2 Spec — the original TODO.md design document (now in git history).
 
-[x] 11.2 Autotools scaffold (configure.ac, Makefile.am, autogen.sh, src
+[x] 3 Autotools scaffold (configure.ac, Makefile.am, autogen.sh, src
     skeleton). Deps: glib-2.0 >= 2.80, gobject, gio, json-glib-1.0 >= 1.8,
     libsoup-3.0 >= 3.4; -Wall -Wextra during dev.
 
-[x] 11.3 Config load + save, multi-instance (mk-config).
+[x] 4 Config load + save, multi-instance (mk-config).
     ~/.config/mcp-kodi/config.json: named instances map + one default;
     KODI_HOST/KODI_AUTH/KODI_SCHEME env overrides for the default instance;
     atomic save (temp + fsync + rename), dir 0700 / file 0600; version-1
     flat-file back-compat.
 
-[x] 11.4 Kodi JSON-RPC client, per-instance (mk-kodi). POST to
+[x] 5 Kodi JSON-RPC client, per-instance (mk-kodi). POST to
     <scheme>://<host>/jsonrpc with HTTP Basic auth; one shared SoupSession;
     per-instance self-signed-cert acceptance (insecure flag, per host, not
     blanket); Kodi's error member surfaces as a tool error.
 
-[x] 11.5 MCP stdio transport + dispatch (mk-stdio, mk-mcp).
+[x] 6 MCP stdio transport + dispatch (mk-stdio, mk-mcp).
     Newline-delimited JSON-RPC 2.0 on stdin/stdout, logging to stderr only;
     GMainLoop + async line reads, EOF quits; initialize / initialized / ping
     / tools/list / tools/call; tool failures return isError results, never
     protocol errors; no response to notifications.
 
-[x] 11.16 Result shapes were invisible to the model (envelopes lived only in
+[x] 7 Result shapes were invisible to the model (envelopes lived only in
     Doxygen/README). Fixed both ways: every tool but rpc declares an
     outputSchema, and every description carries a "Returns {...}" shape clause
     (the only channel that reaches the model, since Claude Code hides
@@ -54,80 +53,80 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
           "time":      { "hours": 0, "minutes": 15, "seconds": 38, "milliseconds": 507 },
           "totaltime": { "hours": 0, "minutes": 46, "seconds": 40, "milliseconds": 633 }
         }
-    [ ] 11.16.1 Make playback position recognizable. `time`/`totaltime` are
+    [ ] 7.1 Make playback position recognizable. `time`/`totaltime` are
         already in the snapshot (current position and total length), but as
         bare {hours,minutes,seconds,milliseconds} objects the model does not
         read them as "how far in / how long". Surface them legibly — a
         derived percentage and/or human-readable elapsed/total clause in the
         shape description — so an assistant can answer "how much is left".
-    [ ] 11.16.2 Structure the return data: the played item is currently a flat
+    [ ] 7.2 Structure the return data: the played item is currently a flat
         spray of top-level keys (file/label/title/media/id/showtitle/season/
         episode/album/artist/track). Nest the item-identity fields into a
         single `item` object, leaving `state`/`time`/`totaltime` at the top —
         so what is loaded vs. how the player is doing are visibly distinct.
-    [ ] 11.16.3 Add the available audio tracks and subtitles to the snapshot
+    [ ] 7.3 Add the available audio tracks and subtitles to the snapshot
         where they apply (video playback). Keep these fields brief — a short
         summary of what is on offer plus the current selection, not the full
         per-stream dump (audio_and_subtitle_info already covers the detailed
         view); we do not want to spam the caller on every status reply.
 
-[ ] 11.6 Design tool tables
-    [ ] 11.6.1 Buttons — argument-free actions, modeled as remote keypresses
+[ ] 8 Design tool tables
+    [ ] 8.1 Buttons — argument-free actions, modeled as remote keypresses
         via Input.ExecuteAction (no playerid, no active-player resolution)
-        [x] 11.6.1.1 play
-        [x] 11.6.1.2 pause
-        [x] 11.6.1.3 stop — Kodi's stop leaves the queue intact, so the
+        [x] 8.1.1 play
+        [x] 8.1.2 pause
+        [x] 8.1.3 stop — Kodi's stop leaves the queue intact, so the
             handler also clears the stopped playlist (resolve playlistid
             before the keypress, Playlist.Clear after); the one Button that
             resolves the active player
-        [x] 11.6.1.4 mute — Application.SetMute {mute:true}
-        [x] 11.6.1.5 unmute — Application.SetMute {mute:false}
-        [x] 11.6.1.6 nowplaying — fires no action, returns the player_state()
+        [x] 8.1.4 mute — Application.SetMute {mute:true}
+        [x] 8.1.5 unmute — Application.SetMute {mute:false}
+        [x] 8.1.6 nowplaying — fires no action, returns the player_state()
             snapshot only; a reachability + state probe (renamed from noop)
-        [x] 11.6.1.7 skipnext — Input.ExecuteAction {action:"skipnext"};
+        [x] 8.1.7 skipnext — Input.ExecuteAction {action:"skipnext"};
             advance to the next playlist item / chapter
-        [x] 11.6.1.8 skipprevious — Input.ExecuteAction
+        [x] 8.1.8 skipprevious — Input.ExecuteAction
             {action:"skipprevious"}; previous item, or restart the current
             one to match Kodi's button
-    [x] 11.6.2 Knobs — adjust a scalar
-        [x] 11.6.2.1 volume — relative only, signed step; 0 = read-only
+    [x] 8.2 Knobs — adjust a scalar
+        [x] 8.2.1 volume — relative only, signed step; 0 = read-only
             probe; resolves the step against the live level, writes a
             clamped absolute SetVolume; returns {volume, muted, min:0,
             max:100}
-    [x] 11.6.3 instances — manage the server's own config (no Kodi call);
+    [x] 8.3 instances — manage the server's own config (no Kodi call);
         every action returns the instance list, credentials never leave the
         server (auth reported as has_auth)
-        [x] 11.6.3.1 get — list instances + which is default; allow_rpc
+        [x] 8.3.1 get — list instances + which is default; allow_rpc
             read-only
-        [x] 11.6.3.2 set — upsert by key, omitted fields keep their value,
+        [x] 8.3.2 set — upsert by key, omitted fields keep their value,
             persists atomically; cannot write allow_rpc (hand-edit only)
-        [x] 11.6.3.3 remove — refuses to delete the current default
-    [ ] 11.6.4 Search tools — resolve the library by name down to playable
+        [x] 8.3.3 remove — refuses to delete the current default
+    [ ] 8.4 Search tools — resolve the library by name down to playable
         leaf files; no Kodi state change (more to come)
-        [x] 11.6.4.1 searchmedia — {type: music|tv-show|movie, artist?, title?,
+        [x] 8.4.1 searchmedia — {type: music|tv-show|movie, artist?, title?,
             season?, number?, limit?, offset?, count?} down to leaf-file
             rows {file, <id>, label}; descends to album/season only when
             named, so wide queries are one Kodi call; always reports total;
             substring title hitting several containers makes total a sum
             and offset best-effort. Person matching: artist feeds
             AudioLibrary.GetArtists (music); movie/tv-show take actor?/
-            director? — see 11.6.4.2
-            [x] 11.6.4.1.1 movies by partial title — VideoLibrary.GetMovies
+            director? — see 8.4.2
+            [x] 8.4.1.1 movies by partial title — VideoLibrary.GetMovies
                 with a {field:title, operator:contains} rule; substring,
                 case-insensitive; returns ALL matching movies (no collapse)
-            [x] 11.6.4.1.2 tv shows by partial show title — resolves the show
+            [x] 8.4.1.2 tv shows by partial show title — resolves the show
                 via VideoLibrary.GetTVShows contains, then lists its episodes;
                 a multi-match substring COLLAPSES to one show (exact ci match
                 preferred, else alphabetically-first), unlike movies
-            [x] 11.6.4.1.3 tv shows by partial episode title — the
+            [x] 8.4.1.3 tv shows by partial episode title — the
                 `episodetitle` arg: a {title contains} field rule on the same
                 GetEpisodes call (library-wide, rows carry showtitle; or pinned
                 to a resolved show when `title` is also given). One more rule on
-                the existing person path, no new branch (done like §11.6.4.1.5)
-            [x] 11.6.4.1.4 songs by partial album title — title is the ALBUM
+                the existing person path, no new branch (done like §8.4.1.5)
+            [x] 8.4.1.4 songs by partial album title — title is the ALBUM
                 name (AudioLibrary.GetAlbums contains → that album's songs);
                 an album substring spanning several albums sums their songs
-            [x] 11.6.4.1.5 songs by partial song title — the `song` arg:
+            [x] 8.4.1.5 songs by partial song title — the `song` arg:
                 AudioLibrary.GetSongs with a server-side {title contains} rule,
                 library-wide, narrowable by artist/album/track; no resolved
                 container. One AudioLibrary.GetSongs call (query_songs_by_rules)
@@ -135,7 +134,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
                 field filter; song props omit `artist` to dodge the GetSongs
                 sort-with-artist slowdown. Unit: search-music-song-only /
                 search-music-song-artist; functional: music/song(+artist)
-        [x] 11.6.4.2 search by person — movie/tv-show queries can name a
+        [x] 8.4.2 search by person — movie/tv-show queries can name a
             person: optional actor? and director? args become server-side
             {field, operator: contains} rules, and-combined with title?
             via the composite {"and": [...]} filter (KODI-API 12.16.12/
@@ -152,10 +151,10 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             and season/number are rejected there (they narrow a show).
             tv-show now requires title OR actor OR director
             (tests/searchmedia.test §6, unit search-{movie,tv}-person*)
-        [x] 11.6.4.3 contributors — find who contributed (bands, solo
+        [x] 8.4.3 contributors — find who contributed (bands, solo
             artists, composers, actors, directors), not media:
             rows {name, in: [containers]} + total instead of leaf files;
-            the exact name IS the follow-up handle (searchmedia/11.6.4.2 take
+            the exact name IS the follow-up handle (searchmedia/8.4.2 take
             names, and Kodi's actor/director filters are name-only — no
             id-based filter exists), so rows carry no person ids until
             some tool can consume them; in lists where the name yields
@@ -173,9 +172,9 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             from every source merge case-insensitively into one row per
             person, sorted by name; limit/offset/count page the merged
             set (default 50, max 500); answers "do we have
-            anything with X" and feeds 11.6.4.2 with exact names
+            anything with X" and feeds 8.4.2 with exact names
             (tests/contributors.test)
-        [x] 11.6.4.4 contributors type filter — "list all the bands" as a
+        [x] 8.4.4 contributors type filter — "list all the bands" as a
             first-class query: optional type ∈ band|composer|actor|director
             narrows to one contributor kind, and name is now optional
             (omitted = enumerate everyone of that kind, paged). band is
@@ -196,7 +195,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             shape unchanged. (tests/contributors.test §6-7, unit
             contributors-{enumerate-all,band,composer,actor-director,
             bad-type})
-        [x] 11.6.4.5 rename search → searchmedia — the bare name read as
+        [x] 8.4.5 rename search → searchmedia — the bare name read as
             the universal entry point, so assistants looked for people/
             band filters there and never reached contributors (observed
             live); the name now states the domain (media items vs
@@ -204,7 +203,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             both ways. Tool surface only: internal symbols (handler_/
             schema_search, search_music, unit case names) keep their
             names. tests/search.test → searchmedia.test
-        [x] 11.6.4.6 music needs artist OR title — album-title-only queries
+        [x] 8.4.6 music needs artist OR title — album-title-only queries
             ("play Mezzanine", artist unknown) used to be refused even
             though movie/tv-show accept any single anchor; now a music
             query without artist resolves the album title LIBRARY-WIDE to
@@ -216,40 +215,40 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             neither anchor remains a clean tool error naming both
             (tests/searchmedia.test §3/§7, unit
             search-music-{album-only,no-args})
-    [x] 11.6.5 playfile — play one file via Player.Open {item:{file}}
+    [x] 8.5 playfile — play one file via Player.Open {item:{file}}
         (KODI-API 12.10.9); any path, in-library or not; auto-selects the
         audio/video player; Kodi enriches a scanned file back to its
         library item; returns the player_state() snapshot
-    [x] 11.6.6 rpc — generic escape hatch: any method, returns Kodi's raw
+    [x] 8.6 rpc — generic escape hatch: any method, returns Kodi's raw
         result verbatim (unshaped); gated per instance by allow_rpc in the
         config, granted only by hand-editing config.json — the model can
         never enable it itself
-    [ ] 11.6.7 Playlist tools
-        [x] 11.6.7.1 queue — append (or insert-next at current+1) into the
+    [ ] 8.7 Playlist tools
+        [x] 8.7.1 queue — append (or insert-next at current+1) into the
             already-playing queue; caller starts playback first; playlistid < 0
             means nothing queueable (tool error); refuses a library id whose
             kind mismatches the active player (Kodi accepts it silently);
             remove action deferred; clear → dropplaylists, list → getplaylist
-        [x] 11.6.7.2 getplaylist — read the current queue via Playlist.GetItems:
+        [x] 8.7.2 getplaylist — read the current queue via Playlist.GetItems:
             rows {<type>id|file, label, type} + position of the now-playing
             item; explicit type arg reads an inactive playlist too; empty/none
             is an empty list, not an error (tests/getplaylist.test)
-        [x] 11.6.7.3 dropplaylists — Playlist.Clear on all three playlists
+        [x] 8.7.3 dropplaylists — Playlist.Clear on all three playlists
             (audio 0 / video 1 / picture 2); clearing the active one leaves the
             current item playing, so it never interrupts playback
             (tests/dropplaylists.test)
-        [ ] 11.6.7.4 remove — drop one item from the queue by position
+        [ ] 8.7.4 remove — drop one item from the queue by position
             (Playlist.Remove, KODI-API 12.11.7); the remove action deferred in
-            11.6.7.1. No picture playlists
-        [ ] 11.6.7.5 reorder — move a queued item to a new position
+            8.7.1. No picture playlists
+        [ ] 8.7.5 reorder — move a queued item to a new position
             (Playlist.Swap, KODI-API 12.11.8). No picture playlists
-        [ ] 11.6.7.6 goto — jump playback to item N in the queue, or
+        [ ] 8.7.6 goto — jump playback to item N in the queue, or
             previous/next (Player.GoTo, KODI-API 12.10.7)
-        [ ] 11.6.7.7 shuffle — shuffle/unshuffle the active player's queue
+        [ ] 8.7.7 shuffle — shuffle/unshuffle the active player's queue
             (Player.SetShuffle, KODI-API 12.10.16)
-        [ ] 11.6.7.8 repeat — set the repeat mode off/one/all
+        [ ] 8.7.8 repeat — set the repeat mode off/one/all
             (Player.SetRepeat, KODI-API 12.10.15)
-    [x] 11.6.8 notify — push a message to the Kodi player's on-screen
+    [x] 8.8 notify — push a message to the Kodi player's on-screen
         display (GUI.ShowNotification, KODI-API 12.6.6); required title +
         message, optional image (the "info"/"warning"/"error" icon keywords
         or any image path/URL) and displaytime in ms (Kodi's 5000ms default
@@ -258,8 +257,8 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         image? } — displaytime echoes the requested value or 5000. image and
         displaytime are forwarded only when given; empty/missing title or
         message is a clean tool error (tests/notify.test)
-    [ ] 11.6.9 Audio language and subtitles
-        [x] 11.6.9.1 finding the information before the playback —
+    [ ] 8.9 Audio language and subtitles
+        [x] 8.9.1 finding the information before the playback —
             audio_and_subtitle_info tool: embedded streams from streamdetails
             (VideoLibrary.GetMovieDetails/GetEpisodeDetails by type+id, or
             Files.GetFileDetails {media:"video"} by file), no playback needed.
@@ -268,7 +267,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             position as index (the handle .2/.3 select by for embedded streams).
             Embedded only: sidecar subs + unscanned files come back empty
             (tests/audio_and_subtitle_info.test)
-        [x] 11.6.9.2 setting the audio track and subtitles while playing —
+        [x] 8.9.2 setting the audio track and subtitles while playing —
             set_audio_and_subtitle tool on the active video player:
             Player.SetAudioStream {playerid, stream:index} +
             Player.SetSubtitle {playerid, subtitle:index|"off", enable:true}
@@ -281,45 +280,45 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             snapshot (echoing the resulting audio/subtitle layout is deferred).
             Minimal vocabulary: the fuller next/previous/on were not built
             (tests/set_audio_and_subtitle.test)
-        [ ] 11.6.9.3 setting the audio track and subtitles when starting the
+        [ ] 8.9.3 setting the audio track and subtitles when starting the
             playback, and for the next items in the playlist — one tool.
             Player.Open has no audio/subtitle option, so the tool applies
-            11.6.9.2 once the stream starts (Player.OnAVStart). For the active
+            8.9.2 once the stream starts (Player.OnAVStart). For the active
             item it's easy: open, wait, apply, return. For queued items it's
             hard: a queued item carries no preference, so it needs a real-time
             OnAVStart notification (not polling) per item — a persistent
             listener outliving the tool call that queued it
 
-[ ] 11.7 Prompts / resources — on hold, not shipping now; tools are the
+[ ] 9 Prompts / resources — on hold, not shipping now; tools are the
     whole server surface, initialize advertises only {tools:{}}. Revisit
     once more of the tool surface lands.
 
-[ ] 11.8 Playback state file, per-instance (mk-state). One file per
+[ ] 10 Playback state file, per-instance (mk-state). One file per
     instance under ~/.local/state/mcp-kodi/instances/<name>.json:
     last_played + last episode per show, written on play/random/handoff,
     atomic; seeds resume / next-episode / handoff; missing file = empty
     state.
 
-[x] 11.9 Playback history, global append-only log (mk-history). One
+[x] 11 Playback history, global append-only log (mk-history). One
     cross-instance log at ~/.local/state/mcp-kodi/history.json; capture
     is call-driven (what the assistant caused or observed) plus the
-    11.9.5 polling loop, which also catches playback started outside
+    11.5 polling loop, which also catches playback started outside
     the MCP server while a server runs. (tests/history.test,
     tests/monitor.test)
-    [x] 11.9.1 mk_history_record — write path: flock-serialized
+    [x] 11.1 mk_history_record — write path: flock-serialized
         read-modify-write (never bare last-write-wins), dedup (append only
         a newly observed item, so pause/volume churn is ignored), trim by
         count and age, atomic write; wired from player_state() so every
         playback-affecting tool feeds it; best-effort — a history failure
         never fails the tool call
-    [x] 11.9.2 mk_history_read — read primitive: shared lock, walks
+    [x] 11.2 mk_history_read — read primitive: shared lock, walks
         newest-first, instance/since/until window + limit, reports the
         total before the limit; missing file = zero entries, not an error
-    [x] 11.9.3 history tool — ISO-8601 since/until window over the log,
+    [x] 11.3 history tool — ISO-8601 since/until window over the log,
         newest-first; instance omitted means all boxes (inverts the
         default-instance convention — the log is cross-instance by
         nature); limit defaults to 50 with a truncated flag
-    [x] 11.9.4 Strengthen the merge for live monitoring. Today
+    [x] 11.4 Strengthen the merge for live monitoring. Today
         mk_history_record dedups against only the instance's single
         newest entry, and entries are ordered by arrival (prepend), not
         by observation time. A future live-monitoring feature means
@@ -339,7 +338,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         within a 10-minute window of their [at, last_seen] coverage;
         the observation stamp is taken before the flock; a merge that
         changes nothing skips the rewrite.
-    [x] 11.9.5 Live monitoring — poll the Kodi instances so the history
+    [x] 11.5 Live monitoring — poll the Kodi instances so the history
         also captures playback not initiated through the MCP server
         (e.g. started from the TV remote). Poll every ~2 minutes by
         timer (websocket notifications may or may not be available, so
@@ -347,7 +346,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         player + current item and feed it through mk_history_record,
         which keeps updating the history and dedups repeat sightings.
         An unreachable box is normal (powered off) and must be skipped
-        silently. This is the feature 11.9.4's merge hardening prepares
+        silently. This is the feature 11.4's merge hardening prepares
         for — with several mcp-kodi processes polling the same boxes,
         the merge must stay idempotent. Landed:
         mk_tools_poll_history() snapshots every configured instance via
@@ -363,7 +362,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         asserts the poller logged it once (merged across rounds) while
         skipping a dead box silently.
 
-    [x] 11.9.5.1 Coarsen the per-poll last_seen rewrite. Each poll of a
+    [x] 11.5.1 Coarsen the per-poll last_seen rewrite. Each poll of a
         continuously-playing item merged into its newest entry and bumped
         last_seen, rewriting the whole ~22KB log every ~2 minutes (×N for
         N concurrent client-session processes) just to nudge a timestamp —
@@ -383,9 +382,9 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         stays deferred across the short poll window; the unit cases use
         minute-scale gaps that clear the step and are unaffected.
 
-[ ] 11.10 Build clean, test against live Kodi, write README
+[ ] 12 Build clean, test against live Kodi, write README
 
-[ ] 11.11 Config hot-reload (mk-config). The server loads config.json once
+[ ] 13 Config hot-reload (mk-config). The server loads config.json once
     at startup (main.c) and the one MkConfig is shared by mk-kodi and
     mk-tools, so a hand edit to the file — notably an allow_rpc grant,
     which is hand-edit-only by design — is invisible until restart.
@@ -399,7 +398,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     malformed file on reload should keep the last good config, not kill
     the server.
 
-[x] 11.12 Missing media file — proper error reporting. Verified live (19.4 +
+[x] 14 Missing media file — proper error reporting. Verified live (19.4 +
     20.5): Player.Open/Playlist.Add disk-check only paths NOT in the
     library ("Invalid params"); an in-library path whose file is gone is
     accepted with "OK" and playback silently never starts (a doomed open
@@ -420,13 +419,13 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     (Prowler, folder unlistable under the source) and local songid 1
     (Ring Ring → deleted /tmp path, exercises the post-open backstop) —
     do NOT AudioLibrary.Clean them away.
-    [ ] 11.12.1 Residual gap: queue of a library item whose path lies
+    [ ] 14.1 Residual gap: queue of a library item whose path lies
         outside every configured source (artificial; real entries are
         scanned from sources) is unverifiable at add time and still
         fails only when playback reaches it — a post-advance check would
-        need player monitoring (see 11.9.5).
+        need player monitoring (see 11.5).
 
-[x] 11.13 History tool — optional filters for a more flexible query. DONE
+[x] 15 History tool — optional filters for a more flexible query. DONE
     2026-06-10. Arg set decided (the "single match vs per-field" open choice):
     BOTH — a dedicated `artist` substring (music-by-performer is the common
     query) AND a single free-text `match` spanning title/album/showtitle/label
@@ -460,7 +459,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
         a primary, high-value filter ("everything Pink Floyd I played",
         "how much Metallica this week"). It is the music analogue of the
         searchmedia `artist` / contributors band lookup, fed by the same
-        names. UNBLOCKED by 11.13.1 (done): the capture now records an
+        names. UNBLOCKED by 15.1 (done): the capture now records an
         album/display-artist fallback, so the entry carries an artist whenever
         Kodi knows one — the filter is only as good as what monitoring captured,
         but that is now as good as Kodi's own metadata.
@@ -489,7 +488,7 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
     query. Spec the exact arg set before coding (single `match` vs
     per-field is the main open choice).
 
-    [x] 11.13.1 Capture a usable artist for songs (prerequisite for the
+    [x] 15.1 Capture a usable artist for songs (prerequisite for the
         artist filter above). DONE 2026-06-10: player_state() now requests
         `albumartist`/`displayartist` alongside `artist`, and copy_best_artist()
         (mk-tools.c) records the best non-empty one (song `artist` → albumartist
@@ -519,55 +518,55 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
              all empty, so a blank artist is omitted (its absence then
              honestly means "unknown") rather than stored as [""].
         With both fixed, history carries an artist whenever Kodi knows one,
-        and the 11.13 artist filter becomes meaningful. Note: the artist
+        and the 15 artist filter becomes meaningful. Note: the artist
         also rides on the live snapshot returned by play/playfile/etc.,
         so this improves those replies too, not just history. Unit cases:
         a song snapshot with empty `artist` but populated `albumartist` /
         `displayartist` records the fallback; an all-empty artist array is
         omitted.
 
-[x] 11.14 Doc staleness from the 2026-06-10 tool-surface review (text only):
-    [x] 11.14.1 history one-line description (mk-tools.c ~4648) + its
+[x] 16 Doc staleness from the 2026-06-10 tool-surface review (text only):
+    [x] 16.1 history one-line description (mk-tools.c ~4648) + its
         Doxygen (@param list, @return missing offset; handler_history
-        header) predate the 11.13 schema — mention the media/kind/artist/
+        header) predate the 15 schema — mention the media/kind/artist/
         match/id/count/offset/order filters.
-    [x] 11.14.2 instances tool-table @return omits allow_rpc, though
+    [x] 16.2 instances tool-table @return omits allow_rpc, though
         instances_list() reports it (read-only).
-    [x] 11.14.3 README snapshot field list misses the 11.13.1 artist
+    [x] 16.3 README snapshot field list misses the 15.1 artist
         (and type) fields.
-    [x] 11.14.4 play description should say "resumes only — cannot start
+    [x] 16.4 play description should say "resumes only — cannot start
         new content; use playfile" (with nothing loaded it is a no-op).
-    [x] 11.14.5 searchmedia description should state that music title
+    [x] 16.5 searchmedia description should state that music title
         means ALBUM — songs cannot be matched by their own name (until
-        11.6.4.1.5 landed).
+        8.4.1.5 landed).
 
-[ ] 11.15 Surface the server version where the AI can see it (e.g. in the
+[ ] 17 Surface the server version where the AI can see it (e.g. in the
     noop reply or instances get envelope), so an assistant can detect it is
     talking to a stale binary (live session today still served the
-    pre-11.13 history schema).
+    pre-15 history schema).
 
-[ ] 11.20 seek — no "skip ahead 5 min" / "restart" / "go to 1:12:00".
+[ ] 18 seek — no "skip ahead 5 min" / "restart" / "go to 1:12:00".
     Relative signed step like volume, plus an absolute `to` (snapshot
     already reports time/totaltime).
 
-[ ] 11.21 Play/queue a whole container in one call — playfile is one file,
+[ ] 19 Play/queue a whole container in one call — playfile is one file,
     queue needs playback already running, so "play the album Animals" is
     playfile + N-1 queue calls (chatty, racy). Player.Open
     {item:{albumid}} and season/show equivalents. The biggest gap vs the
     README's "build the evening's lineup" vision.
 
-[ ] 11.23 Discovery beyond names — genre / year / rating / recently-added
+[ ] 20 Discovery beyond names — genre / year / rating / recently-added
     filters ("play some jazz", "what's new"); Kodi's filters support all
     of these. Genre + recently-added are the highest value.
 
-[ ] 11.24 Media-kind asymmetry — history can record musicvideo/picture/
+[ ] 21 Media-kind asymmetry — history can record musicvideo/picture/
     channel entries, but searchmedia cannot find them and queue cannot
     queue them; the log names things no other tool can act on.
 
-[ ] 11.25 Subtitle / audio-track selection for video playback —
+[ ] 22 Subtitle / audio-track selection for video playback —
     common living-room request, rpc-only today.
 
-[x] 11.26 Glama listing — Dockerfile so the directory health-check passes.
+[x] 23 Glama listing — Dockerfile so the directory health-check passes.
     Done 2026-06-12. Root-caused the real blocker: the server exited 1 with no
     config AND no env, but it must boot first so the assistant can register the
     MCP endpoint before config.json exists. Fixed mk_config_load() to return a
