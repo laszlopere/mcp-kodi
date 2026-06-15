@@ -210,7 +210,6 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             (Player.SetShuffle, KODI-API 12.10.16)
         [ ] 11.6.7.8 repeat — set the repeat mode off/one/all
             (Player.SetRepeat, KODI-API 12.10.15)
-
     [ ] 11.6.8 notify — push a message to the Kodi player's on-screen
         display (GUI.ShowNotification, KODI-API 12.6.6); title + message,
         optional image/icon and display time
