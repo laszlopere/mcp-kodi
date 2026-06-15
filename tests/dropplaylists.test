@@ -250,7 +250,7 @@ b=$(drop '{}')
 eq "the drop is not an error" false "$(res_err "$b")"
 body=$(res_body "$b")
 eq "the snapshot still shows the item playing" playing "$(g "$body" '.state')"
-eq "the snapshot still names the playing file" "$file1" "$(g "$body" '.file')"
+eq "the snapshot still names the playing file" "$file1" "$(g "$body" '.nowplaying.file')"
 
 # Kodi independently agrees: the player survived the clear, still on file1...
 plid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')

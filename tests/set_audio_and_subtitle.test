@@ -223,7 +223,7 @@ echo "-- set audio / subtitle"
 b=$(setas '{"audio":0}')
 eq "set audio:0 is not an error" false "$(res_err "$b")"
 body=$(res_body "$b")
-eq "audio snapshot still plays the movie" "$file" "$(g "$body" '.file')"
+eq "audio snapshot still plays the movie" "$file" "$(g "$body" '.nowplaying.file')"
 eq "audio snapshot state is playing"      playing "$(g "$body" '.state')"
 
 # ===========================================================================
@@ -241,7 +241,7 @@ fi
 b=$(setas '{"subtitle":"off"}')
 eq "set subtitle:\"off\" is not an error" false "$(res_err "$b")"
 body=$(res_body "$b")
-eq "subtitle-off snapshot still plays the movie" "$file" "$(g "$body" '.file')"
+eq "subtitle-off snapshot still plays the movie" "$file" "$(g "$body" '.nowplaying.file')"
 eq "subtitle-off snapshot state is playing"      playing "$(g "$body" '.state')"
 
 # Both selectors at once on the same call.

@@ -224,14 +224,14 @@ pb=$(res_body "$b")
 
 is_true "snapshot reports a state field"      "$(j "$pb" 'has("state")')"
 eq      "state is playing"                     playing "$(g "$pb" '.state')"
-eq      "snapshot echoes the played file"      "$file" "$(g "$pb" '.file')"
+eq      "snapshot echoes the played file"      "$file" "$(g "$pb" '.nowplaying.file')"
 is_true "snapshot carries a non-empty totaltime" \
         "$(j "$pb" '(.totaltime // {}) | (.hours+.minutes+.seconds+.milliseconds) > 0')"
 if [ "$kind" = movie ]; then
   eq    "video file selects the video player"  video "$(g "$pb" '.type')"
 fi
 # Library enrichment: a scanned file gets a human label/title back.
-is_true "snapshot carries a label"            "$(j "$pb" 'has("label") and (.label|length>0)')"
+is_true "snapshot carries a label"            "$(j "$pb" '(.nowplaying // {}) | has("label") and (.label|length>0)')"
 
 # Kodi independently agrees a player is now active.
 active=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result | length')

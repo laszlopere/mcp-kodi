@@ -280,7 +280,7 @@ b=$(queue "$(jargs --arg t "$kind" --argjson i "$id2" '{type:$t,id:$i}')")
 eq "queue by library id is not an error" false "$(res_err "$b")"
 qb=$(res_body "$b")
 eq "snapshot still plays the FIRST leaf (playback unchanged)" \
-   "$file1" "$(g "$qb" '.file')"
+   "$file1" "$(g "$qb" '.nowplaying.file')"
 eq "snapshot state is playing" playing "$(g "$qb" '.state')"
 
 # Kodi independently agrees: the appended item joined behind, the queued
@@ -415,7 +415,7 @@ before=$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
 b=$(pause_t '{}')
 eq "pause is not an error" false "$(res_err "$b")"
 eq "pause reports the paused state" paused "$(g "$(res_body "$b")" '.state')"
-eq "pause keeps the current item loaded" "$file1" "$(g "$(res_body "$b")" '.file')"
+eq "pause keeps the current item loaded" "$file1" "$(g "$(res_body "$b")" '.nowplaying.file')"
 
 # Queueing onto a PAUSED player must work like onto a playing one: the player
 # is still active, so its playlist resolves — pausing to decide what comes
@@ -431,7 +431,7 @@ eq "the item queued while paused joined the queue" "$((before + 1))" \
 b=$(play_t '{}')
 eq "play (resume) is not an error" false "$(res_err "$b")"
 eq "play resumes the playing state" playing "$(g "$(res_body "$b")" '.state')"
-eq "resume continues the SAME item" "$file1" "$(g "$(res_body "$b")" '.file')"
+eq "resume continues the SAME item" "$file1" "$(g "$(res_body "$b")" '.nowplaying.file')"
 
 eq "every queued entry survived the pause/resume" "$((before + 1))" \
    "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" \
