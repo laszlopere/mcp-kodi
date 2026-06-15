@@ -17,7 +17,7 @@
 #include "mk-stdio.h"
 #include "mk-tools.h"
 
-/* Live-monitoring poll cadence, in seconds (TODO 11.9.5). ~2 minutes: fine
+/* Live-monitoring poll cadence, in seconds. ~2 minutes: fine
  * enough that playback started outside the server (TV remote) lands in the
  * history while it is still playing, coarse enough to be invisible on the
  * LAN. MCP_KODI_POLL_SECONDS overrides it (0 disables polling) — for tests,

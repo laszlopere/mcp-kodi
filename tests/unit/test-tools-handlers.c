@@ -1087,7 +1087,7 @@ case_contributors_composer (void)
       json_object_get_int_member (json_node_get_object (payload), "total"), 2);
 
   /* The composite {"and":[ role is Composer, artist contains scott ]} filter
-   * with allroles, exactly as verified live (KODI-API 12.3.15). */
+   * with allroles, exactly as verified live. */
   MK_CHECK (params_carry ("AudioLibrary.GetArtists", "\"and\":["));
   MK_CHECK (params_carry ("AudioLibrary.GetArtists",
                           "\"field\":\"role\",\"operator\":\"is\","
@@ -1265,7 +1265,7 @@ case_playfile (void)
   free_tools (tools, cfg, kodi);
 }
 
-/* Missing media, layer 1 (TODO 11.12): the folder lists fine but holds no such
+/* Missing media, layer 1: the folder lists fine but holds no such
  * file — refused as a tool error BEFORE Player.Open, so a doomed open never
  * stops whatever is playing now. */
 static void
@@ -1384,7 +1384,7 @@ case_playfile_outside_sources_proceeds (void)
   free_tools (tools, cfg, kodi);
 }
 
-/* Missing media, layer 3 (TODO 11.12): the disk check passes and Kodi answers
+/* Missing media, layer 3: the disk check passes and Kodi answers
  * the open with "OK", yet no player is active after the settle — the open
  * silently died. The "stopped" snapshot must become a tool error, never a
  * success. */
@@ -1716,7 +1716,7 @@ case_queue_bad_args (void)
   free_tools (tools, cfg, kodi);
 }
 
-/* Missing media (TODO 11.12): a queued library id resolves to a file the disk
+/* Missing media: a queued library id resolves to a file the disk
  * no longer has — refused before Playlist.Add, where Kodi would have answered
  * "OK" and the failure would only surface when playback reached the item. */
 static void
@@ -2695,7 +2695,7 @@ case_volume_clamps_high (void)
   free_tools (tools, cfg, kodi);
 }
 
-/* Live monitoring (TODO 11.9.5): one poll round snapshots every configured
+/* Live monitoring: one poll round snapshots every configured
  * instance — both boxes of the two-instance config — and each playing
  * snapshot reaches the history write path. */
 static void

@@ -682,7 +682,7 @@ player_state (MkTools *self, const char *instance, GError **error)
  * mk_tools_poll_history:
  * @self: the tool table.
  *
- * One round of live monitoring (TODO 11.9.5): take a player_state() snapshot
+ * One round of live monitoring: take a player_state() snapshot
  * of **every** configured instance, purely for the side effect of that
  * snapshot feeding the playback-history log (mk_history_record, inside
  * player_state()). This is how the history also captures playback the server
@@ -1338,8 +1338,8 @@ handler_instances (MkTools *self, const MkToolDef *def, JsonObject *args,
  * app-side and flagged `approximate`.
  *
  * Video queries can also name a person: optional `actor`/`director` become
- * server-side `{field, operator: contains}` rules (KODI-API 12.16.12 /
- * 12.16.21), and-combined with the title rule when both are given. For
+ * server-side `{field, operator: contains}` rules, and-combined with the
+ * title rule when both are given. For
  * tv-shows the person rules go on GetEpisodes, not the show resolve: episode
  * cast holds the regulars AND the guest stars (verified live — a lead matches
  * every episode), and show-level director data is empty in practice, so the
@@ -1488,7 +1488,7 @@ build_filter_rule (JsonBuilder *b, const MkFilterRule *rule)
  * @n: how many rules; 0 adds no filter at all.
  *
  * Adds the `"filter"` member: a bare `{ "field", "operator", "value" }` rule
- * (KODI-API 12.16.12 / 12.3.6) when there is one, or the composite
+ * when there is one, or the composite
  * `{ "and": [ rule, … ] }` form when several must hold at once (verified live
  * on GetMovies/GetTVShows/GetEpisodes).
  */
@@ -1544,8 +1544,7 @@ append_rule (MkFilterRule *rules, gsize n, const char *field, const char *op,
  * @op: the operator ("contains" for substring, "is" for exact).
  * @value: the value to match (always a string, even for numeric fields).
  *
- * Adds a single-rule `"filter": { "field", "operator", "value" }` (KODI-API
- * 12.16.12 / 12.3.6).
+ * Adds a single-rule `"filter": { "field", "operator", "value" }`.
  */
 static void
 add_field_filter (JsonBuilder *b, const char *field, const char *op,
@@ -1561,7 +1560,7 @@ add_field_filter (JsonBuilder *b, const char *field, const char *op,
  * @key: the special filter key ("artistid" or "albumid").
  * @id: the library id to filter by.
  *
- * Adds Kodi's special id `"filter": { "<key>": <id> }` form (KODI-API 12.3.6 steps 2-3)
+ * Adds Kodi's special id `"filter": { "<key>": <id> }` form
  * — distinct from a field/operator rule.
  */
 static void
@@ -2059,7 +2058,7 @@ query_songs_by_rules (MkTools *self, const char *instance,
  * @error: return location for a GError, or NULL.
  *
  * Resolves the movie type directly: `VideoLibrary.GetMovies` returns the
- * playable `file` with no sublevels, so this is one paged call (KODI-API 12.16.12).
+ * playable `file` with no sublevels, so this is one paged call.
  * Title and person rules are and-combined server-side.
  *
  * @return the search-result node, or NULL with @error set.
@@ -2119,7 +2118,7 @@ search_movie (MkTools *self, const char *instance, const char *title,
  *
  * Resolves the show (`GetTVShows`) then drills to episode leaves
  * (`GetEpisodes {tvshowid, season?}` plus an exact `episode` filter when a
- * number is given — its value is a string, KODI-API 12.16.21 / 12.16.6). One paged call
+ * number is given — its value is a string). One paged call
  * past the resolve. The person and episode-title rules ride the same
  * GetEpisodes call — episode cast covers regulars and guest stars alike, and
  * per-episode directors are the only populated director data. Without a @title
@@ -2599,11 +2598,11 @@ handler_search (MkTools *self, const MkToolDef *def, JsonObject *args,
  * 11.6.4.4.
  *
  * Music people come from one server-filtered `AudioLibrary.GetArtists` call
- * (KODI-API 12.3.6; `allroles` folds in composers, conductors, lyricists —
- * 12.3.15; the `composer` type is a server-side `{role is "Composer"}` rule).
+ * (`allroles` folds in composers, conductors, lyricists; the `composer` type
+ * is a server-side `{role is "Composer"}` rule).
  * Actors and directors have no Get* method at all, so they are enumerated
- * through the virtual `videodb://` nodes with `Files.GetDirectory` (KODI-API
- * 12.5.1) — those listings take sort and limits but NO filter, so name
+ * through the virtual `videodb://` nodes with `Files.GetDirectory` — those
+ * listings take sort and limits but NO filter, so name
  * matching is app-side over the paged labels. Hits from every source are
  * merged case-insensitively into one row per person.
  */
@@ -2738,12 +2737,12 @@ contrib_row_cmp (gconstpointer a, gconstpointer b)
  *
  * Collects the matching music people in one server-filtered
  * `AudioLibrary.GetArtists` call. ANY: `allroles: true` folds in artists known
- * only as composers/conductors/lyricists (KODI-API 12.3.15) and
+ * only as composers/conductors/lyricists and
  * `albumartistsonly: false` keeps song-only artists regardless of the GUI
  * setting. BAND: `albumartistsonly: true` instead — the album-level artists,
- * Kodi's closest notion of a band (TODO 11.6.4.4). COMPOSER: a server-side
+ * Kodi's closest notion of a band. COMPOSER: a server-side
  * `{role is "Composer"}` rule (needs `allroles: true`), and-combined with the
- * name rule when both apply (verified live, KODI-API 12.3.15). Every hit
+ * name rule when both apply (verified live). Every hit
  * drills to `songs`; only an `isalbumartist` also drills to `albums` (a
  * GetAlbums artist filter finds nothing for the rest).
  *
@@ -2812,8 +2811,8 @@ contrib_music (MkTools *self, const char *instance, guint type,
  * @error: return location for a GError, or NULL.
  *
  * Collects the matching people of one `videodb://` node by paging its full
- * listing through `Files.GetDirectory {directory, media: "video"}` (KODI-API
- * 12.5.1) in MK_CONTRIB_NODE_PAGE windows and matching each label app-side with
+ * listing through `Files.GetDirectory {directory, media: "video"}` in
+ * MK_CONTRIB_NODE_PAGE windows and matching each label app-side with
  * ci_contains() — the node listings take NO filter param, so a full enumeration
  * is the only way to search them. An empty page ends the walk even when
  * `limits.total` claims more, so an inconsistent reply cannot loop forever.
@@ -3043,7 +3042,7 @@ handler_contributors (MkTools *self, const MkToolDef *def, JsonObject *args,
   return build_contributors_result (rows, offset, limit, count);
 }
 
-/* ---- missing-media detection (TODO 11.12) ----------------------------------
+/* ---- missing-media detection ----------------------------------------------
  *
  * Kodi disk-checks a plain path in Player.Open / Playlist.Add only when the
  * path is NOT in the library: an unknown missing path is refused outright
@@ -3052,7 +3051,7 @@ handler_contributors (MkTools *self, const MkToolDef *def, JsonObject *args,
  * just silently never starts (a doomed open even stops whatever was playing).
  * A library id is never disk-checked at all. Verified live on Kodi 19.4 and
  * 20.5. So the playback tools verify the file on disk themselves before
- * touching the player: Files.GetDirectory (KODI-API 12.5.1) is a true disk
+ * touching the player: Files.GetDirectory is a true disk
  * listing, so "is the file really there, as seen from the Kodi box?" is
  * answerable in one call by listing the file's parent directory.
  *
@@ -3096,7 +3095,7 @@ disk_checkable_path (const char *file)
  * @file: the path to test.
  *
  * Says whether @file sits under any configured media source (`Files.GetSources`,
- * KODI-API 12.5.3, queried for both "music" and "video") — the area
+ * queried for both "music" and "video") — the area
  * Files.GetDirectory is able to list, which decides whether a refused listing
  * convicts the file as missing or merely means "outside the browsable area"
  * (see check_file_on_disk()). Best-effort by design: a failing sources query —
@@ -3295,7 +3294,7 @@ schema_playfile (MkTools *self)
  * @error: return location for a GError, or NULL.
  *
  * Implements the `playfile` tool: opens one file by path with
- * `Player.Open { "item": { "file": <file> } }` (KODI-API 12.10.9). Kodi auto-selects the
+ * `Player.Open { "item": { "file": <file> } }`. Kodi auto-selects the
  * audio vs video player from the file type and, when the path matches a scanned
  * item, enriches the now-playing state back to the library id. Like the
  * transport Buttons, it then returns the player_state() snapshot rather than
@@ -3307,7 +3306,7 @@ schema_playfile (MkTools *self)
  * the file that is now playing.
  *
  * Missing media is reported as a proper tool error, never as success
- * (TODO 11.12; see the missing-media section comment). Three layers:
+ * (see the missing-media section comment). Three layers:
  *
  *   1. A verifiably missing file (check_file_on_disk()) is refused *before*
  *      Player.Open — a doomed open is not just useless, it stops whatever is
@@ -3453,10 +3452,10 @@ static const char *const mk_queue_types[] = { "song", "episode", "movie", NULL }
  *
  * Resolves a library id to the file path its library entry points at, via the
  * kind's details method (`AudioLibrary.GetSongDetails` /
- * `VideoLibrary.GetEpisodeDetails` / `VideoLibrary.GetMovieDetails`, KODI-API
- * 12.3 / 12.16) requesting just the `file` property — the input
- * check_file_on_disk() needs to verify a queued library item (TODO 11.12;
- * Playlist.Add never disk-checks an id). As a side effect an id that is not in
+ * `VideoLibrary.GetEpisodeDetails` / `VideoLibrary.GetMovieDetails`)
+ * requesting just the `file` property — the input
+ * check_file_on_disk() needs to verify a queued library item
+ * (Playlist.Add never disk-checks an id). As a side effect an id that is not in
  * the library at all gets a proper "no such item" error here, where Kodi's own
  * reply would be a bare "Invalid params".
  *
@@ -3591,7 +3590,7 @@ schema_queue (MkTools *self)
  * Kodi would accept the foreign item silently — while a `file`'s media type
  * is unknowable up front, so for files matching stays the caller's job.
  * An item whose file is verifiably missing from disk is refused too
- * (TODO 11.12; see the missing-media section comment): Kodi accepts such an
+ * (see the missing-media section comment): Kodi accepts such an
  * item with "OK" and the failure would surface only when playback reaches it,
  * so the path — given directly, or resolved from a library id via
  * library_item_file() — is checked with check_file_on_disk() before the add.
@@ -3696,7 +3695,7 @@ handler_queue (MkTools *self, const MkToolDef *def, JsonObject *args,
         }
     }
 
-  /* Missing media (TODO 11.12): Playlist.Add, like Player.Open, answers "OK"
+  /* Missing media: Playlist.Add, like Player.Open, answers "OK"
    * for a library item whose file has vanished from disk — the failure would
    * surface only when playback reaches the item, long after this call claimed
    * success. The path is resolvable up front for every item kind (an id
@@ -5295,7 +5294,7 @@ out_schema_notify (MkTools *self)
  * @error: return location for a GError, or NULL.
  *
  * Implements the `notify` tool: pushes a toast onto the Kodi player's
- * on-screen display with `GUI.ShowNotification` (KODI-API 12.6.6). The `image`
+ * on-screen display with `GUI.ShowNotification`. The `image`
  * argument is forwarded verbatim — Kodi reads the keywords "info"/"warning"/
  * "error" as built-in icons and anything else as an image path/URL — and
  * `displaytime` is forwarded only when given, letting Kodi apply its 5000ms
@@ -5384,9 +5383,8 @@ handler_notify (MkTools *self, const MkToolDef *def, JsonObject *args,
 
 /* ---- The tool table -------------------------------------------------------
  *
- * Being rebuilt from the comprehensive Kodi JSON-RPC inventory (../KODI-API.txt)
- * grouped by tool kind — Buttons, Knobs, config, search, playback, history,
- * and the rpc escape hatch. Each tool is a
+ * The tools are grouped by tool kind — Buttons, Knobs, config, search,
+ * playback, history, and the rpc escape hatch. Each tool is a
  * `{ name, description, schema, handler, action, out_schema }` row; a NULL
  * handler yields a clean "not implemented" result, a NULL out_schema means
  * the result has no fixed shape to declare (`rpc`).
@@ -5662,9 +5660,8 @@ static const MkToolDef mk_tool_defs[] = {
    * @param type (required): "music" | "tv-show" | "movie".
    * @param artist: music performer (substring); music needs at least one of
    *        artist/title.
-   * @param actor|director: movie/tv-show person filter (substring; KODI-API
-   *        12.16.12 / 12.16.21). tv-show matches episode-level cast (guests
-   *        included) / per-episode directors.
+   * @param actor|director: movie/tv-show person filter (substring). tv-show
+   *        matches episode-level cast (guests included) / per-episode directors.
    * @param title: album/show/movie name (substring); tv-show needs at least
    *        one of title/actor/director.
    * @param season|number: narrow tv episodes / pin a track or episode (tv
@@ -5704,14 +5701,14 @@ static const MkToolDef mk_tool_defs[] = {
    * knows where to drill next without Kodi-specific knowledge. Hits from every
    * source are merged case-insensitively into one row per person, sorted by
    * name. The `band` type is synthesized from `isalbumartist` — Kodi's native
-   * group/person fields are empty on tag-scraped libraries (TODO 11.6.4.4).
+   * group/person fields are empty on tag-scraped libraries.
    *
-   * Call:  AudioLibrary.GetArtists for the music people (KODI-API 12.3.6 /
-   *        12.3.15) — filter: artist contains name and/or role is "Composer"
+   * Call:  AudioLibrary.GetArtists for the music people — filter: artist
+   *        contains name and/or role is "Composer"
    *        (type composer); albumartistsonly: true for type band, else false
    *        with allroles — then Files.GetDirectory over the virtual people
    *        nodes videodb://movies/actors/, videodb://movies/directors/ and
-   *        videodb://tvshows/actors/ (KODI-API 12.5.1) — those listings take
+   *        videodb://tvshows/actors/ — those listings take
    *        no filter, so they are paged and matched app-side. `type` skips the
    *        sources that cannot hold it (band/composer: no node walks; actor/
    *        director: no music call).
@@ -5745,7 +5742,7 @@ static const MkToolDef mk_tool_defs[] = {
    *
    * Play one file by path — the partner to `searchmedia`.
    * Takes a `file` (typically the `file` field of a `searchmedia` result row) and
-   * opens it with Player.Open `{ "item": { "file": <file> } }` (KODI-API 12.10.9). Kodi
+   * opens it with Player.Open `{ "item": { "file": <file> } }`. Kodi
    * auto-selects the audio vs video player from the file type and, when the path
    * matches a scanned library item, enriches the now-playing state back to its
    * library id. Plays a single file; for a multi-leaf `searchmedia` result the caller
@@ -5753,7 +5750,7 @@ static const MkToolDef mk_tool_defs[] = {
    * not. A file missing from disk is a proper tool error, never a false
    * success: it is refused before the open when verifiable on disk, and an
    * open that Kodi accepted but that silently never started (a stale library
-   * entry) is detected from the post-settle snapshot (TODO 11.12).
+   * entry) is detected from the post-settle snapshot.
    *
    * Call:  Files.GetDirectory (existence pre-check) → Player.Open { "item":
    *        { "file": <file> } }, then player_state() to report what is now
@@ -5788,7 +5785,7 @@ static const MkToolDef mk_tool_defs[] = {
    * episode/movie ↔ video) is refused — Kodi would accept the foreign item
    * silently; a `file`'s type is unknowable, so for files matching stays the
    * caller's job. An item whose file is verifiably missing from disk is
-   * refused as well (TODO 11.12) — Kodi would accept it and the failure would
+   * refused as well — Kodi would accept it and the failure would
    * only surface when playback reaches it.
    *
    * Call:  Player.GetActivePlayers → Player.GetProperties (playlistid,
