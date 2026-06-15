@@ -312,13 +312,21 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
             Minimal vocabulary: the fuller next/previous/on were not built
             (tests/set_audio_and_subtitle.test)
         [ ] 8.9.3 setting the audio track and subtitles when starting the
-            playback, and for the next items in the playlist — one tool.
-            Player.Open has no audio/subtitle option, so the tool applies
-            8.9.2 once the stream starts (Player.OnAVStart). For the active
-            item it's easy: open, wait, apply, return. For queued items it's
-            hard: a queued item carries no preference, so it needs a real-time
+            playback — the active item only. Player.Open has no audio/subtitle
+            option, so the tool opens the file, waits for the stream to start,
+            applies 8.9.2, and returns the playback status. Synchronous within
+            the tool call, no notifications needed: open, wait, apply, return.
+            (playfile_with_audio_and_subtitle tool —
+            tests/playfile_with_audio_and_subtitle.test)
+        [ ] 8.9.4 setting the audio track and subtitles for the next items in
+            the playlist — the hard half, split out of 8.9.3 and deferred. A
+            queued item carries no preference, so it needs a real-time
             OnAVStart notification (not polling) per item — a persistent
-            listener outliving the tool call that queued it
+            listener outliving the tool call that queued it. That means a
+            WebSocket subsystem the server does not have: Kodi's notification
+            channel is the raw TCP/WebSocket on port 9090, which is not
+            reachable through mini02's https reverse proxy — the same reason
+            live monitoring (11.5) polls instead of subscribing (see main.c).
     [ ] 8.10 seek — no "skip ahead 5 min" / "restart" / "go to 1:12:00".
         Relative signed step like volume, plus an absolute `to` (playback status
         already reports time/totaltime).

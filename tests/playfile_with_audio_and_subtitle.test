@@ -1,0 +1,230 @@
+#!/bin/sh
+# Functional test for the `playfile_with_audio_and_subtitle` tool.
+#
+# Drives the real mcp-kodi binary over its MCP stdio transport against a live
+# Kodi. `playfile_with_audio_and_subtitle` opens a video file by path AND selects
+# its audio track and/or subtitle once the stream starts — the "when starting
+# playback" partner of `set_audio_and_subtitle`. Since `Player.Open` carries no
+# track option, the tool opens the file, waits for the stream, then applies the
+# same Player.SetAudioStream / Player.SetSubtitle calls; it returns the standard
+# player-state snapshot. This test exercises every caller mistake (each a clean
+# tool error naming the fault), then starts a real movie with chosen tracks and
+# asserts the snapshot reports that movie playing.
+#
+# Library-agnostic: it plays whatever movie the library actually holds, and only
+# selects subtitle indices the item really carries (embedded subtitles are
+# optional), so it passes against any *populated* video library.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and curl on PATH
+#   - the mcp-kodi binary built
+#   - a reachable Kodi that answers JSONRPC.Ping with "pong"
+#   - at least one movie in the library (else the playback assertions SKIP)
+#
+# Target Kodi defaults to the local test instance; override via the environment:
+#   KODI_HOST=127.0.0.1:8080  KODI_AUTH=user:pass  KODI_SCHEME=http
+#
+# Since real playback may be audible on a real device, the test reads the volume
+# at startup, lowers it to 2% for the run, and restores the original on exit.
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+KODI_HOST=${KODI_HOST:-127.0.0.1:8080}
+KODI_AUTH=${KODI_AUTH:-kodi:kodi}
+KODI_SCHEME=${KODI_SCHEME:-http}
+export KODI_HOST KODI_AUTH KODI_SCHEME
+
+# Keep the playback this test triggers OUT of the user's real history log:
+# history.json lives under XDG_STATE_HOME, so redirect it to a throwaway dir.
+# (The EXIT cleanup is folded into the volume guard's trap, set below.)
+STATE_DIR=$(mktemp -d) || { echo "SKIP: cannot mktemp"; exit 77; }
+export XDG_STATE_HOME="$STATE_DIR"
+trap 'rm -rf "$STATE_DIR"' EXIT
+
+SKIP=77
+skip () { echo "SKIP: $*"; exit $SKIP; }
+
+# ---- dependencies ---------------------------------------------------------
+
+command -v jq   >/dev/null 2>&1 || skip "jq not found"
+command -v curl >/dev/null 2>&1 || skip "curl not found"
+
+find_binary () {
+  for c in \
+    "${top_builddir:-}/src/mcp-kodi" \
+    "$(dirname "$0")/../src/mcp-kodi" \
+    "./src/mcp-kodi" \
+    "src/mcp-kodi"
+  do
+    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# ---- talking to Kodi directly (verification + the liveness gate) ----------
+
+kodi_rpc () { # method params-json  ->  raw JSON-RPC response
+  curl -s -m 20 -u "$KODI_AUTH" -H 'Content-Type: application/json' \
+    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" \
+    "$KODI_SCHEME://$KODI_HOST/jsonrpc"
+}
+
+pong=$(kodi_rpc JSONRPC.Ping '{}' | jq -r '.result // empty' 2>/dev/null)
+[ "$pong" = "pong" ] || skip "Kodi not reachable at $KODI_SCHEME://$KODI_HOST"
+
+# ---- volume guard ----------------------------------------------------------
+# The test starts real playback on a possibly real device, so remember the
+# current volume, run quietly at 2%, and restore the original on every exit.
+vol0=$(kodi_rpc Application.GetProperties '{"properties":["volume"]}' \
+        | jq -r '.result.volume // empty')
+restore_volume () {
+  [ -n "$vol0" ] && kodi_rpc Application.SetVolume "{\"volume\":$vol0}" >/dev/null 2>&1
+}
+trap 'restore_volume; rm -rf "$STATE_DIR"' EXIT
+[ -n "$vol0" ] && kodi_rpc Application.SetVolume '{"volume":2}' >/dev/null 2>&1
+
+# ---- talking to the server under test (MCP over stdio) --------------------
+
+mcp_tool () { # name arguments-json  ->  tool result object
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
+    | "$MCP" 2>/dev/null \
+    | jq -c 'select(.id==2) | .result'
+}
+
+playas      () { mcp_tool playfile_with_audio_and_subtitle "$1"; }
+info        () { mcp_tool audio_and_subtitle_info          "$1"; }
+searchmedia () { mcp_tool searchmedia                      "$1"; }
+stop_t      () { mcp_tool stop                             "$1"; }
+res_err     () { printf '%s' "$1" | jq -r '.isError'; }
+res_body    () { printf '%s' "$1" | jq -c '.content[0].text | fromjson'; }
+jargs       () { jq -cn "$@"; }
+g           () { printf '%s' "$1" | jq -r "$2"; }
+j           () { printf '%s' "$1" | jq    "$2"; }
+
+# ---- assertions -----------------------------------------------------------
+
+PASS=0
+FAIL=0
+ok () { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+no () { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; shift; [ $# -gt 0 ] && printf '       %s\n' "$*"; return 0; }
+
+eq () { # desc expected actual
+  if [ "x$2" = "x$3" ]; then ok "$1"; else no "$1" "expected [$2] got [$3]"; fi
+}
+is_true () { # desc jq-bool-string
+  if [ "x$2" = "xtrue" ]; then ok "$1"; else no "$1" "condition was [$2]"; fi
+}
+contains () { # desc needle haystack
+  case "$3" in
+    *"$2"*) ok "$1";;
+    *)      no "$1" "wanted [$2] in [$3]";;
+  esac
+}
+
+# A call that must fail: assert isError:true and that the message guides the
+# caller — it names what was wrong and what to do instead.
+playas_err () { # desc arguments-json expected-message-fragment
+  b=$(playas "$2")
+  eq "$1 -> tool error" true "$(res_err "$b")"
+  contains "$1 -> message guides the caller" "$3" "$(g "$(res_body "$b")" '.error')"
+}
+
+echo "playfile_with_audio_and_subtitle functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
+
+# ---- the volume guard took hold: Kodi reports the quiet test level ---------
+echo "-- volume guard (was: ${vol0:-unknown}%)"
+eq "volume lowered to 2% for the test run" 2 \
+   "$(kodi_rpc Application.GetProperties '{"properties":["volume"]}' \
+       | jq -r '.result.volume')"
+
+# ===========================================================================
+# 1. Argument errors first: each is a clean tool error (isError:true) whose
+#    message names the fault and the accepted usage — none reaches playback.
+# ===========================================================================
+echo "-- errors / edges"
+
+playas_err "missing file"              '{"audio":0}'      '"file" is required'
+playas_err "neither audio nor subtitle" '{"file":"/x.mkv"}' \
+           'give at least one of "audio" or "subtitle"'
+playas_err "subtitle as a bad string"  '{"file":"/x.mkv","subtitle":"on"}' \
+           'stream index (integer) or "off"'
+
+# An unconfigured instance is a communication failure: the error carries the
+# no_instance category and a setup hint. A file + selector are supplied so the
+# call clears the argument checks and reaches instance resolution.
+b=$(playas '{"instance":"no-such-box","file":"/x.mkv","audio":0}')
+eq "unknown instance -> tool error" true "$(res_err "$b")"
+eq "unknown instance -> category no_instance" no_instance \
+   "$(g "$(res_body "$b")" '.category')"
+is_true "unknown instance -> carries a setup hint" \
+        "$(j "$(res_body "$b")" 'has("hint") and (.hint|length>0)')"
+
+# ===========================================================================
+# 2. Discover a movie via `searchmedia`; a movie-less library skips the rest
+#    (still a pass — the error contract above is fully exercised).
+# ===========================================================================
+b=$(res_body "$(searchmedia '{"type":"movie","limit":1}')")
+if [ "$(j "$b" '.returned >= 1')" != true ]; then
+  echo "   (library holds no movies — playback assertions skipped)"
+  echo "------------------------------------------------------------"
+  printf 'playfile_with_audio_and_subtitle functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+  [ "$FAIL" -eq 0 ] || exit 1
+  exit 0
+fi
+
+movieid=$(g "$b" '.rows[0].movieid')
+file=$(g "$b" '.rows[0].file')
+echo "-- target movie $movieid"
+echo "   ($file)"
+
+# Read the movie's embedded streams BEFORE playing (8.9.1 needs no playback),
+# so we only drive the tool with indices the item actually carries.
+streams=$(res_body "$(info "$(jargs --argjson i "$movieid" '{type:"movie",id:$i}')")")
+naudio=$(j "$streams" '.audio | length')
+nsub=$(j "$streams"   '.subtitle | length')
+echo "   (embedded: $naudio audio, $nsub subtitle streams)"
+
+# ===========================================================================
+# 3. Start the movie WITH a chosen audio track (and a subtitle index when the
+#    item carries one, else "off"). The tool opens, waits, applies, and returns
+#    a playing snapshot of that movie.
+# ===========================================================================
+echo "-- play with tracks"
+
+if [ "$nsub" -ge 1 ]; then sub='0'; else sub='"off"'; fi
+b=$(playas "$(jargs --arg f "$file" --argjson s "$sub" \
+                    '{file:$f,audio:0,subtitle:$s}')")
+eq "play with audio:0 + subtitle is not an error" false "$(res_err "$b")"
+body=$(res_body "$b")
+eq "snapshot plays the chosen movie" "$file"  "$(g "$body" '.nowplaying.file')"
+eq "snapshot state is playing"       playing  "$(g "$body" '.state')"
+eq "snapshot media type is video"    video    "$(g "$body" '.type')"
+
+# Audio-only selection on a fresh open of the same file also works.
+b=$(playas "$(jargs --arg f "$file" '{file:$f,audio:0}')")
+eq "play with audio only is not an error" false "$(res_err "$b")"
+eq "audio-only snapshot state is playing" playing "$(g "$(res_body "$b")" '.state')"
+
+# Subtitle-off-only selection on a fresh open.
+b=$(playas "$(jargs --arg f "$file" '{file:$f,subtitle:"off"}')")
+eq "play with subtitle off is not an error" false "$(res_err "$b")"
+eq "subtitle-off snapshot state is playing" playing "$(g "$(res_body "$b")" '.state')"
+
+# ===========================================================================
+# 4. Cleanup via the `stop` tool.
+# ===========================================================================
+echo "-- stop"
+b=$(stop_t '{}')
+eq "stop is not an error" false "$(res_err "$b")"
+eq "stop reports the stopped state" stopped "$(g "$(res_body "$b")" '.state')"
+
+# ---- tally ----------------------------------------------------------------
+echo "------------------------------------------------------------"
+printf 'playfile_with_audio_and_subtitle functional test: %d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+exit 0

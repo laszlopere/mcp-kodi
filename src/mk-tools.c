@@ -3513,6 +3513,103 @@ schema_playfile (MkTools *self)
 }
 
 /**
+ * open_file:
+ * @self: the tool table.
+ * @instance: target instance name, or NULL for the configured default.
+ * @file: the path to open; non-empty (the caller validates presence).
+ * @who: tool name used to prefix the error messages (e.g. "playfile").
+ * @error: return location for a GError, or NULL.
+ *
+ * Shared core of opening one file by path: the three missing-media layers and
+ * the post-settle "did it actually start" check that both `playfile` and
+ * `playfile_with_audio_and_subtitle` need.
+ *
+ *   1. A verifiably missing file (check_file_on_disk()) is refused *before* the
+ *      open — a doomed open would stop whatever is playing now.
+ *   2. A path Kodi itself refuses ("Invalid params" for an unknown missing
+ *      path) is reshaped to name the file and the likely cause.
+ *   3. "OK" with no active player after the settle means the open silently
+ *      died (the in-library stale-entry case) — reported as a failure, not a
+ *      "stopped" success.
+ *
+ * `Player.Open` replies "OK" the moment the open is queued, before the new
+ * player has started, so a brief settle delay before snapshotting makes the
+ * reported state reflect the file that is now playing.
+ *
+ * @return the post-open player-state snapshot (free with json_node_unref()), or
+ *         NULL with @error set.
+ */
+static JsonNode *
+open_file (MkTools *self, const char *instance, const char *file,
+           const char *who, GError **error)
+{
+  /* Layer 1: refuse a verifiably missing file before the open. */
+  {
+    const char *why = NULL;
+    int missing = check_file_on_disk (self, instance, file, &why, error);
+    if (missing < 0)
+      return NULL;
+    if (missing > 0)
+      {
+        g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                     "%s: \"%s\" is missing from disk — %s; a library "
+                     "item pointing at it is stale (the library needs a "
+                     "clean/re-scan)", who, file, why);
+        return NULL;
+      }
+  }
+
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "item");
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "file");
+  json_builder_add_string_value (b, file);
+  json_builder_end_object (b);
+  json_builder_end_object (b);
+  g_autoptr (JsonNode) params = json_builder_get_root (b);
+
+  /* Layer 2: a refusal from Kodi itself (an unknown missing path is "Invalid
+   * params") gets reshaped to name the file and the likely cause. */
+  g_autoptr (GError) local = NULL;
+  g_autoptr (JsonNode) opened =
+    mk_kodi_call (self->kodi, instance, "Player.Open", params, &local);
+  if (opened == NULL)
+    {
+      if (g_error_matches (local, MK_KODI_ERROR, MK_KODI_ERROR_RPC))
+        g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                     "%s: Kodi refused to open \"%s\" (%s) — the path "
+                     "does not exist or is not reachable from the Kodi box",
+                     who, file, local->message);
+      else
+        g_propagate_error (error, g_steal_pointer (&local));
+      return NULL;
+    }
+
+  g_usleep (MK_PLAYFILE_SETTLE_US);
+  JsonNode *state = player_state (self, instance, error);
+  if (state == NULL)
+    return NULL;
+
+  /* Layer 3: "OK" with no active player after the settle means the open
+   * silently died — report the failure instead of a "stopped" success. */
+  if (g_strcmp0 (json_object_get_string_member_with_default (
+                   json_node_get_object (state), "state", ""),
+                 "stopped")
+      == 0)
+    {
+      json_node_unref (state);
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "%s: Kodi accepted \"%s\" but playback never started "
+                   "— the file is missing or unreadable on the Kodi box "
+                   "(a stale library entry?)", who, file);
+      return NULL;
+    }
+
+  return state;
+}
+
+/**
  * handler_playfile:
  * @self: the tool table.
  * @def: this tool's row (unused).
@@ -3569,67 +3666,11 @@ handler_playfile (MkTools *self, const MkToolDef *def, JsonObject *args,
       return NULL;
     }
 
-  /* Layer 1: refuse a verifiably missing file before the open. */
-  {
-    const char *why = NULL;
-    int missing = check_file_on_disk (self, instance, file, &why, error);
-    if (missing < 0)
-      return NULL;
-    if (missing > 0)
-      {
-        g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                     "playfile: \"%s\" is missing from disk — %s; a library "
-                     "item pointing at it is stale (the library needs a "
-                     "clean/re-scan)", file, why);
-        return NULL;
-      }
-  }
-
-  g_autoptr (JsonBuilder) b = json_builder_new ();
-  json_builder_begin_object (b);
-  json_builder_set_member_name (b, "item");
-  json_builder_begin_object (b);
-  json_builder_set_member_name (b, "file");
-  json_builder_add_string_value (b, file);
-  json_builder_end_object (b);
-  json_builder_end_object (b);
-  g_autoptr (JsonNode) params = json_builder_get_root (b);
-
-  /* Layer 2: a refusal from Kodi itself (an unknown missing path is "Invalid
-   * params") gets reshaped to name the file and the likely cause. */
-  g_autoptr (GError) local = NULL;
-  g_autoptr (JsonNode) opened = mk_kodi_call (self->kodi, instance, "Player.Open",
-                                              params, &local);
-  if (opened == NULL)
-    {
-      if (g_error_matches (local, MK_KODI_ERROR, MK_KODI_ERROR_RPC))
-        g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                     "playfile: Kodi refused to open \"%s\" (%s) — the path "
-                     "does not exist or is not reachable from the Kodi box",
-                     file, local->message);
-      else
-        g_propagate_error (error, g_steal_pointer (&local));
-      return NULL;
-    }
-
-  g_usleep (MK_PLAYFILE_SETTLE_US);
-  JsonNode *state = player_state (self, instance, error);
+  /* The three missing-media layers and the post-settle start check, shared
+   * with playfile_with_audio_and_subtitle. */
+  JsonNode *state = open_file (self, instance, file, "playfile", error);
   if (state == NULL)
     return NULL;
-
-  /* Layer 3: "OK" with no active player after the settle means the open
-   * silently died — report the failure instead of a "stopped" success. */
-  if (g_strcmp0 (json_object_get_string_member_with_default (
-                   json_node_get_object (state), "state", ""),
-                 "stopped") == 0)
-    {
-      json_node_unref (state);
-      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                   "playfile: Kodi accepted \"%s\" but playback never started "
-                   "— the file is missing or unreadable on the Kodi box "
-                   "(a stale library entry?)", file);
-      return NULL;
-    }
 
   /* Optional fullscreen-on-start, audio only. Video already switches to its
    * fullscreen window on Player.Open; audio does not — it leaves the caller on
@@ -4298,34 +4339,48 @@ out_schema_audio_and_subtitle_info (MkTools *self)
   return json_builder_get_root (b);
 }
 
-/**
- * schema_set_audio_and_subtitle:
- * @self: the table (used to name the configured instances).
+/* ---- audio/subtitle track selection (shared) ------------------------------
  *
- * Schema for the `set_audio_and_subtitle` tool: the optional `instance` and the
- * two optional stream selectors. `audio` is a plain integer stream index.
- * `subtitle` is a mixed integer-or-`"off"` type that no `prop_*` helper
- * produces, so it is built inline as a `oneOf` of an integer index and the
- * literal `"off"`. Both selectors are optional; the "give at least one" rule
- * (and the index-or-`"off"` check on `subtitle`) is enforced in the handler.
- *
- * @return a newly allocated schema node.
+ * The `audio`/`subtitle` selectors and the calls that apply them are shared by
+ * two tools: `set_audio_and_subtitle` (switch on the player now playing) and
+ * `playfile_with_audio_and_subtitle` (open a file, then select on it). The
+ * schema prop builder, the argument parser, and the applier live here so the
+ * two tools stay byte-for-byte consistent.
  */
-static JsonNode *
-schema_set_audio_and_subtitle (MkTools *self)
-{
-  g_autoptr (JsonBuilder) b = json_builder_new ();
-  schema_begin (b);
 
-  prop_instance (b, self, FALSE);
+/* A parsed audio/subtitle selection. `audio` is meaningful only when
+ * `have_audio`; the subtitle is an index (`have_sub_index`) OR a disable
+ * (`sub_off`) — never both — or neither (left unchanged). */
+typedef struct
+{
+  gboolean have_audio;
+  gint64   audio;
+  gboolean have_sub_index;
+  gboolean sub_off;
+  gint64   subtitle;
+} MkTrackArgs;
+
+/**
+ * prop_audio_subtitle_selectors:
+ * @b: the schema builder, positioned to add properties.
+ *
+ * Adds the two optional stream selectors. `audio` is a plain integer stream
+ * index. `subtitle` is a mixed integer-or-`"off"` type that no `prop_*` helper
+ * produces, so it is built inline as a `oneOf` of an integer index and the
+ * literal `"off"`. Both are optional; the "give at least one" rule (and the
+ * index-or-`"off"` check on `subtitle`) is enforced by parse_track_args().
+ */
+static void
+prop_audio_subtitle_selectors (JsonBuilder *b)
+{
   prop_typed (b, "audio", "integer",
               "Audio stream index to select — an `index` from "
               "`audio_and_subtitle_info`. Omit to leave the audio track "
               "unchanged.");
 
   /* `subtitle`: integer index OR the literal "off". Built inline — no helper
-   * emits a mixed type. The handler reads the node's type rather than arg_int,
-   * which would misread the string "off" as index 0. */
+   * emits a mixed type. parse_track_args() reads the node's type rather than
+   * arg_int, which would misread the string "off" as index 0. */
   json_builder_set_member_name (b, "subtitle");
   json_builder_begin_object (b);
   json_builder_set_member_name (b, "description");
@@ -4353,6 +4408,146 @@ schema_set_audio_and_subtitle (MkTools *self)
   json_builder_end_object (b);
   json_builder_end_array (b);
   json_builder_end_object (b);
+}
+
+/**
+ * parse_track_args:
+ * @args: the call arguments; optional `audio` and `subtitle`.
+ * @who: tool name used to prefix the error messages.
+ * @out: filled with the parsed selection on success.
+ * @error: return location for a GError, or NULL.
+ *
+ * Parses the `audio`/`subtitle` selectors and enforces "give at least one".
+ * `subtitle` is read by inspecting the argument's JSON type (arg_int would
+ * silently read the string `"off"` as index 0).
+ *
+ * @return TRUE with @out filled, or FALSE with @error set on a bad `subtitle`
+ *         type or an empty selection.
+ */
+static gboolean
+parse_track_args (JsonObject *args, const char *who, MkTrackArgs *out,
+                  GError **error)
+{
+  MkTrackArgs t = { 0 };
+  t.have_audio = arg_int (args, "audio", &t.audio);
+
+  JsonNode *sn = (args != NULL && json_object_has_member (args, "subtitle"))
+                   ? json_object_get_member (args, "subtitle")
+                   : NULL;
+  if (sn != NULL && !JSON_NODE_HOLDS_NULL (sn))
+    {
+      if (JSON_NODE_HOLDS_VALUE (sn)
+          && json_node_get_value_type (sn) == G_TYPE_INT64)
+        {
+          t.have_sub_index = TRUE;
+          t.subtitle = json_node_get_int (sn);
+        }
+      else if (JSON_NODE_HOLDS_VALUE (sn)
+               && json_node_get_value_type (sn) == G_TYPE_STRING
+               && g_strcmp0 (json_node_get_string (sn), "off") == 0)
+        t.sub_off = TRUE;
+      else
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "%s: \"subtitle\" must be a stream index (integer) or "
+                       "\"off\"", who);
+          return FALSE;
+        }
+    }
+
+  if (!t.have_audio && !t.have_sub_index && !t.sub_off)
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "%s: give at least one of \"audio\" or \"subtitle\"", who);
+      return FALSE;
+    }
+
+  *out = t;
+  return TRUE;
+}
+
+/**
+ * apply_audio_subtitle:
+ * @self: the tool table.
+ * @instance: target instance name, or NULL for the configured default.
+ * @playerid: the active video player to act on.
+ * @t: the parsed selection (parse_track_args()).
+ * @error: return location for a GError, or NULL.
+ *
+ * Applies the selection to a known video @playerid: `Player.SetAudioStream` and/
+ * or `Player.SetSubtitle`. Each is applied only when given. `enable: true` is
+ * what actually shows a chosen subtitle; it is omitted for `"off"`.
+ *
+ * @return TRUE, or FALSE with @error set on a call failure.
+ */
+static gboolean
+apply_audio_subtitle (MkTools *self, const char *instance, gint64 playerid,
+                      const MkTrackArgs *t, GError **error)
+{
+  if (t->have_audio)
+    {
+      g_autoptr (JsonBuilder) b = json_builder_new ();
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "playerid");
+      json_builder_add_int_value (b, playerid);
+      json_builder_set_member_name (b, "stream");
+      json_builder_add_int_value (b, t->audio);
+      json_builder_end_object (b);
+      g_autoptr (JsonNode) params = json_builder_get_root (b);
+      g_autoptr (JsonNode) res = mk_kodi_call (
+        self->kodi, instance, "Player.SetAudioStream", params, error);
+      if (res == NULL)
+        return FALSE;
+    }
+
+  if (t->have_sub_index || t->sub_off)
+    {
+      g_autoptr (JsonBuilder) b = json_builder_new ();
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "playerid");
+      json_builder_add_int_value (b, playerid);
+      json_builder_set_member_name (b, "subtitle");
+      if (t->sub_off)
+        json_builder_add_string_value (b, "off");
+      else
+        json_builder_add_int_value (b, t->subtitle);
+      /* `enable: true` is what actually shows a selected subtitle (Kodi may
+       * have them turned off); it is meaningless for "off", so omit it there. */
+      if (t->have_sub_index)
+        {
+          json_builder_set_member_name (b, "enable");
+          json_builder_add_boolean_value (b, TRUE);
+        }
+      json_builder_end_object (b);
+      g_autoptr (JsonNode) params = json_builder_get_root (b);
+      g_autoptr (JsonNode) res = mk_kodi_call (
+        self->kodi, instance, "Player.SetSubtitle", params, error);
+      if (res == NULL)
+        return FALSE;
+    }
+
+  return TRUE;
+}
+
+/**
+ * schema_set_audio_and_subtitle:
+ * @self: the table (used to name the configured instances).
+ *
+ * Schema for the `set_audio_and_subtitle` tool: the optional `instance` and the
+ * two optional stream selectors (prop_audio_subtitle_selectors()). Both
+ * selectors are optional; the "give at least one" rule (and the
+ * index-or-`"off"` check on `subtitle`) is enforced in the handler.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_set_audio_and_subtitle (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_instance (b, self, FALSE);
+  prop_audio_subtitle_selectors (b);
 
   schema_end (b, NULL);
   return json_builder_get_root (b);
@@ -4398,46 +4593,9 @@ handler_set_audio_and_subtitle (MkTools *self, const MkToolDef *def,
   (void) def;
   const char *instance = arg_instance (args);
 
-  gint64 audio = 0;
-  gboolean have_audio = arg_int (args, "audio", &audio);
-
-  /* `subtitle` is an index OR the string "off". Inspect the node's type
-   * directly: arg_int returns TRUE for any present member and would read "off"
-   * as index 0. */
-  JsonNode *sn = (args != NULL && json_object_has_member (args, "subtitle"))
-                   ? json_object_get_member (args, "subtitle")
-                   : NULL;
-  gboolean have_sub_index = FALSE, sub_off = FALSE;
-  gint64 subtitle = 0;
-  if (sn != NULL && !JSON_NODE_HOLDS_NULL (sn))
-    {
-      if (JSON_NODE_HOLDS_VALUE (sn)
-          && json_node_get_value_type (sn) == G_TYPE_INT64)
-        {
-          have_sub_index = TRUE;
-          subtitle = json_node_get_int (sn);
-        }
-      else if (JSON_NODE_HOLDS_VALUE (sn)
-               && json_node_get_value_type (sn) == G_TYPE_STRING
-               && g_strcmp0 (json_node_get_string (sn), "off") == 0)
-        sub_off = TRUE;
-      else
-        {
-          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                       "set_audio_and_subtitle: \"subtitle\" must be a stream "
-                       "index (integer) or \"off\"");
-          return NULL;
-        }
-    }
-  gboolean have_subtitle = have_sub_index || sub_off;
-
-  if (!have_audio && !have_subtitle)
-    {
-      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
-                   "set_audio_and_subtitle: give at least one of \"audio\" or "
-                   "\"subtitle\"");
-      return NULL;
-    }
+  MkTrackArgs t;
+  if (!parse_track_args (args, "set_audio_and_subtitle", &t, error))
+    return NULL;
 
   /* The active player, and its kind. Audio-track and subtitle switching apply
    * to video only; an empty list means nothing is playing. */
@@ -4466,51 +4624,154 @@ handler_set_audio_and_subtitle (MkTools *self, const MkToolDef *def,
       return NULL;
     }
 
-  if (have_audio)
-    {
-      g_autoptr (JsonBuilder) b = json_builder_new ();
-      json_builder_begin_object (b);
-      json_builder_set_member_name (b, "playerid");
-      json_builder_add_int_value (b, playerid);
-      json_builder_set_member_name (b, "stream");
-      json_builder_add_int_value (b, audio);
-      json_builder_end_object (b);
-      g_autoptr (JsonNode) params = json_builder_get_root (b);
-      g_autoptr (JsonNode) res = mk_kodi_call (
-        self->kodi, instance, "Player.SetAudioStream", params, error);
-      if (res == NULL)
-        return NULL;
-    }
-
-  if (have_subtitle)
-    {
-      g_autoptr (JsonBuilder) b = json_builder_new ();
-      json_builder_begin_object (b);
-      json_builder_set_member_name (b, "playerid");
-      json_builder_add_int_value (b, playerid);
-      json_builder_set_member_name (b, "subtitle");
-      if (sub_off)
-        json_builder_add_string_value (b, "off");
-      else
-        json_builder_add_int_value (b, subtitle);
-      /* `enable: true` is what actually shows a selected subtitle (Kodi may
-       * have them turned off); it is meaningless for "off", so omit it there. */
-      if (have_sub_index)
-        {
-          json_builder_set_member_name (b, "enable");
-          json_builder_add_boolean_value (b, TRUE);
-        }
-      json_builder_end_object (b);
-      g_autoptr (JsonNode) params = json_builder_get_root (b);
-      g_autoptr (JsonNode) res = mk_kodi_call (
-        self->kodi, instance, "Player.SetSubtitle", params, error);
-      if (res == NULL)
-        return NULL;
-    }
+  if (!apply_audio_subtitle (self, instance, playerid, &t, error))
+    return NULL;
 
   /* The standard playback status. The playback item is unchanged — only stream
    * selection — so no settle delay is needed; player_state() also records the
    * snapshot to history. */
+  return player_state (self, instance, error);
+}
+
+/* ---- playfile_with_audio_and_subtitle -------------------------------------
+ *
+ * Start playback of a file AND select its audio track / subtitle in one call —
+ * the "when starting the playback" partner of `set_audio_and_subtitle` (which
+ * acts on the item already playing). `Player.Open` has no audio/subtitle
+ * option, so the tool opens the file, waits for the stream to start, then
+ * applies the same `Player.SetAudioStream`/`SetSubtitle` selection. Video only:
+ * audio tracks and subtitles are a video concept.
+ */
+
+/* Let the just-opened stream's tracks enumerate before selecting. open_file()
+ * already settled once and confirmed playback started; this second settle
+ * covers the brief window where the player is up but its audio/subtitle streams
+ * are not yet listed (Player.OnAVStart, which the server cannot subscribe to —
+ * see TODO 8.9.4). */
+#define MK_TRACKS_SETTLE_US (500 * 1000)
+
+/**
+ * schema_playfile_with_audio_and_subtitle:
+ * @self: the table (used to name the configured instances).
+ *
+ * Schema for the `playfile_with_audio_and_subtitle` tool: the required `file`
+ * (as `playfile`), the optional `instance`, and the two stream selectors
+ * (prop_audio_subtitle_selectors()). At least one of `audio`/`subtitle` must be
+ * given — that is the whole point of the tool — enforced in the handler.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_playfile_with_audio_and_subtitle (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_instance (b, self, FALSE);
+  prop_typed (b, "file", "string",
+              "Path of the video file to play — the `file` field of a "
+              "`searchmedia` result row, or what `audio_and_subtitle_info` "
+              "reports. Any path Kodi can reach works, in-library or not.");
+  prop_audio_subtitle_selectors (b);
+
+  static const char *const required[] = { "file", NULL };
+  schema_end (b, required);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_playfile_with_audio_and_subtitle:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments; required `file`, optional `audio` (stream index),
+ *        optional `subtitle` (stream index or "off"), optional `instance`.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `playfile_with_audio_and_subtitle` tool: opens a file and
+ * selects its audio track and/or subtitle once the stream starts — the
+ * "starting the playback" partner of `set_audio_and_subtitle`. Since
+ * `Player.Open` carries no track option, the selection is applied right after
+ * the open (open → wait → apply → return), entirely within this call.
+ *
+ * Steps:
+ *   1. Validate `file` and parse the `audio`/`subtitle` selectors
+ *      (parse_track_args(); at least one is required — otherwise plain
+ *      `playfile` is the tool).
+ *   2. open_file() — the shared opener with its three missing-media layers and
+ *      post-settle "did it actually start" check.
+ *   3. Resolve the now-started player. Audio tracks and subtitles are a video
+ *      concept, so a non-video open (an audio file given track args) is a clean
+ *      tool error — playback has already begun, which the message notes.
+ *   4. A brief settle so the new stream's tracks enumerate, then
+ *      apply_audio_subtitle() applies the same calls `set_audio_and_subtitle`
+ *      uses.
+ *
+ * @return the post-selection player-state snapshot — its top-level
+ *         `audio`/`subtitle` summary (TODO 7.3) echoes the resulting layout, so
+ *         the caller sees the selection take effect. NULL with @error set on a
+ *         missing `file`, an empty selection, a missing/unplayable file, a
+ *         non-video open, or a call failure.
+ */
+static JsonNode *
+handler_playfile_with_audio_and_subtitle (MkTools *self, const MkToolDef *def,
+                                          JsonObject *args, GError **error)
+{
+  (void) def;
+  const char *who = "playfile_with_audio_and_subtitle";
+  const char *instance = arg_instance (args);
+  const char *file = arg_str (args, "file", NULL);
+  if (file == NULL || file[0] == '\0')
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "%s: \"file\" is required", who);
+      return NULL;
+    }
+
+  MkTrackArgs t;
+  if (!parse_track_args (args, who, &t, error))
+    return NULL;
+
+  /* Open the file (shared missing-media layers + start check). The snapshot it
+   * returns only confirms the open started; the player is re-resolved below for
+   * its id and kind. */
+  g_autoptr (JsonNode) opened = open_file (self, instance, file, who, error);
+  if (opened == NULL)
+    return NULL;
+
+  /* Resolve the now-started player. Tracks are video-only; an audio open (an
+   * audio file handed track args) is a clean error — playback has begun. */
+  g_autoptr (JsonNode) active =
+    mk_kodi_call (self->kodi, instance, "Player.GetActivePlayers", NULL, error);
+  if (active == NULL)
+    return NULL;
+  JsonArray *players =
+    JSON_NODE_HOLDS_ARRAY (active) ? json_node_get_array (active) : NULL;
+  if (players == NULL || json_array_get_length (players) == 0)
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "%s: Kodi accepted \"%s\" but playback never started", who,
+                   file);
+      return NULL;
+    }
+  JsonObject *p0 = json_array_get_object_element (players, 0);
+  gint64 playerid = json_object_get_int_member_with_default (p0, "playerid", 0);
+  const char *ptype =
+    json_object_get_string_member_with_default (p0, "type", NULL);
+  if (g_strcmp0 (ptype, "video") != 0)
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "%s: \"%s\" is not video — audio tracks and subtitles apply "
+                   "to video playback only (it is now playing)", who, file);
+      return NULL;
+    }
+
+  /* Wait for the stream's tracks to enumerate, then select. */
+  g_usleep (MK_TRACKS_SETTLE_US);
+  if (!apply_audio_subtitle (self, instance, playerid, &t, error))
+    return NULL;
+
+  /* The standard playback status; its audio/subtitle summary now reflects the
+   * selection. player_state() also records the snapshot to history. */
   return player_state (self, instance, error);
 }
 
@@ -6266,6 +6527,41 @@ static const MkToolDef mk_tool_defs[] = {
     "give at least one. Returns the player-state snapshot.",
     schema_set_audio_and_subtitle, handler_set_audio_and_subtitle, NULL,
     out_schema_snapshot },
+
+  /**
+   * playfile_with_audio_and_subtitle (when-starting setter):
+   *
+   * Start playback of a file AND select its audio track / subtitle in one call
+   * — the "when starting the playback" partner of `set_audio_and_subtitle`
+   * (which acts on the item already playing). `Player.Open` has no audio/
+   * subtitle option, so the tool opens the file, waits for the stream, then
+   * applies the same `Player.SetAudioStream`/`SetSubtitle` selection. Video
+   * only.
+   *
+   * Reuses `playfile`'s opener (missing-media layers + start check) and
+   * `set_audio_and_subtitle`'s selectors and applier; reuses out_schema_snapshot
+   * — the reply is the standard player-state snapshot, whose top-level
+   * `audio`/`subtitle` summary (TODO 7.3) echoes the resulting layout.
+   *
+   * Call:  Player.Open → settle → Player.GetActivePlayers → Player.SetAudioStream
+   *        and/or Player.SetSubtitle (enable:true) → player_state snapshot.
+   * @param file (required): path of the video file to play.
+   * @param audio (optional): audio stream index to select.
+   * @param subtitle (optional): subtitle stream index to show, or "off".
+   * @param instance (optional): the Kodi instance to target; omitted uses the
+   *        configured default.
+   * @return the post-selection player-state snapshot. At least one of `audio`/
+   *         `subtitle` is required.
+   */
+  { "playfile_with_audio_and_subtitle",
+    "Play a video file by path AND select its audio track and/or subtitle once "
+    "it starts — the \"when starting playback\" partner of "
+    "set_audio_and_subtitle. \"file\" is required; \"audio\" is a stream index "
+    "and \"subtitle\" is a stream index or \"off\", using the \"index\" values "
+    "from audio_and_subtitle_info. Give at least one of audio/subtitle (else use "
+    "playfile). Video only. Returns the player-state snapshot.",
+    schema_playfile_with_audio_and_subtitle,
+    handler_playfile_with_audio_and_subtitle, NULL, out_schema_snapshot },
 
   /* ---- Escape hatch — raw JSON-RPC passthrough, opt-in per instance
    *      (gated by `allow_rpc`). ---- */
