@@ -4071,6 +4071,219 @@ out_schema_audio_and_subtitle_info (MkTools *self)
   return json_builder_get_root (b);
 }
 
+/**
+ * schema_set_audio_and_subtitle:
+ * @self: the table (used to name the configured instances).
+ *
+ * Schema for the `set_audio_and_subtitle` tool: the optional `instance` and the
+ * two optional stream selectors. `audio` is a plain integer stream index.
+ * `subtitle` is a mixed integer-or-`"off"` type that no `prop_*` helper
+ * produces, so it is built inline as a `oneOf` of an integer index and the
+ * literal `"off"`. Both selectors are optional; the "give at least one" rule
+ * (and the index-or-`"off"` check on `subtitle`) is enforced in the handler.
+ *
+ * @return a newly allocated schema node.
+ */
+static JsonNode *
+schema_set_audio_and_subtitle (MkTools *self)
+{
+  g_autoptr (JsonBuilder) b = json_builder_new ();
+  schema_begin (b);
+
+  prop_instance (b, self, FALSE);
+  prop_typed (b, "audio", "integer",
+              "Audio stream index to select — an `index` from "
+              "`audio_and_subtitle_info`. Omit to leave the audio track "
+              "unchanged.");
+
+  /* `subtitle`: integer index OR the literal "off". Built inline — no helper
+   * emits a mixed type. The handler reads the node's type rather than arg_int,
+   * which would misread the string "off" as index 0. */
+  json_builder_set_member_name (b, "subtitle");
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "description");
+  json_builder_add_string_value (
+    b, "Subtitle stream index to show — an `index` from "
+       "`audio_and_subtitle_info` — or \"off\" to hide subtitles. Omit to "
+       "leave the subtitle unchanged (\"off\" is distinct from omitting it).");
+  json_builder_set_member_name (b, "oneOf");
+  json_builder_begin_array (b);
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "type");
+  json_builder_add_string_value (b, "integer");
+  json_builder_set_member_name (b, "description");
+  json_builder_add_string_value (b, "Subtitle stream index to show.");
+  json_builder_end_object (b);
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "type");
+  json_builder_add_string_value (b, "string");
+  json_builder_set_member_name (b, "enum");
+  json_builder_begin_array (b);
+  json_builder_add_string_value (b, "off");
+  json_builder_end_array (b);
+  json_builder_set_member_name (b, "description");
+  json_builder_add_string_value (b, "Turn subtitles off.");
+  json_builder_end_object (b);
+  json_builder_end_array (b);
+  json_builder_end_object (b);
+
+  schema_end (b, NULL);
+  return json_builder_get_root (b);
+}
+
+/**
+ * handler_set_audio_and_subtitle:
+ * @self: the tool table.
+ * @def: this tool's row (unused).
+ * @args: the call arguments; optional `audio` (stream index), optional
+ *        `subtitle` (stream index or "off"), optional `instance`.
+ * @error: return location for a GError, or NULL.
+ *
+ * Implements the `set_audio_and_subtitle` tool: switches the audio track and/or
+ * subtitle of the video **now playing**, by the per-stream `index` that
+ * `audio_and_subtitle_info` reports. The during-playback partner of that
+ * read-only inspector.
+ *
+ * `audio` selects an audio track by index; `subtitle` selects a subtitle by
+ * index or hides subtitles with `"off"`. Each is optional and applied only when
+ * given — omitting one leaves that stream untouched; at least one must be
+ * present. `"off"` is read by inspecting the argument's JSON type (arg_int
+ * would silently read the string `"off"` as index 0).
+ *
+ * Resolves the active player like `queue` (`Player.GetActivePlayers`); with
+ * nothing playing, or a non-video player (audio tracks and subtitles are a
+ * video concept), it returns a clean tool error. Then applies
+ * `Player.SetAudioStream { playerid, stream }` and/or `Player.SetSubtitle
+ * { playerid, subtitle, enable: true }` — `enable: true` is what actually shows
+ * a selected subtitle; it is omitted for `"off"`.
+ *
+ * @return the player-state snapshot (the standard playback status; playback
+ *         item unchanged), or NULL with @error set (bad arguments, nothing
+ *         playing, a non-video player, or a call failure).
+ */
+static JsonNode *
+handler_set_audio_and_subtitle (MkTools *self, const MkToolDef *def,
+                                JsonObject *args, GError **error)
+{
+  (void) def;
+  const char *instance = arg_instance (args);
+
+  gint64 audio = 0;
+  gboolean have_audio = arg_int (args, "audio", &audio);
+
+  /* `subtitle` is an index OR the string "off". Inspect the node's type
+   * directly: arg_int returns TRUE for any present member and would read "off"
+   * as index 0. */
+  JsonNode *sn = (args != NULL && json_object_has_member (args, "subtitle"))
+                   ? json_object_get_member (args, "subtitle")
+                   : NULL;
+  gboolean have_sub_index = FALSE, sub_off = FALSE;
+  gint64 subtitle = 0;
+  if (sn != NULL && !JSON_NODE_HOLDS_NULL (sn))
+    {
+      if (JSON_NODE_HOLDS_VALUE (sn)
+          && json_node_get_value_type (sn) == G_TYPE_INT64)
+        {
+          have_sub_index = TRUE;
+          subtitle = json_node_get_int (sn);
+        }
+      else if (JSON_NODE_HOLDS_VALUE (sn)
+               && json_node_get_value_type (sn) == G_TYPE_STRING
+               && g_strcmp0 (json_node_get_string (sn), "off") == 0)
+        sub_off = TRUE;
+      else
+        {
+          g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                       "set_audio_and_subtitle: \"subtitle\" must be a stream "
+                       "index (integer) or \"off\"");
+          return NULL;
+        }
+    }
+  gboolean have_subtitle = have_sub_index || sub_off;
+
+  if (!have_audio && !have_subtitle)
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "set_audio_and_subtitle: give at least one of \"audio\" or "
+                   "\"subtitle\"");
+      return NULL;
+    }
+
+  /* The active player, and its kind. Audio-track and subtitle switching apply
+   * to video only; an empty list means nothing is playing. */
+  g_autoptr (JsonNode) active =
+    mk_kodi_call (self->kodi, instance, "Player.GetActivePlayers", NULL, error);
+  if (active == NULL)
+    return NULL;
+  JsonArray *players =
+    JSON_NODE_HOLDS_ARRAY (active) ? json_node_get_array (active) : NULL;
+  if (players == NULL || json_array_get_length (players) == 0)
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "set_audio_and_subtitle: nothing is playing — start "
+                   "playback first (play/playfile)");
+      return NULL;
+    }
+  JsonObject *p0 = json_array_get_object_element (players, 0);
+  gint64 playerid = json_object_get_int_member_with_default (p0, "playerid", 0);
+  const char *ptype =
+    json_object_get_string_member_with_default (p0, "type", NULL);
+  if (g_strcmp0 (ptype, "video") != 0)
+    {
+      g_set_error (error, MK_TOOLS_ERROR, MK_TOOLS_ERROR_INVALID_ARGS,
+                   "set_audio_and_subtitle: audio tracks and subtitles apply "
+                   "to video playback only");
+      return NULL;
+    }
+
+  if (have_audio)
+    {
+      g_autoptr (JsonBuilder) b = json_builder_new ();
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "playerid");
+      json_builder_add_int_value (b, playerid);
+      json_builder_set_member_name (b, "stream");
+      json_builder_add_int_value (b, audio);
+      json_builder_end_object (b);
+      g_autoptr (JsonNode) params = json_builder_get_root (b);
+      g_autoptr (JsonNode) res = mk_kodi_call (
+        self->kodi, instance, "Player.SetAudioStream", params, error);
+      if (res == NULL)
+        return NULL;
+    }
+
+  if (have_subtitle)
+    {
+      g_autoptr (JsonBuilder) b = json_builder_new ();
+      json_builder_begin_object (b);
+      json_builder_set_member_name (b, "playerid");
+      json_builder_add_int_value (b, playerid);
+      json_builder_set_member_name (b, "subtitle");
+      if (sub_off)
+        json_builder_add_string_value (b, "off");
+      else
+        json_builder_add_int_value (b, subtitle);
+      /* `enable: true` is what actually shows a selected subtitle (Kodi may
+       * have them turned off); it is meaningless for "off", so omit it there. */
+      if (have_sub_index)
+        {
+          json_builder_set_member_name (b, "enable");
+          json_builder_add_boolean_value (b, TRUE);
+        }
+      json_builder_end_object (b);
+      g_autoptr (JsonNode) params = json_builder_get_root (b);
+      g_autoptr (JsonNode) res = mk_kodi_call (
+        self->kodi, instance, "Player.SetSubtitle", params, error);
+      if (res == NULL)
+        return NULL;
+    }
+
+  /* The standard playback status. The playback item is unchanged — only stream
+   * selection — so no settle delay is needed; player_state() also records the
+   * snapshot to history. */
+  return player_state (self, instance, error);
+}
+
 /* ---- getplaylist ----------------------------------------------------------
  *
  * Read the current queue: the rows of a playlist plus where playback sits in
@@ -5769,6 +5982,38 @@ static const MkToolDef mk_tool_defs[] = {
     "embedded streams.",
     schema_audio_and_subtitle_info, handler_audio_and_subtitle_info, NULL,
     out_schema_audio_and_subtitle_info },
+
+  /**
+   * set_audio_and_subtitle (during-playback setter):
+   *
+   * Switch the audio track and/or subtitle of the video **now playing**, by the
+   * per-stream `index` that `audio_and_subtitle_info` reports — its
+   * during-playback partner. `audio` and `subtitle` are each optional and
+   * applied only when given (omit one to leave that stream untouched; at least
+   * one must be present); `subtitle: "off"` hides subtitles, distinct from
+   * omitting it.
+   *
+   * Resolves the active player like `queue`; with nothing playing or a
+   * non-video player it returns a clean tool error. Reuses out_schema_snapshot
+   * (like `nowplaying`) — the reply is the standard player-state snapshot;
+   * echoing the resulting audio/subtitle layout is deferred.
+   *
+   * Call:  Player.GetActivePlayers → Player.SetAudioStream and/or
+   *        Player.SetSubtitle (enable:true) → player_state snapshot.
+   * @param audio (optional): audio stream index to select.
+   * @param subtitle (optional): subtitle stream index to show, or "off".
+   * @param instance (optional): the Kodi instance to target; omitted uses the
+   *        configured default.
+   * @return the player-state snapshot (playback item unchanged).
+   */
+  { "set_audio_and_subtitle",
+    "Switch the audio track and/or subtitle of the video now playing on the "
+    "target instance. \"audio\" is a stream index; \"subtitle\" is a stream "
+    "index or \"off\" to hide subtitles — use the \"index\" values from "
+    "audio_and_subtitle_info. Omit an argument to leave that stream unchanged; "
+    "give at least one. Returns the player-state snapshot.",
+    schema_set_audio_and_subtitle, handler_set_audio_and_subtitle, NULL,
+    out_schema_snapshot },
 
   /* ---- Escape hatch — raw JSON-RPC passthrough, opt-in per instance
    *      (gated by `allow_rpc`). ---- */

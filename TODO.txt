@@ -229,10 +229,19 @@ valid. The Kodi JSON-RPC method inventory lives in KODI-API.txt; "KODI-API
             position as index (the handle .2/.3 select by for embedded streams).
             Embedded only: sidecar subs + unscanned files come back empty
             (tests/audio_and_subtitle_info.test)
-        [ ] 11.6.9.2 setting the audio track and subtitles while playing —
-            one tool: Player.SetAudioStream {playerid, stream:index|"next"|
-            "previous"} + Player.SetSubtitle {playerid, subtitle:index|"on"|
-            "off"|..., enable:true} (enable:true required to actually show it)
+        [x] 11.6.9.2 setting the audio track and subtitles while playing —
+            set_audio_and_subtitle tool on the active video player:
+            Player.SetAudioStream {playerid, stream:index} +
+            Player.SetSubtitle {playerid, subtitle:index|"off", enable:true}
+            (enable:true required to actually show a selected subtitle; omitted
+            for "off"). audio and subtitle each optional, applied only when
+            given, at least one required; subtitle "off" (disable) is distinct
+            from omitting it (leave unchanged) — read from the arg's JSON type,
+            not arg_int, which would misread "off" as index 0. Nothing playing
+            or a non-video player is a clean tool error. Returns the player_state
+            snapshot (echoing the resulting audio/subtitle layout is deferred).
+            Minimal vocabulary: the fuller next/previous/on were not built
+            (tests/set_audio_and_subtitle.test)
         [ ] 11.6.9.3 setting the audio track and subtitles when starting the
             playback, and for the next items in the playlist — one tool.
             Player.Open has no audio/subtitle option, so the tool applies
