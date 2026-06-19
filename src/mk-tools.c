@@ -674,6 +674,12 @@ append_av_streams (JsonBuilder *b, JsonObject *props)
     }
 }
 
+/* Recovers the real media identity of an off-library video played by path;
+ * defined below its library-query helpers (add_field_filter/list_total/…). */
+static void reconcile_off_library_item (MkTools     *self,
+                                        const char  *instance,
+                                        JsonObject  *item);
+
 /**
  * player_state:
  * @self: the tool table.
@@ -826,6 +832,15 @@ player_state (MkTools *self, const char *instance, GError **error)
     return NULL;
   JsonObject *item =
     json_object_get_object_member (json_node_get_object (ires), "item");
+
+  /* An off-library video — a Files-view play of a path the library indexed
+   * under a different one — comes back type "unknown"/id -1. Recover its real
+   * media type and metadata from the library by basename, so nowplaying,
+   * status and the history log all read it as the episode/movie it is. Video
+   * only (the chosen scope); audio players carry no such file mismatch in
+   * practice and would only cost pointless lookups. */
+  if (is_video)
+    reconcile_off_library_item (self, instance, item);
 
   gint64 speed = json_object_get_int_member_with_default (props, "speed", 0);
 
@@ -1897,6 +1912,125 @@ list_total (JsonNode *result)
     return 0;
   JsonObject *lim = json_object_get_object_member (o, "limits");
   return json_object_get_int_member_with_default (lim, "total", 0);
+}
+
+/**
+ * MkReconcileKind:
+ * @method: the library list method to query (VideoLibrary.GetEpisodes, …).
+ * @list_key: the array member its reply carries ("episodes"/"movies"/…).
+ * @id_field: the library-id field on each row ("episodeid"/"movieid"/…).
+ * @media: the media type to stamp on a matched item ("episode"/"movie"/…).
+ * @props: NULL-terminated enrichment properties to request and copy across.
+ *
+ * One video media type the off-library reconciler (reconcile_off_library_item)
+ * tries, in order, when matching a played file's basename against the library.
+ */
+typedef struct
+{
+  const char *method;
+  const char *list_key;
+  const char *id_field;
+  const char *media;
+  const char *const *props;
+} MkReconcileKind;
+
+/**
+ * reconcile_off_library_item:
+ * @self: the tool table.
+ * @instance: target instance, or NULL for the default.
+ * @item: the Player.GetItem `item` object, patched in place on a hit.
+ *
+ * Recovers the real media identity of an off-library video. When a file is
+ * played by path (the everyday "browse to it in Files and press play") and that
+ * exact path is not the one the library scraped — a duplicate copy, an extra
+ * directory level, a differently-mounted share — Kodi cannot tie it to a library
+ * row and reports `type:"unknown"`, `id:-1`, with empty `title`/`showtitle` and
+ * `-1` season/episode. The snapshot (and so status, nowplaying and the history
+ * log) would then record it as unenriched, and a `media:"episode"` history
+ * filter would miss it.
+ *
+ * Kodi's library matches the `filename` field on basename, not full path, so one
+ * indexed `filter:{field:"filename",operator:"is",value:<basename>}` query
+ * reverse-maps the played file to its library row even when the directories
+ * differ. This tries each video type in turn (episode, movie, music video) and,
+ * on a UNIQUE match, stamps the real `type`/`id` onto @item and copies the
+ * type's enrichment fields across — so the rest of player_state reads it exactly
+ * as if Kodi had resolved it. A basename shared by more than one library row is
+ * ambiguous and left untouched (better unknown than mislabelled). No-ops unless
+ * @item is type "unknown" with a non-empty `file`; a failed lookup is swallowed
+ * (best-effort enrichment must never break the snapshot).
+ */
+static void
+reconcile_off_library_item (MkTools *self, const char *instance,
+                            JsonObject *item)
+{
+  if (item == NULL)
+    return;
+  const char *type =
+    json_object_get_string_member_with_default (item, "type", "unknown");
+  if (g_strcmp0 (type, "unknown") != 0)
+    return; /* Kodi already classified it — trust that. */
+  const char *file =
+    json_object_get_string_member_with_default (item, "file", NULL);
+  if (file == NULL || file[0] == '\0')
+    return;
+  g_autofree char *base = g_path_get_basename (file);
+  if (base == NULL || base[0] == '\0' || g_strcmp0 (base, ".") == 0
+      || g_strcmp0 (base, G_DIR_SEPARATOR_S) == 0)
+    return;
+
+  static const char *const ep_props[] = { "showtitle", "season", "episode",
+                                          "title", NULL };
+  static const char *const mv_props[] = { "title", NULL };
+  static const char *const mvid_props[] = { "title", "artist", NULL };
+  static const MkReconcileKind kinds[] = {
+    { "VideoLibrary.GetEpisodes", "episodes", "episodeid", "episode", ep_props },
+    { "VideoLibrary.GetMovies", "movies", "movieid", "movie", mv_props },
+    { "VideoLibrary.GetMusicVideos", "musicvideos", "musicvideoid",
+      "musicvideo", mvid_props },
+  };
+
+  for (gsize k = 0; k < G_N_ELEMENTS (kinds); k++)
+    {
+      g_autoptr (JsonBuilder) pb = json_builder_new ();
+      json_builder_begin_object (pb);
+      add_field_filter (pb, "filename", "is", base);
+      add_properties (pb, kinds[k].props);
+      /* Window of 2 so an ambiguous basename still reports its full `total`. */
+      add_page_limits (pb, 0, 2, FALSE);
+      json_builder_end_object (pb);
+      g_autoptr (JsonNode) params = json_builder_get_root (pb);
+
+      /* Best-effort: a lookup failure leaves the item unknown, never errors. */
+      g_autoptr (JsonNode) result =
+        mk_kodi_call (self->kodi, instance, kinds[k].method, params, NULL);
+      if (result == NULL || !JSON_NODE_HOLDS_OBJECT (result))
+        continue;
+      if (list_total (result) != 1) /* no match, or ambiguous → skip */
+        continue;
+      JsonObject *robj = json_node_get_object (result);
+      if (!json_object_has_member (robj, kinds[k].list_key))
+        continue;
+      JsonArray *rows = json_object_get_array_member (robj, kinds[k].list_key);
+      if (rows == NULL || json_array_get_length (rows) < 1)
+        continue;
+      JsonObject *row = json_array_get_object_element (rows, 0);
+
+      /* Stamp the recovered identity and graft the enrichment onto the snapshot
+       * item, replacing the unknown/sentinel placeholders Kodi left. */
+      json_object_set_string_member (item, "type", kinds[k].media);
+      json_object_set_int_member (
+        item, "id",
+        json_object_get_int_member_with_default (row, kinds[k].id_field, -1));
+      for (gsize p = 0; kinds[k].props[p] != NULL; p++)
+        {
+          const char *name = kinds[k].props[p];
+          if (json_object_has_member (row, name))
+            json_object_set_member (
+              item, name, json_node_copy (json_object_get_member (row, name)));
+        }
+      return;
+    }
 }
 
 /**
