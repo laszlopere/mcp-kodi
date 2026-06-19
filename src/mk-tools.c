@@ -6779,6 +6779,203 @@ make_result (const char *text, JsonNode *structured, gboolean is_error)
   return json_builder_get_root (b);
 }
 
+/* ---- Argument validation --------------------------------------------------
+ *
+ * json-glib's getters are permissive: a wrong-typed field (e.g. a string where
+ * an integer is wanted) reads back as the default, and a missing field is
+ * indistinguishable from one set to its default. Left unchecked, a malformed
+ * call returns a misleading success. These helpers validate a call's arguments
+ * against the tool's own declared inputSchema — the single source of truth the
+ * tool already publishes — and turn a violation into one actionable message the
+ * model can correct from, mirroring error_text()'s `{ "error": … }` shape.
+ *
+ * Scope: required-property presence and primitive `type` matching. Enum
+ * membership is left to the handler (which may match case-insensitively and can
+ * phrase a domain-specific message); undeclared/extra members and an explicit
+ * JSON null are allowed (a null is how `instances set` clears a field).
+ */
+
+/**
+ * json_type_name:
+ * @node: the value/container node whose JSON type to name; borrowed.
+ *
+ * Names @node's JSON type as it appears in a schema ("string", "integer",
+ * "number", "boolean", "array", "object", "null"), for reporting what was
+ * actually received in a validation message.
+ *
+ * @return a borrowed static type-name string.
+ */
+static const char *
+json_type_name (JsonNode *node)
+{
+  if (JSON_NODE_HOLDS_NULL (node))
+    return "null";
+  if (JSON_NODE_HOLDS_ARRAY (node))
+    return "array";
+  if (JSON_NODE_HOLDS_OBJECT (node))
+    return "object";
+  GType vt = json_node_get_value_type (node);
+  if (vt == G_TYPE_STRING)
+    return "string";
+  if (vt == G_TYPE_INT64)
+    return "integer";
+  if (vt == G_TYPE_DOUBLE)
+    return "number";
+  if (vt == G_TYPE_BOOLEAN)
+    return "boolean";
+  return "value";
+}
+
+/**
+ * type_matches:
+ * @node: the supplied argument value; borrowed.
+ * @want: the schema `type` the property declares.
+ *
+ * Whether @node satisfies the declared JSON Schema @want. A JSON null always
+ * passes (callers use an explicit null to clear a value), an "integer" accepts
+ * only a whole number while "number" also accepts a real, and an unrecognised
+ * @want passes (there is nothing to enforce).
+ *
+ * @return TRUE when @node is acceptable for @want.
+ */
+static gboolean
+type_matches (JsonNode *node, const char *want)
+{
+  if (JSON_NODE_HOLDS_NULL (node))
+    return TRUE;
+  if (g_strcmp0 (want, "string") == 0)
+    return JSON_NODE_HOLDS_VALUE (node)
+           && json_node_get_value_type (node) == G_TYPE_STRING;
+  if (g_strcmp0 (want, "integer") == 0)
+    return JSON_NODE_HOLDS_VALUE (node)
+           && json_node_get_value_type (node) == G_TYPE_INT64;
+  if (g_strcmp0 (want, "number") == 0)
+    return JSON_NODE_HOLDS_VALUE (node)
+           && (json_node_get_value_type (node) == G_TYPE_INT64
+               || json_node_get_value_type (node) == G_TYPE_DOUBLE);
+  if (g_strcmp0 (want, "boolean") == 0)
+    return JSON_NODE_HOLDS_VALUE (node)
+           && json_node_get_value_type (node) == G_TYPE_BOOLEAN;
+  if (g_strcmp0 (want, "array") == 0)
+    return JSON_NODE_HOLDS_ARRAY (node);
+  if (g_strcmp0 (want, "object") == 0)
+    return JSON_NODE_HOLDS_OBJECT (node);
+  return TRUE; /* unrecognised declared type — nothing to enforce */
+}
+
+/**
+ * expected_phrase:
+ * @want: the schema `type` string.
+ *
+ * Maps a schema type to its article-prefixed English phrase ("a string", "an
+ * integer", …) for a validation message, falling back to @want verbatim.
+ *
+ * @return a borrowed static phrase, or @want itself when unrecognised.
+ */
+static const char *
+expected_phrase (const char *want)
+{
+  if (g_strcmp0 (want, "string") == 0)
+    return "a string";
+  if (g_strcmp0 (want, "integer") == 0)
+    return "an integer";
+  if (g_strcmp0 (want, "number") == 0)
+    return "a number";
+  if (g_strcmp0 (want, "boolean") == 0)
+    return "a boolean";
+  if (g_strcmp0 (want, "array") == 0)
+    return "an array";
+  if (g_strcmp0 (want, "object") == 0)
+    return "an object";
+  return want;
+}
+
+/**
+ * validate_arguments:
+ * @self: the tool table, used to build @def's schema.
+ * @def: the tool row whose declared inputSchema constrains the call.
+ * @args: the call arguments object, or NULL.
+ *
+ * Checks @args against @def's inputSchema: every `required` property must be
+ * present, and every supplied property the schema declares must match its
+ * declared `type` (see type_matches() for the null/extra/enum policy). Catches
+ * the malformed calls json-glib's getters would otherwise swallow — a
+ * wrong-typed field read as its default, or a missing required field — naming
+ * each offender with expected-vs-received detail.
+ *
+ * @return NULL when @args is valid (or @def declares no schema), else a newly
+ *         allocated, human-readable error string; free with g_free().
+ */
+static char *
+validate_arguments (MkTools *self, const MkToolDef *def, JsonObject *args)
+{
+  if (def->schema == NULL)
+    return NULL;
+
+  g_autoptr (JsonNode) schema = def->schema (self);
+  if (schema == NULL || !JSON_NODE_HOLDS_OBJECT (schema))
+    return NULL;
+  JsonObject *sobj = json_node_get_object (schema);
+
+  JsonObject *props = NULL;
+  JsonNode *pnode = json_object_get_member (sobj, "properties");
+  if (pnode != NULL && JSON_NODE_HOLDS_OBJECT (pnode))
+    props = json_node_get_object (pnode);
+
+  g_autoptr (GString) errs = g_string_new (NULL);
+
+  /* Required-presence: each name in the schema's `required` array. */
+  JsonNode *rnode = json_object_get_member (sobj, "required");
+  if (rnode != NULL && JSON_NODE_HOLDS_ARRAY (rnode))
+    {
+      JsonArray *req = json_node_get_array (rnode);
+      guint n = json_array_get_length (req);
+      for (guint i = 0; i < n; i++)
+        {
+          const char *name = json_array_get_string_element (req, i);
+          if (name == NULL)
+            continue;
+          if (args == NULL || !json_object_has_member (args, name))
+            {
+              if (errs->len > 0)
+                g_string_append (errs, "; ");
+              g_string_append_printf (
+                errs, "argument \"%s\" is required but was not provided", name);
+            }
+        }
+    }
+
+  /* Type-match: each supplied member the schema declares (extras are allowed). */
+  if (args != NULL && props != NULL)
+    {
+      GList *members = json_object_get_members (args);
+      for (GList *l = members; l != NULL; l = l->next)
+        {
+          const char *name = l->data;
+          JsonNode *spec = json_object_get_member (props, name);
+          if (spec == NULL || !JSON_NODE_HOLDS_OBJECT (spec))
+            continue; /* undeclared/extra member — allowed */
+          const char *want = json_object_get_string_member_with_default (
+            json_node_get_object (spec), "type", NULL);
+          JsonNode *val = json_object_get_member (args, name);
+          if (want == NULL || type_matches (val, want))
+            continue;
+          g_autofree char *got = node_to_string (val);
+          if (errs->len > 0)
+            g_string_append (errs, "; ");
+          g_string_append_printf (
+            errs, "argument \"%s\" expected %s, but received %s (%s)", name,
+            expected_phrase (want), got, json_type_name (val));
+        }
+      g_list_free (members);
+    }
+
+  if (errs->len == 0)
+    return NULL;
+  return g_strdup_printf ("invalid arguments for tool \"%s\": %s", def->name,
+                          errs->str);
+}
+
 /* ---- Public API ----------------------------------------------------------- */
 
 /**
@@ -6915,6 +7112,16 @@ mk_tools_call (MkTools     *self,
       g_autofree char *msg =
         g_strdup_printf ("tool \"%s\" is not implemented yet", name);
       g_autofree char *text = error_text (msg, NULL, NULL);
+      return make_result (text, NULL, TRUE);
+    }
+
+  /* Reject malformed arguments against the tool's declared schema before the
+   * handler runs, so a wrong-typed or missing field becomes one actionable
+   * error instead of being silently coerced to a default (validate_arguments). */
+  g_autofree char *verr = validate_arguments (self, def, arguments);
+  if (verr != NULL)
+    {
+      g_autofree char *text = error_text (verr, NULL, NULL);
       return make_result (text, NULL, TRUE);
     }
 

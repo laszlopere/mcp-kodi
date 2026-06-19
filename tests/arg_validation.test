@@ -1,0 +1,162 @@
+#!/bin/sh
+# Functional test for schema-driven argument validation.
+#
+# json-glib's getters are permissive: a wrong-typed field reads back as its
+# default and a missing field is indistinguishable from a defaulted one, so a
+# malformed tool call used to return a misleading success. The server now
+# validates each call against the tool's own declared inputSchema BEFORE the
+# handler runs — every `required` property must be present and every supplied,
+# declared property must match its `type` — turning a violation into one
+# actionable `{ "error": … }` result the model can correct from.
+#
+# Because validation happens before any Kodi contact, this needs NO live Kodi:
+# the rejection paths never reach a handler. The test drives a private,
+# env-scrubbed config so it never touches the user's real config, and asserts
+# both the rejections AND that well-shaped calls are NOT rejected (so a future
+# over-strict validator is caught).
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq on PATH
+#   - the mcp-kodi binary built
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+# Shared harness: skip gate, find_binary, the jq helpers, and the ok/no/eq/
+# contains assertion framework. See tests/lib.sh. Validation is upstream of any
+# Kodi call, so this does NOT call mk_preflight/mk_require_ping — only jq + the
+# binary.
+. "$(dirname "$0")/lib.sh"
+
+command -v jq >/dev/null 2>&1 || skip "jq not found"
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# ---- a private config the test owns ---------------------------------------
+WORK=$(mktemp -d) || skip "cannot mktemp"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/cfg/mcp-kodi"
+cat > "$WORK/cfg/mcp-kodi/config.json" <<'EOF'
+{"version":2,"default":"living","instances":{
+  "living":{"name":"Living Room","host":"127.0.0.1:8080","auth":"k:k","scheme":"http"}}}
+EOF
+
+# ---- talking to the server under test (MCP over stdio) --------------------
+# One invocation per call. env -i scrubs the environment to our private config,
+# so an accidentally-valid `set` can never reach the user's real config.
+mcp_call () { # tool arguments-json -> tool result object
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
+    | env -i PATH="$PATH" XDG_CONFIG_HOME="$WORK/cfg" "$MCP" 2>/dev/null \
+    | jq -c 'select(.id==2) | .result'
+}
+emsg () { g "$(res_body "$1")" '.error // ""'; }  # the error message, or ""
+
+# A validation rejection: isError AND a message beginning "invalid arguments".
+rejected () { # desc result
+  if [ "$(res_err "$2")" = true ]; then
+    case "$(emsg "$2")" in
+      "invalid arguments for tool"*) ok "$1"; return 0 ;;
+    esac
+  fi
+  no "$1" "not a validation error: isError=$(res_err "$2") msg=[$(emsg "$2")]"
+}
+# NOT rejected by validation: either success, or a downstream (non-validation)
+# error. Proves well-shaped calls pass the gate even with no Kodi reachable.
+not_rejected () { # desc result
+  case "$(emsg "$2")" in
+    "invalid arguments for tool"*) no "$1" "wrongly rejected: [$(emsg "$2")]" ;;
+    *) ok "$1" ;;
+  esac
+}
+
+echo "arg-validation functional test — binary $MCP"
+
+# ===========================================================================
+# 1. Missing required properties — one message per absent field, naming it.
+# ===========================================================================
+echo "-- missing required"
+
+b=$(mcp_call instances '{}')
+rejected  "instances without action is rejected" "$b"
+contains  "names the missing action" "action" "$(emsg "$b")"
+
+b=$(mcp_call notify '{}')
+rejected  "notify without title/message is rejected" "$b"
+contains  "names missing title"   "title"   "$(emsg "$b")"
+contains  "names missing message" "message" "$(emsg "$b")"
+
+b=$(mcp_call playfile '{}')
+rejected  "playfile without file is rejected" "$b"
+contains  "names the missing file" "file" "$(emsg "$b")"
+
+b=$(mcp_call rpc '{}')
+rejected  "rpc without method is rejected" "$b"
+contains  "names the missing method" "method" "$(emsg "$b")"
+
+b=$(mcp_call searchmedia '{}')
+rejected  "searchmedia without type is rejected" "$b"
+contains  "names the missing type" "type" "$(emsg "$b")"
+
+# ===========================================================================
+# 2. Wrong types — expected-vs-received, naming the field and both types. These
+#    are exactly the values json-glib's getters used to swallow into defaults.
+# ===========================================================================
+echo "-- wrong types"
+
+b=$(mcp_call volume '{"step":"loud"}')
+rejected  "volume step as string is rejected" "$b"
+contains  "step error names the field"     "step"        "$(emsg "$b")"
+contains  "step error wants an integer"    "an integer"  "$(emsg "$b")"
+contains  "step error shows what arrived"  "loud"        "$(emsg "$b")"
+contains  "step error names received type" "(string)"    "$(emsg "$b")"
+
+b=$(mcp_call searchmedia '{"type":"music","limit":"3"}')
+rejected  "searchmedia limit as string is rejected" "$b"
+contains  "limit wants an integer" "an integer" "$(emsg "$b")"
+
+b=$(mcp_call searchmedia '{"type":"music","count":"yes"}')
+rejected  "searchmedia count as string is rejected" "$b"
+contains  "count wants a boolean" "a boolean" "$(emsg "$b")"
+
+b=$(mcp_call instances '{"action":"set","key":"x","insecure":"yes"}')
+rejected  "instances insecure as string is rejected" "$b"
+contains  "insecure wants a boolean" "a boolean" "$(emsg "$b")"
+
+# Several violations in one call are all reported together.
+b=$(mcp_call notify '{"title":5}')
+rejected  "notify with one bad + one missing is rejected" "$b"
+contains  "combined error: title type"      "title"   "$(emsg "$b")"
+contains  "combined error: missing message" "message" "$(emsg "$b")"
+
+# ===========================================================================
+# 3. Type policy: an explicit JSON null clears a value (allowed), and extra
+#    undeclared members are allowed (the schemas set no additionalProperties).
+# ===========================================================================
+echo "-- null + extra members are allowed"
+
+b=$(mcp_call instances '{"action":"set","key":"spare","host":"1.2.3.4:8080","name":null}')
+not_rejected "explicit null is not a type error" "$b"
+eq "null-clearing set succeeds" false "$(res_err "$b")"
+
+b=$(mcp_call instances '{"action":"get","undeclared":123}')
+not_rejected "undeclared extra member is allowed" "$b"
+eq "get with an extra member still succeeds" false "$(res_err "$b")"
+
+# ===========================================================================
+# 4. Well-shaped calls pass the gate. Config-only `instances get` succeeds
+#    outright; a device tool with valid args reaches its handler, so any error
+#    is downstream (no Kodi) — never a validation rejection.
+# ===========================================================================
+echo "-- well-shaped calls are not rejected"
+
+b=$(mcp_call instances '{"action":"get"}')
+eq "valid instances get succeeds" false "$(res_err "$b")"
+
+not_rejected "valid volume step passes validation"   "$(mcp_call volume '{"step":5}')"
+not_rejected "valid playfile file passes validation"  "$(mcp_call playfile '{"file":"/tmp/x.mp3"}')"
+not_rejected "valid searchmedia passes validation" \
+             "$(mcp_call searchmedia '{"type":"music","limit":3}')"
+
+mk_tally "arg-validation functional test"
