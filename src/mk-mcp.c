@@ -62,6 +62,54 @@ object_member (JsonObject *obj, const char *name)
   return json_node_get_object (node);
 }
 
+/**
+ * tool_call_arguments:
+ * @params: the `tools/call` params object, or NULL.
+ * @owner: out; receives a JsonParser the caller must free when the arguments
+ *         object was produced by re-parsing a stringified blob (the returned
+ *         object is borrowed from it), or NULL otherwise.
+ *
+ * Reads the call `arguments`. Normally that member is a JSON object, returned
+ * directly (borrowed from @params). Some clients double-encode the whole
+ * arguments object as a JSON *string* holding it; in that case the string is
+ * parsed and the resulting object returned, with its owning parser handed back
+ * via @owner so it outlives the call. Anything else — absent, or a string that
+ * does not parse to a JSON object — yields NULL, so the call proceeds with no
+ * arguments exactly as before.
+ *
+ * @return the borrowed arguments object, or NULL when there is none.
+ */
+static JsonObject *
+tool_call_arguments (JsonObject *params, JsonParser **owner)
+{
+  *owner = NULL;
+  if (params == NULL || !json_object_has_member (params, "arguments"))
+    return NULL;
+
+  JsonNode *raw = json_object_get_member (params, "arguments");
+  if (JSON_NODE_HOLDS_OBJECT (raw))
+    return json_node_get_object (raw);
+  if (!JSON_NODE_HOLDS_VALUE (raw))
+    return NULL;
+
+  const char *str = json_node_get_string (raw);
+  if (str == NULL)
+    return NULL; /* a non-string scalar — not a re-encoded object */
+
+  JsonParser *parser = json_parser_new ();
+  if (json_parser_load_from_data (parser, str, -1, NULL))
+    {
+      JsonNode *root = json_parser_get_root (parser);
+      if (root != NULL && JSON_NODE_HOLDS_OBJECT (root))
+        {
+          *owner = parser; /* caller frees; keeps @root (and the object) alive */
+          return json_node_get_object (root);
+        }
+    }
+  g_object_unref (parser);
+  return NULL;
+}
+
 /* ---- Lifecycle methods ---------------------------------------------------- */
 
 /**
@@ -155,7 +203,9 @@ handle_tools_list (MkMcp *self, JsonNode *id)
  * @params: the request params, or NULL.
  *
  * Answers `tools/call`: reads `name` and the optional `arguments`
- * object, then dispatches into the tool table. A handler/tool failure comes
+ * object (tolerating a double-encoded blob where `arguments` arrives as a JSON
+ * string holding the object — see tool_call_arguments()), then dispatches into
+ * the tool table. A handler/tool failure comes
  * back as a normal result with `isError: true`; only an unknown tool
  * name maps to a protocol-level `-32602` invalid-params error.
  *
@@ -171,7 +221,8 @@ handle_tools_call (MkMcp *self, JsonNode *id, JsonObject *params)
     return mk_jsonrpc_error (id, MK_JSONRPC_INVALID_PARAMS,
                              "tools/call requires a string \"name\"");
 
-  JsonObject *arguments = object_member (params, "arguments");
+  g_autoptr (JsonParser) args_owner = NULL;
+  JsonObject *arguments = tool_call_arguments (params, &args_owner);
 
   GError *error = NULL;
   g_autoptr (JsonNode) result =

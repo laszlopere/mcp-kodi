@@ -1,0 +1,113 @@
+#!/bin/sh
+# Functional test for tolerating double-encoded tool-call `arguments`.
+#
+# Some MCP clients send a tool call's `arguments` as a JSON *string* holding the
+# object (e.g. "arguments":"{\"action\":\"get\"}") instead of the object itself.
+# The server re-parses that string and uses the resulting object, so the call
+# behaves exactly as if the object had been sent directly. A string that is not
+# a JSON object (a bare scalar, or unparseable text) is treated as "no
+# arguments" — never a crash, never silently-wrong garbage.
+#
+# Driven through the `instances` config tool because it needs NO live Kodi: it
+# reads/writes the server's own config.json and makes no Kodi call, so the
+# decoded-vs-not contrast is fully deterministic. The test runs against a
+# throwaway XDG_CONFIG_HOME and never touches the user's real config.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq on PATH
+#   - the mcp-kodi binary built
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+# Shared harness: skip gate, find_binary, the jq helpers, and the ok/no/eq/
+# contains assertion framework. See tests/lib.sh. This exercises a config-only
+# tool, so it does NOT call mk_preflight/mk_require_ping — only jq + the binary.
+. "$(dirname "$0")/lib.sh"
+
+command -v jq >/dev/null 2>&1 || skip "jq not found"
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# ---- a private config the test owns ---------------------------------------
+WORK=$(mktemp -d) || skip "cannot mktemp"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/cfg/mcp-kodi"
+cat > "$WORK/cfg/mcp-kodi/config.json" <<'EOF'
+{"version":2,"default":"living","instances":{
+  "living":{"name":"Living Room","host":"127.0.0.1:8080","auth":"k:k","scheme":"http"}}}
+EOF
+
+# ---- talking to the server under test (MCP over stdio) --------------------
+# $1 is spliced verbatim as the `arguments` value, so a caller can pass either a
+# JSON object ({...}) or a JSON string ("{...}") to exercise both encodings. One
+# invocation per call re-reads config from disk, so a `set` then `get` proves
+# persistence. env -i scrubs the environment to our private XDG_CONFIG_HOME.
+inst () { # arguments-value -> tool result object
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"instances\",\"arguments\":$1}}" \
+    | env -i PATH="$PATH" XDG_CONFIG_HOME="$WORK/cfg" "$MCP" 2>/dev/null \
+    | jq -c 'select(.id==2) | .result'
+}
+
+# Encode an object as the JSON string that holds it: {"a":1} -> "{\"a\":1}".
+stringify () { jq -cn --arg s "$1" '$s'; }
+
+echo "stringified-args functional test — binary $MCP"
+
+# ===========================================================================
+# 1. Baseline + negative control. Establish what a decoded call looks like and
+#    prove the contrast is meaningful: object args succeed, no args fail. The
+#    stringified assertions below are only convincing because these differ.
+# ===========================================================================
+echo "-- baseline / control"
+
+b=$(inst '{"action":"get"}')
+eq "object args: get succeeds"           false    "$(res_err "$b")"
+eq "object args: reports the default"     living   "$(g "$(res_body "$b")" '.default')"
+
+b=$(inst '{}')
+eq "no args: get fails (control)"         true     "$(res_err "$b")"
+contains "no-args error names action"     "action" "$(g "$(res_body "$b")" '.error')"
+
+# ===========================================================================
+# 2. The fix: a double-encoded `arguments` string is decoded and behaves
+#    exactly like the object form — same success, same payload.
+# ===========================================================================
+echo "-- stringified arguments are decoded"
+
+b=$(inst "$(stringify '{"action":"get"}')")
+eq "stringified get: succeeds"            false    "$(res_err "$b")"
+eq "stringified get: reports the default"  living   "$(g "$(res_body "$b")" '.default')"
+is_true "stringified get: lists instances" \
+        "$(j "$(res_body "$b")" '.instances | length >= 1')"
+
+# A nested field from the decoded blob reaches the handler and PERSISTS: set a
+# new instance via the stringified form, then read it back via the object form.
+echo "-- nested fields from the decoded blob take effect"
+
+b=$(inst "$(stringify '{"action":"set","key":"spare","host":"10.0.0.9:8080","scheme":"http"}')")
+eq "stringified set: succeeds"           false    "$(res_err "$b")"
+
+b=$(inst '{"action":"get"}')
+is_true "stringified set persisted the new instance" \
+        "$(j "$(res_body "$b")" 'any(.instances[]; .key == "spare")')"
+eq "persisted instance kept its host" "10.0.0.9:8080" \
+   "$(g "$(res_body "$b")" '.instances[] | select(.key=="spare") | .host')"
+
+# ===========================================================================
+# 3. Unsalvageable strings are treated as "no arguments" — handed back to the
+#    handler as absent, never crashing and never passed through as garbage.
+# ===========================================================================
+echo "-- non-object strings fall back to no-args"
+
+b=$(inst "$(stringify '5')")
+eq "stringified bare scalar -> no-args error"  true "$(res_err "$b")"
+contains "scalar-string error names action" "action" "$(g "$(res_body "$b")" '.error')"
+
+b=$(inst '"{not valid json"')
+eq "unparseable arguments string -> no-args error" true "$(res_err "$b")"
+contains "unparseable-string error names action" "action" "$(g "$(res_body "$b")" '.error')"
+
+mk_tally "stringified-args functional test"
