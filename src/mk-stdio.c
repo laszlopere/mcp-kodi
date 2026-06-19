@@ -8,6 +8,7 @@
 
 #include "mk-stdio.h"
 
+#include <string.h>
 #include <unistd.h>
 
 #include <gio/gio.h>
@@ -136,13 +137,42 @@ mk_stdio_write_message (MkStdio *self, JsonNode *message)
 /* ---- Reading -------------------------------------------------------------- */
 
 /**
+ * parse_error_detail:
+ * @message: a JsonParser error message, or NULL.
+ *
+ * Strips json-glib's `<data>:LINE:COL: ` source-location prefix from a parser
+ * error so only the human-readable cause remains. That location is noise to the
+ * model — the framing is one line per message, so a line/column the client
+ * cannot map back to its own buffer only distracts from the actual fault.
+ *
+ * @return a borrowed pointer into @message past the location prefix, the whole
+ *         @message when no such prefix is present, or "" when @message is NULL.
+ */
+static const char *
+parse_error_detail (const char *message)
+{
+  if (message == NULL)
+    return "";
+  /* The location token "<data>:1:94" contains colons but no spaces, so the
+   * first ": " (colon-space) delimits it from the message that follows. */
+  if (g_str_has_prefix (message, "<data>:"))
+    {
+      const char *sep = strstr (message, ": ");
+      if (sep != NULL)
+        return sep + 2;
+    }
+  return message;
+}
+
+/**
  * mk_stdio_process_line:
  * @self: the transport.
  * @line: one input line (without its terminating newline); borrowed.
  *
  * Parses @line as a JSON-RPC message and routes it: a JSON syntax error becomes
- * a `-32700` response (id null); a parsed message goes to the dispatch
- * callback, whose non-NULL response is written back. Blank lines are ignored.
+ * an actionable `-32700` response (id null) that names the cause and tells the
+ * model how to resend; a parsed message goes to the dispatch callback, whose
+ * non-NULL response is written back. Blank lines are ignored.
  */
 static void
 mk_stdio_process_line (MkStdio *self, const char *line)
@@ -155,8 +185,11 @@ mk_stdio_process_line (MkStdio *self, const char *line)
   GError *error = NULL;
   if (!json_parser_load_from_data (parser, line, -1, &error))
     {
-      g_autofree char *detail =
-        g_strdup_printf ("parse error: %s", error->message);
+      g_autofree char *detail = g_strdup_printf (
+        "Invalid JSON-RPC: %s. Send one message as a single line of valid "
+        "JSON — check for trailing commas, unbalanced braces or brackets, or "
+        "missing quotes around keys and string values.",
+        parse_error_detail (error->message));
       g_clear_error (&error);
       g_autoptr (JsonNode) resp =
         mk_jsonrpc_error (NULL, MK_JSONRPC_PARSE_ERROR, detail);

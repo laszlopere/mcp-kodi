@@ -1,0 +1,93 @@
+#!/bin/sh
+# Functional test for the actionable JSON-RPC parse error (-32700).
+#
+# A line that is not valid JSON dies at the transport before any dispatch. The
+# server answers it itself with a JSON-RPC -32700 (id null, as the spec requires
+# when the id cannot be known) whose message names the cause and tells the model
+# how to resend — without leaking json-glib's internal "<data>:LINE:COL" source
+# framing, which the client cannot map back to its own buffer.
+#
+# Transport-level, so it needs NO live Kodi: malformed lines never reach a tool.
+# Each case pipes raw newline-delimited bytes straight to the binary (the typed
+# helpers in lib.sh only ever emit valid JSON, so they cannot exercise this).
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq on PATH
+#   - the mcp-kodi binary built
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+# Shared harness: skip gate, find_binary, and the ok/no/eq/contains assertion
+# framework. See tests/lib.sh. Parsing is upstream of any Kodi call, so this
+# does NOT call mk_preflight/mk_require_ping — only jq + the binary.
+. "$(dirname "$0")/lib.sh"
+
+command -v jq >/dev/null 2>&1 || skip "jq not found"
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# A private, empty config dir so the binary starts without touching the user's
+# real config (these cases make no tool/config call, but stay isolated anyway).
+WORK=$(mktemp -d) || skip "cannot mktemp"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/cfg/mcp-kodi"
+
+# Feed raw lines (one per argument) straight to the server, env-scrubbed, and
+# echo whatever it writes back. Deliberately NOT JSON-built, to send malformed
+# input the typed helpers never could.
+raw () { # line... -> server output (zero or more response lines)
+  printf '%s\n' "$@" | env -i PATH="$PATH" XDG_CONFIG_HOME="$WORK/cfg" \
+                         "$MCP" 2>/dev/null
+}
+
+echo "parse-error functional test — binary $MCP"
+
+# ===========================================================================
+# 1. A malformed line is answered with an actionable -32700, id null, that
+#    keeps the underlying cause but drops the "<data>" location framing.
+# ===========================================================================
+echo "-- malformed line -> actionable -32700"
+
+r=$(raw '{"jsonrpc":"2.0","id":5,"method":"ping","params":{},}')   # trailing comma
+eq       "trailing comma -> -32700"        -32700 "$(g "$r" '.error.code')"
+eq       "parse error id is null"          null   "$(j "$r" '.id')"
+eq       "response is jsonrpc 2.0"          2.0    "$(g "$r" '.jsonrpc')"
+contains "message is framed as JSON-RPC"   "Invalid JSON-RPC"   "$(g "$r" '.error.message')"
+contains "message coaches on resending"    "single line of valid JSON" \
+         "$(g "$r" '.error.message')"
+contains "message lists trailing commas"   "trailing commas"    "$(g "$r" '.error.message')"
+contains "message keeps the cause"         "unexpected character" \
+         "$(g "$r" '.error.message')"
+case "$(g "$r" '.error.message')" in
+  *"<data>"*) no "no <data> location framing leaks" "[$(g "$r" '.error.message')]" ;;
+  *)          ok "no <data> location framing leaks" ;;
+esac
+
+# A different syntax fault (unquoted/garbage) is the same clean -32700.
+r=$(raw '{not json')
+eq       "garbage line -> -32700"          -32700 "$(g "$r" '.error.code')"
+eq       "garbage parse error id is null"  null   "$(j "$r" '.id')"
+case "$(g "$r" '.error.message')" in
+  *"<data>"*) no "garbage: no <data> framing leaks" "[$(g "$r" '.error.message')]" ;;
+  *)          ok "garbage: no <data> framing leaks" ;;
+esac
+
+# ===========================================================================
+# 2. The parse path is narrow: blank lines are skipped silently and a
+#    well-formed message on the same stream is still dispatched normally.
+# ===========================================================================
+echo "-- valid input is unaffected"
+
+# A blank line yields no output; the following valid ping is the only response.
+r=$(raw '' '{"jsonrpc":"2.0","id":6,"method":"ping","params":{}}')
+eq "blank line is ignored (one response only)" 1 "$(printf '%s\n' "$r" | grep -c .)"
+eq "the ping after a blank line is answered"   6 "$(g "$r" '.id')"
+is_true "ping returns a result, not an error"  "$(j "$r" 'has("result")')"
+
+# A valid line on its own still works (no regression in the happy path).
+r=$(raw '{"jsonrpc":"2.0","id":7,"method":"ping","params":{}}')
+eq "valid ping id is echoed"  7 "$(g "$r" '.id')"
+is_true "valid ping has a result" "$(j "$r" 'has("result")')"
+
+mk_tally "parse-error functional test"
