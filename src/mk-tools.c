@@ -1125,6 +1125,49 @@ handler_button (MkTools *self, const MkToolDef *def, JsonObject *args,
 }
 
 /**
+ * wait_players:
+ * @self: the tool table.
+ * @instance: the target instance name, or NULL for the default.
+ * @want_active: TRUE to wait until a player is active, FALSE until none is.
+ *
+ * Polls `Player.GetActivePlayers` until Kodi reports the wanted state, for at
+ * most MK_PLAYER_WAIT_US. Kodi starts and tears down players asynchronously and
+ * how long that takes varies widely: a file opening from a cold network share
+ * (typically the first play after Kodi starts) can take seconds where a warm one
+ * takes a fraction of one. A fixed settle delay therefore lets a snapshot read
+ * the pre-action state — "playing" right after stop, or no player right after an
+ * open that is merely slow, which open_file() would misreport as "never
+ * started". Times out quietly: the caller's snapshot then reports whatever Kodi
+ * says, which is the honest answer. Called from handler_stop() and open_file().
+ */
+#define MK_PLAYER_WAIT_US (5 * G_USEC_PER_SEC) /* upper bound on start/teardown */
+#define MK_PLAYER_POLL_US (100 * 1000)         /* poll interval while waiting */
+
+static void
+wait_players (MkTools *self, const char *instance, gboolean want_active)
+{
+  gint64 deadline = g_get_monotonic_time () + MK_PLAYER_WAIT_US;
+
+  for (;;)
+    {
+      g_autoptr (GError) ignored = NULL;
+      g_autoptr (JsonNode) active = mk_kodi_call (self->kodi, instance,
+                                                  "Player.GetActivePlayers",
+                                                  NULL, &ignored);
+      if (active == NULL)
+        return; /* the snapshot that follows reports the failure */
+      guint n = JSON_NODE_HOLDS_ARRAY (active)
+                  ? json_array_get_length (json_node_get_array (active))
+                  : 0;
+      if ((n > 0) == want_active)
+        return;
+      if (g_get_monotonic_time () >= deadline)
+        return;
+      g_usleep (MK_PLAYER_POLL_US);
+    }
+}
+
+/**
  * handler_stop:
  * @self: the tool table.
  * @def: this Button's table row; @def->action is "stop".
@@ -1142,8 +1185,10 @@ handler_button (MkTools *self, const MkToolDef *def, JsonObject *args,
  *      afterwards there is no active player left to ask. No active player, or
  *      non-playlist playback (`playlistid < 0`, live TV / streams): nothing to
  *      clear, the keypress alone suffices.
- *   2. `Input.ExecuteAction { "action": "stop" }`, then the settle delay
- *      (handler_button()).
+ *   2. `Input.ExecuteAction { "action": "stop" }`, then wait until Kodi
+ *      reports no active player (wait_players()) rather than the fixed
+ *      handler_button() settle, so the snapshot never reads a player that is
+ *      still tearing down.
  *   3. `Playlist.Clear { playlistid }` on the playlist from step 1.
  *
  * Other playlists are left alone — clearing *everything* is `dropplaylists`'
@@ -1197,7 +1242,10 @@ handler_stop (MkTools *self, const MkToolDef *def, JsonObject *args,
                                              error);
   if (acted == NULL)
     return NULL;
-  g_usleep (MK_BUTTON_SETTLE_US);
+  if (players != NULL && json_array_get_length (players) > 0)
+    wait_players (self, instance, FALSE);
+  else
+    g_usleep (MK_BUTTON_SETTLE_US);
 
   /* Step 3: clear the queue the player was consuming, so stop leaves no stale
    * items behind. */
@@ -3655,20 +3703,21 @@ schema_playfile (MkTools *self)
  * @error: return location for a GError, or NULL.
  *
  * Shared core of opening one file by path: the three missing-media layers and
- * the post-settle "did it actually start" check that both `playfile` and
+ * the post-open "did it actually start" check that both `playfile` and
  * `playfile_with_audio_and_subtitle` need.
  *
  *   1. A verifiably missing file (check_file_on_disk()) is refused *before* the
  *      open — a doomed open would stop whatever is playing now.
  *   2. A path Kodi itself refuses ("Invalid params" for an unknown missing
  *      path) is reshaped to name the file and the likely cause.
- *   3. "OK" with no active player after the settle means the open silently
- *      died (the in-library stale-entry case) — reported as a failure, not a
- *      "stopped" success.
+ *   3. "OK" with still no active player after the start wait means the open
+ *      silently died (the in-library stale-entry case) — reported as a
+ *      failure, not a "stopped" success.
  *
  * `Player.Open` replies "OK" the moment the open is queued, before the new
- * player has started, so a brief settle delay before snapshotting makes the
- * reported state reflect the file that is now playing.
+ * player has started, so a brief settle delay, extended by a bounded wait for
+ * an active player (wait_players()) when the start is slow, makes the reported
+ * state reflect the file that is now playing.
  *
  * @return the post-open player-state snapshot (free with json_node_unref()), or
  *         NULL with @error set.
@@ -3720,12 +3769,15 @@ open_file (MkTools *self, const char *instance, const char *file,
       return NULL;
     }
 
+  /* The settle covers the common case; a slow start (a cold network share)
+   * gets the bounded wait so it is not misreported as never started below. */
   g_usleep (MK_PLAYFILE_SETTLE_US);
+  wait_players (self, instance, TRUE);
   JsonNode *state = player_state (self, instance, error);
   if (state == NULL)
     return NULL;
 
-  /* Layer 3: "OK" with no active player after the settle means the open
+  /* Layer 3: "OK" with no active player after the wait means the open
    * silently died — report the failure instead of a "stopped" success. */
   if (g_strcmp0 (json_object_get_string_member_with_default (
                    json_node_get_object (state), "state", ""),
