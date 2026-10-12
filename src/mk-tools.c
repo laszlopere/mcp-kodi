@@ -3825,7 +3825,7 @@ open_file (MkTools *self, const char *instance, const char *file,
  *   2. A path Kodi itself refuses ("Invalid params" for an unknown missing
  *      path) is reshaped into an error naming the file and the likely cause,
  *      instead of surfacing Kodi's cryptic refusal verbatim.
- *   3. If Kodi answered "OK" but the post-settle snapshot shows no active
+ *   3. If Kodi answered "OK" but the post-wait snapshot shows no active
  *      player, the open silently died (the in-library missing-file case) —
  *      that snapshot is discarded and the failure reported.
  *
@@ -3852,7 +3852,7 @@ handler_playfile (MkTools *self, const MkToolDef *def, JsonObject *args,
       return NULL;
     }
 
-  /* The three missing-media layers and the post-settle start check, shared
+  /* The three missing-media layers and the post-wait start check, shared
    * with playfile_with_audio_and_subtitle. */
   JsonNode *state = open_file (self, instance, file, "playfile", error);
   if (state == NULL)
@@ -4884,7 +4884,7 @@ schema_playfile_with_audio_and_subtitle (MkTools *self)
  *      (parse_track_args(); at least one is required — otherwise plain
  *      `playfile` is the tool).
  *   2. open_file() — the shared opener with its three missing-media layers and
- *      post-settle "did it actually start" check.
+ *      post-wait "did it actually start" check.
  *   3. Resolve the now-started player. Audio tracks and subtitles are a video
  *      concept, so a non-video open (an audio file given track args) is a clean
  *      tool error — playback has already begun, which the message notes.
@@ -6449,7 +6449,7 @@ static const MkToolDef mk_tool_defs[] = {
    * not. A file missing from disk is a proper tool error, never a false
    * success: it is refused before the open when verifiable on disk, and an
    * open that Kodi accepted but that silently never started (a stale library
-   * entry) is detected from the post-settle snapshot.
+   * entry) is detected from the post-wait snapshot.
    *
    * Call:  Files.GetDirectory (existence pre-check) → Player.Open { "item":
    *        { "file": <file> } }, then player_state() to report what is now
