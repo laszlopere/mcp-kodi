@@ -48,20 +48,15 @@ queue        () { mcp_tool queue        "$1"; }
 playfile     () { mk_playfile           "$1"; }  # transient-tolerant (see lib.sh)
 searchmedia  () { mcp_tool searchmedia  "$1"; }
 
-# Poll until the active player's nowplaying file is $1 (or timeout) — the skip
-# keypress settles asynchronously, so we wait on the observable move rather than
-# assume a fixed delay.
-wait_for_file () { # wanted-file
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    pid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
-    if [ -n "$pid" ]; then
-      cur=$(kodi_rpc Player.GetItem "{\"playerid\":$pid,\"properties\":[\"file\"]}" \
-             | jq -r '.result.item.file // empty')
-      [ "$cur" = "$1" ] && return 0
-    fi
-    sleep 0.3
-  done
-  return 1
+# True when the active player's file is $1. The skip keypress settles
+# asynchronously, so callers wait on it with mk_wait_for (see lib.sh) rather
+# than assume a fixed delay.
+on_file () { # wanted-file
+  pid=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[0].playerid // empty')
+  [ -n "$pid" ] || return 1
+  cur=$(kodi_rpc Player.GetItem "{\"playerid\":$pid,\"properties\":[\"file\"]}" \
+         | jq -r '.result.item.file // empty')
+  [ "$cur" = "$1" ]
 }
 
 echo "skip functional test — Kodi at $KODI_SCHEME://$KODI_HOST, binary $MCP"
@@ -124,7 +119,7 @@ is_true "the queue holds at least two items" \
 # skipnext -> the second item.
 b=$(skipnext '{}')
 eq "skipnext is not an error" false "$(res_err "$b")"
-if wait_for_file "$file2"; then ok "skipnext advanced to the second item (Kodi)"; else
+if mk_wait_for on_file "$file2"; then ok "skipnext advanced to the second item (Kodi)"; else
   no "skipnext advanced to the second item (Kodi)" "still on $(kodi_rpc Player.GetItem "{\"playerid\":$playerid,\"properties\":[\"file\"]}" | jq -r '.result.item.file')"; fi
 eq "skipnext snapshot names the second file" "$file2" \
    "$(g "$(res_body "$(mcp_tool nowplaying '{}')")" '.nowplaying.file')"
@@ -132,7 +127,7 @@ eq "skipnext snapshot names the second file" "$file2" \
 # skipprevious -> back to the first item.
 b=$(skipprevious '{}')
 eq "skipprevious is not an error" false "$(res_err "$b")"
-if wait_for_file "$file1"; then ok "skipprevious returned to the first item (Kodi)"; else
+if mk_wait_for on_file "$file1"; then ok "skipprevious returned to the first item (Kodi)"; else
   no "skipprevious returned to the first item (Kodi)" "now on $(kodi_rpc Player.GetItem "{\"playerid\":$playerid,\"properties\":[\"file\"]}" | jq -r '.result.item.file')"; fi
 eq "skipprevious snapshot names the first file" "$file1" \
    "$(g "$(res_body "$(mcp_tool nowplaying '{}')")" '.nowplaying.file')"

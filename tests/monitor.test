@@ -70,12 +70,11 @@ for cand in $(printf '%s\n' "$candidates" | tr ' ' ':'); do
   kind=${cand%%:*}
   id=${cand##*:}
   kodi_rpc Player.Open "{\"item\":{\"$kind\":$id}}" >/dev/null 2>&1
-  for i in 1 2 3 4; do
-    sleep 0.5
-    active=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result | length')
-    [ "${active:-0}" -ge 1 ] && break
-  done
-  if [ "${active:-0}" -ge 1 ]; then played_id=$id; played_kind=$kind; break; fi
+  # Short bound: a candidate may be a deliberately missing file that never
+  # starts, and the loop should move on to the next one quickly.
+  if (MK_WAIT_S=4; mk_wait_for mk_any_player); then
+    played_id=$id; played_kind=$kind; break
+  fi
 done
 
 if [ -z "$played_id" ]; then

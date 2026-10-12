@@ -101,27 +101,46 @@ mk_state_dir () {
   trap 'rm -rf "$STATE_DIR"' EXIT
 }
 
+# ---- bounded polling ------------------------------------------------------
+# Kodi applies player changes asynchronously, and how long one takes varies a
+# lot: opening a file from a cold network share right after Kodi starts can
+# take several seconds where a warm one takes a fraction of one. So tests wait
+# on the observable change rather than assume a fixed delay, and give it a
+# generous upper bound — a pass returns as soon as the condition holds, so only
+# a real failure pays the full wait. Override the bound via MK_WAIT_S.
+MK_WAIT_S=${MK_WAIT_S:-10}
+
+mk_wait_for () { # command [args...]  ->  0 once it succeeds, 1 on timeout
+  _deadline=$(( $(date +%s) + MK_WAIT_S ))
+  while :; do
+    "$@" && return 0
+    [ "$(date +%s)" -lt "$_deadline" ] || return 1
+    sleep 0.3
+  done
+}
+
+# Number of active players on the target instance ("" if Kodi did not answer).
+mk_active_players () {
+  kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result | length' 2>/dev/null
+}
+mk_no_player  () { [ "$(mk_active_players)" = 0 ]; }
+mk_any_player () { _n=$(mk_active_players); [ "${_n:-0}" -ge 1 ]; }
+
 # ---- player idle gate -----------------------------------------------------
 # Stop every active player on the target instance and wait until Kodi reports
 # none, so a playback test starts from a clean idle state regardless of what a
-# preceding test left running. Bounded poll (~3s); returns 0 once idle, 1 on
-# timeout. Requires kodi_rpc (a live Kodi).
+# preceding test left running. Bounded poll (MK_WAIT_S); returns 0 once idle,
+# 1 on timeout. Requires kodi_rpc (a live Kodi).
 mk_wait_idle () {
   for id in $(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result[].playerid' 2>/dev/null); do
     kodi_rpc Player.Stop "{\"playerid\":$id}" >/dev/null 2>&1
   done
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    n=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result | length' 2>/dev/null)
-    if [ "${n:-1}" -eq 0 ]; then
-      # Kodi reports "no active players" a beat before a just-stopped player
-      # (especially a video one) has fully torn down; a Player.Open issued in
-      # that window can transiently fail. A short settle closes the race.
-      sleep 0.5
-      return 0
-    fi
-    sleep 0.3
-  done
-  return 1
+  mk_wait_for mk_no_player || return 1
+  # Kodi reports "no active players" a beat before a just-stopped player
+  # (especially a video one) has fully torn down; a Player.Open issued in that
+  # window can transiently fail. A short settle closes the race.
+  sleep 0.5
+  return 0
 }
 
 # ---- starting real playback (transient-tolerant) --------------------------

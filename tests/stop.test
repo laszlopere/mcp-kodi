@@ -117,8 +117,8 @@ is_true "the queue grew past one item before stop" \
 b=$(stop_t '{}')
 eq "stop is not an error"        false   "$(res_err "$b")"
 eq "stop reports the stopped state" stopped "$(g "$(res_body "$b")" '.state')"
-eq "Kodi has no active player after stop" 0 \
-   "$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result | length')"
+if mk_wait_for mk_no_player; then ok "Kodi has no active player after stop"; else
+  no "Kodi has no active player after stop" "still $(mk_active_players) active"; fi
 eq "stop cleared the queue it was consuming" 0 \
    "$(kodi_rpc Playlist.GetItems "{\"playlistid\":$plid}" | jq -r '.result.items // [] | length')"
 
