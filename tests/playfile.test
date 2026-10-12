@@ -168,6 +168,74 @@ active=$(kodi_rpc Player.GetActivePlayers '{}' | jq -r '.result | length')
 is_true "Kodi confirms a player is active"     "$([ "${active:-0}" -ge 1 ] && echo true || echo false)"
 
 # ===========================================================================
+# 3b. fullscreenaudio: audio does not auto-fullscreen on Player.Open, so with
+#     the flag playfile follows a successful *audio* open with
+#     GUI.ActivateWindow("visualisation"). Observable via GUI.GetProperties
+#     currentwindow: 12006 is "Audio visualisation", 12005 "Fullscreen video".
+#     Each case starts from an idle player on the Home window.
+# ===========================================================================
+WIN_HOME=10000 WIN_VIS=12006 WIN_FSVIDEO=12005
+cur_window () {
+  kodi_rpc GUI.GetProperties '{"properties":["currentwindow"]}' \
+    | jq -r '.result.currentwindow.id // empty'
+}
+on_window () { [ "$(cur_window)" = "$1" ]; }
+from_home () {
+  mk_wait_idle
+  kodi_rpc GUI.ActivateWindow '{"window":"home"}' >/dev/null 2>&1
+  mk_wait_for on_window "$WIN_HOME"
+}
+
+# An audio leaf, whatever `kind` section 3 used: drill the first artist.
+song=""
+artist=$(kodi_rpc AudioLibrary.GetArtists '{"limits":{"start":0,"end":1}}' \
+          | jq -r '.result.artists[0].artist // empty')
+if [ -n "$artist" ]; then
+  b=$(res_body "$(searchmedia "$(jargs --arg a "$artist" '{type:"music",artist:$a,limit:1}')")")
+  [ "$(j "$b" '.returned >= 1')" = true ] && song=$(g "$b" '.rows[0].file')
+fi
+
+if [ -z "$song" ]; then
+  echo "   (no song in library — fullscreenaudio assertions skipped)"
+else
+  echo "-- fullscreenaudio"
+  echo "   (song: $song)"
+
+  # Without the flag, an audio open leaves the caller's window alone. A
+  # negative can only be sampled, not polled: give Kodi the time a switch
+  # would take, then check it did not happen.
+  from_home
+  b=$(mk_playfile "$(jargs --arg f "$song" '{file:$f}')")
+  eq "audio playfile without the flag is not an error" false "$(res_err "$b")"
+  sleep 1.5
+  eq "without the flag the window stays Home" "$WIN_HOME" "$(cur_window)"
+
+  # With the flag, the visualisation window comes forward.
+  from_home
+  b=$(mk_playfile "$(jargs --arg f "$song" '{file:$f,fullscreenaudio:true}')")
+  eq "audio playfile with fullscreenaudio is not an error" false "$(res_err "$b")"
+  eq "the snapshot reports the audio player" audio "$(g "$(res_body "$b")" '.type')"
+  if mk_wait_for on_window "$WIN_VIS"; then ok "fullscreenaudio brings up the visualisation"
+  else no "fullscreenaudio brings up the visualisation" "window is $(cur_window)"; fi
+
+  # On video the flag is a no-op: video goes fullscreen by itself, and the
+  # visualisation must not be layered over it.
+  if [ "$kind" = movie ]; then
+    from_home
+    b=$(mk_playfile "$(jargs --arg f "$file" '{file:$f,fullscreenaudio:true}')")
+    eq "video playfile with fullscreenaudio is not an error" false "$(res_err "$b")"
+    if mk_wait_for on_window "$WIN_FSVIDEO"; then ok "video with the flag stays on fullscreen video"
+    else no "video with the flag stays on fullscreen video" "window is $(cur_window)"; fi
+    sleep 1.5   # a late visualisation activation would land in this window
+    eq "no visualisation is layered over the video" "$WIN_FSVIDEO" "$(cur_window)"
+  fi
+
+  # Leave the GUI where the user would expect it.
+  mk_wait_idle
+  kodi_rpc GUI.ActivateWindow '{"window":"home"}' >/dev/null 2>&1
+fi
+
+# ===========================================================================
 # 4. Cleanup — stop our playback. (We do not resume the prior item; restoring
 #    exact position is out of scope. Leaving the player stopped is the safe
 #    neutral state.)

@@ -1,0 +1,158 @@
+#!/bin/sh
+# Functional test for how Kodi communication failures surface in tool results.
+#
+# A tool whose Kodi call fails at the *communication* level comes back as a
+# normal tools/call result with isError:true and a body of
+#   { "error": <detail>, "category": <token>, "hint": <remedy> }
+# (kodi_comms_hint() + error_text()), so the AI on the other end can walk the
+# user through fixing their setup. The categories exercised here:
+#   transport  nothing listens at the configured host:port
+#   http       something answered, with a non-2xx status
+#   protocol   a 2xx reply that is not a JSON-RPC response (an HTML page, a JSON
+#              array, an object with neither "result" nor "error")
+# and the control case: a well-formed Kodi JSON-RPC *error* reply means the
+# wiring works and Kodi refused the request, so it carries no category/hint.
+#
+# Needs NO real Kodi. The target is set via KODI_HOST (an ad-hoc instance that
+# supersedes any config) and points either at a closed port or at a throwaway
+# local HTTP server (python3) whose reply the test switches per case through a
+# mode file.
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq and python3 on PATH
+#   - the mcp-kodi binary built
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+# Shared harness: skip gate, find_binary, mcp_tool, the jq helpers, and the
+# ok/no/eq/contains assertion framework. See tests/lib.sh. No mk_preflight:
+# the whole point is that no Kodi answers.
+. "$(dirname "$0")/lib.sh"
+
+command -v jq      >/dev/null 2>&1 || skip "jq not found"
+command -v python3 >/dev/null 2>&1 || skip "python3 not found"
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# Private config/state dirs so neither the user's config nor history is read or
+# written; the fake server is killed on exit.
+WORK=$(mktemp -d) || skip "cannot mktemp"
+SRV_PID=""
+trap '[ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/cfg/mcp-kodi"
+export XDG_CONFIG_HOME="$WORK/cfg" XDG_STATE_HOME="$WORK/state"
+export KODI_SCHEME=http
+unset KODI_AUTH
+
+# ---- the fake "Kodi" -------------------------------------------------------
+# Binds an ephemeral port (written to $WORK/port) and answers every request
+# according to the mode named in $WORK/mode, read per request.
+cat > "$WORK/fake.py" <<'EOF'
+import http.server, sys, os
+work = sys.argv[1]
+REPLIES = {
+    "html":     (200, "text/html", "<html><body>router login</body></html>"),
+    "array":    (200, "application/json", "[1,2,3]"),
+    "noresult": (200, "application/json", '{"jsonrpc":"2.0","id":1}'),
+    "http404":  (404, "text/plain", "not here"),
+    "http401":  (401, "text/plain", "auth required"),
+    "rpcerror": (200, "application/json",
+                 '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found."}}'),
+}
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        mode = open(os.path.join(work, "mode")).read().strip()
+        status, ctype, body = REPLIES[mode]
+        data = body.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+    def log_message(self, *a):
+        pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+with open(os.path.join(work, "port.tmp"), "w") as f:
+    f.write(str(srv.server_address[1]))
+os.rename(os.path.join(work, "port.tmp"), os.path.join(work, "port"))
+srv.serve_forever()
+EOF
+
+echo html > "$WORK/mode"
+python3 "$WORK/fake.py" "$WORK" &
+SRV_PID=$!
+port_ready () { [ -s "$WORK/port" ]; }
+mk_wait_for port_ready || skip "fake HTTP server did not start"
+FAKE="127.0.0.1:$(cat "$WORK/port")"
+
+# Call `nowplaying` (a read-only tool whose first act is a Kodi call) against
+# HOST; echo the tool result object.
+call_at () { # host -> tool result object
+  KODI_HOST=$1 mcp_tool nowplaying '{}'
+}
+# One comms-failure case: the call is a tool error with CATEGORY and a hint.
+expect_category () { # label host category
+  _b=$(call_at "$2")
+  eq      "$1 -> tool error"          true "$(res_err "$_b")"
+  eq      "$1 -> category $3"         "$3" "$(g "$(res_body "$_b")" '.category')"
+  is_true "$1 -> carries a hint"      "$(j "$(res_body "$_b")" '(.hint // "") | length > 0')"
+  is_true "$1 -> carries the detail"  "$(j "$(res_body "$_b")" '(.error // "") | length > 0')"
+  LAST_BODY=$(res_body "$_b")
+}
+
+echo "kodi-errors functional test — binary $MCP, fake Kodi at $FAKE"
+
+# ===========================================================================
+# 1. transport: nothing listens. Port 1 is privileged and unused on any sane
+#    test box, so the connection is refused at once.
+# ===========================================================================
+echo "-- transport"
+expect_category "closed port" "127.0.0.1:1" transport
+contains "transport hint says Kodi could not be reached" "Could not reach Kodi" \
+         "$(g "$LAST_BODY" '.hint')"
+contains "transport detail names the URL" "127.0.0.1:1/jsonrpc" \
+         "$(g "$LAST_BODY" '.error')"
+
+# ===========================================================================
+# 2. http: a non-2xx status from whatever answers.
+# ===========================================================================
+echo "-- http"
+echo http404 > "$WORK/mode"
+expect_category "HTTP 404" "$FAKE" http
+contains "http detail carries the status" "404" "$(g "$LAST_BODY" '.error')"
+echo http401 > "$WORK/mode"
+expect_category "HTTP 401" "$FAKE" http
+contains "http detail carries the status" "401" "$(g "$LAST_BODY" '.error')"
+contains "http hint covers credentials"  "username/password" "$(g "$LAST_BODY" '.hint')"
+
+# ===========================================================================
+# 3. protocol: a 2xx reply that is not a JSON-RPC response.
+# ===========================================================================
+echo "-- protocol"
+echo html > "$WORK/mode"
+expect_category "HTML page" "$FAKE" protocol
+contains "protocol detail says invalid JSON" "invalid JSON" "$(g "$LAST_BODY" '.error')"
+contains "protocol hint suspects something else answers" "not a valid Kodi JSON-RPC reply" \
+         "$(g "$LAST_BODY" '.hint')"
+echo array > "$WORK/mode"
+expect_category "JSON array" "$FAKE" protocol
+contains "array detail says not an object" "not a JSON object" "$(g "$LAST_BODY" '.error')"
+echo noresult > "$WORK/mode"
+expect_category "object without result/error" "$FAKE" protocol
+contains "no-result detail names both members" '"result"' "$(g "$LAST_BODY" '.error')"
+
+# ===========================================================================
+# 4. Control: a well-formed Kodi error reply is not a communication failure —
+#    a tool error, but with no category and no setup hint.
+# ===========================================================================
+echo "-- Kodi RPC error is not a comms failure"
+echo rpcerror > "$WORK/mode"
+b=$(call_at "$FAKE")
+eq       "rpc error -> tool error"      true "$(res_err "$b")"
+is_true  "rpc error carries no category" "$(j "$(res_body "$b")" 'has("category") | not')"
+is_true  "rpc error carries no hint"     "$(j "$(res_body "$b")" 'has("hint") | not')"
+contains "rpc error relays Kodi's message" "Method not found" "$(g "$(res_body "$b")" '.error')"
+
+mk_tally "kodi-errors functional test"

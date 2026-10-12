@@ -41,7 +41,7 @@ FUNC_TESTS = searchmedia.test contributors.test playfile.test queue.test \
         set_audio_and_subtitle.test playfile_with_audio_and_subtitle.test \
         mute.test volume.test instances.test nowplaying.test stop.test \
         play_pause.test skip.test stringified_args.test arg_validation.test \
-        parse_error.test
+        parse_error.test protocol.test kodi_errors.test
 
 TESTS = $(UNIT_TESTS) $(FUNC_TESTS)
 

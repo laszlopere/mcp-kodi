@@ -1,0 +1,126 @@
+#!/bin/sh
+# Functional test for the MCP JSON-RPC envelope handling (mk_mcp_dispatch).
+#
+# Everything here is decided before any tool runs, so it needs NO live Kodi:
+#   - a message that is not a JSON object is -32600, id null;
+#   - a request with a missing or non-string "method" is -32600;
+#   - an unknown method is -32601, naming the method;
+#   - a notification (no "id") never gets a reply, malformed or not — not even
+#     a tools/call one, which must not be dispatched at all;
+#   - tools/call without a string "name" is -32602, and an unknown tool name is
+#     -32602 naming the tool (a protocol error, unlike a failing tool, which is
+#     a normal result with isError:true);
+#   - the request id is echoed verbatim whatever its JSON type.
+# Malformed JSON itself (-32700) is parse_error.test's job.
+#
+# Each case pipes raw newline-delimited lines straight to the binary (the typed
+# helpers in lib.sh only ever emit well-formed tools/call requests).
+#
+# Preconditions (else the test SKIPs, automake exit 77):
+#   - jq on PATH
+#   - the mcp-kodi binary built
+#
+# Exit: 0 all assertions passed · 1 a failure · 77 skipped.
+
+set -u
+
+# Shared harness: skip gate, find_binary, and the ok/no/eq/contains assertion
+# framework. See tests/lib.sh. No mk_preflight/mk_require_ping: no Kodi needed.
+. "$(dirname "$0")/lib.sh"
+
+command -v jq >/dev/null 2>&1 || skip "jq not found"
+MCP=$(find_binary) || skip "mcp-kodi binary not built"
+
+# Private, empty config and state dirs: the binary starts with no instances and
+# never touches the user's real config or history.
+WORK=$(mktemp -d) || skip "cannot mktemp"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/cfg/mcp-kodi"
+
+# Feed raw lines (one per argument) to the server, env-scrubbed, and echo
+# whatever it writes back on stdout (zero or more response lines).
+raw () { # line... -> server output
+  printf '%s\n' "$@" | env -i PATH="$PATH" XDG_CONFIG_HOME="$WORK/cfg" \
+                         XDG_STATE_HOME="$WORK/state" "$MCP" 2>/dev/null
+}
+lines () { printf '%s' "$1" | grep -c .; } # response -> number of reply lines
+
+echo "protocol functional test — binary $MCP"
+
+# ===========================================================================
+# 1. Envelope shape: only a JSON object is a request.
+# ===========================================================================
+echo "-- non-object messages -> -32600, id null"
+for msg in '[1,2]' '42' '"str"' 'null'; do
+  r=$(raw "$msg")
+  eq "$msg -> -32600"       -32600 "$(g "$r" '.error.code')"
+  eq "$msg -> id is null"   null   "$(j "$r" '.id')"
+done
+contains "non-object error explains the rule" "must be a JSON object" \
+         "$(g "$(raw '[1,2]')" '.error.message')"
+
+# ===========================================================================
+# 2. Requests (they carry an "id") with a bad or unknown method.
+# ===========================================================================
+echo "-- bad / unknown method"
+r=$(raw '{"jsonrpc":"2.0","id":2}')
+eq       "missing method -> -32600"          -32600 "$(g "$r" '.error.code')"
+eq       "missing method echoes the id"      2      "$(g "$r" '.id')"
+contains "missing method error names it"     '"method"' "$(g "$r" '.error.message')"
+
+r=$(raw '{"jsonrpc":"2.0","id":3,"method":42}')
+eq       "non-string method -> -32600"       -32600 "$(g "$r" '.error.code')"
+
+r=$(raw '{"jsonrpc":"2.0","id":1,"method":"bogus/method"}')
+eq       "unknown method -> -32601"          -32601 "$(g "$r" '.error.code')"
+eq       "unknown method echoes the id"      1      "$(g "$r" '.id')"
+contains "unknown method error names it"     "bogus/method" "$(g "$r" '.error.message')"
+is_true  "an error reply carries no result"  "$(j "$r" 'has("result") | not')"
+
+# ===========================================================================
+# 3. Notifications (no "id") never get a reply — well-formed, malformed, or a
+#    tools/call that must not run. A request after them is still answered.
+# ===========================================================================
+echo "-- notifications are never answered"
+eq "malformed notification -> no reply" 0 \
+   "$(lines "$(raw '{"jsonrpc":"2.0","params":{}}')")"
+eq "notifications/initialized -> no reply" 0 \
+   "$(lines "$(raw '{"jsonrpc":"2.0","method":"notifications/initialized"}')")"
+eq "tools/call as a notification -> no reply" 0 \
+   "$(lines "$(raw '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"stop"}}')")"
+r=$(raw '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+        '{"jsonrpc":"2.0","params":{}}' \
+        '{"jsonrpc":"2.0","id":10,"method":"ping"}')
+eq "only the request after notifications is answered" 1 "$(lines "$r")"
+eq "that answer is the ping's"                        10 "$(g "$r" '.id')"
+
+# ===========================================================================
+# 4. tools/call: the tool name is validated at the protocol level.
+# ===========================================================================
+echo "-- tools/call name validation -> -32602"
+for params in 'no params' '{"arguments":{}}' '{"name":7}' '"x"'; do
+  if [ "$params" = 'no params' ]; then
+    r=$(raw '{"jsonrpc":"2.0","id":6,"method":"tools/call"}')
+  else
+    r=$(raw "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":$params}")
+  fi
+  eq       "params $params -> -32602"            -32602 "$(g "$r" '.error.code')"
+  contains "params $params -> asks for a name"   '"name"' "$(g "$r" '.error.message')"
+done
+
+r=$(raw '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"no_such_tool","arguments":{}}}')
+eq       "unknown tool -> -32602"                -32602 "$(g "$r" '.error.code')"
+contains "unknown tool error names the tool"     "no_such_tool" "$(g "$r" '.error.message')"
+
+# ===========================================================================
+# 5. The id is echoed verbatim, whatever its JSON type.
+# ===========================================================================
+echo "-- id echo"
+r=$(raw '{"jsonrpc":"2.0","id":"abc","method":"ping"}')
+eq      "string id is echoed"        '"abc"' "$(j "$r" '.id')"
+is_true "string-id ping has a result" "$(j "$r" 'has("result")')"
+r=$(raw '{"jsonrpc":"2.0","id":null,"method":"ping"}')
+eq      "null id is a request, echoed" null "$(j "$r" '.id')"
+is_true "null-id ping has a result"    "$(j "$r" 'has("result")')"
+
+mk_tally "protocol functional test"
