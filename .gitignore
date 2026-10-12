@@ -28,6 +28,8 @@ Makefile.in
 /tests/*.log
 /tests/*.trs
 /tests/test-suite.log
+/tests/unit/*.log
+/tests/unit/*.trs
 
 # C unit-test build output (tests/unit/run-unit-tests.sh)
 /tests/unit/build/
@@ -44,3 +46,13 @@ Makefile.in
 *.swp
 /compile_commands.json
 /.cache/
+
+# Unit-test binaries (automake check_PROGRAMS)
+/tests/unit/test-stdio
+/tests/unit/test-config
+/tests/unit/test-config-io
+/tests/unit/test-history
+/tests/unit/test-tools
+/tests/unit/test-tools-handlers
+/tests/unit/build/
+.dirstamp
