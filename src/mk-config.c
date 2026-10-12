@@ -303,6 +303,27 @@ instance_from_object (JsonObject *o)
 }
 
 /**
+ * object_member:
+ * @obj: the object to read from.
+ * @name: the member name.
+ *
+ * Returns @obj's member @name when it is a JSON object, else NULL. Unlike
+ * json_object_get_object_member(), a member of another type (`"instances": 5`)
+ * is a plain NULL rather than a json-glib CRITICAL, so load_file() can report a
+ * hand-edited config of the wrong shape as an ordinary INVALID error. Called
+ * from load_file().
+ *
+ * @return the member object (owned by @obj), or NULL.
+ */
+static JsonObject *
+object_member (JsonObject *obj, const char *name)
+{
+  JsonNode *n = json_object_get_member (obj, name);
+  return n != NULL && JSON_NODE_HOLDS_OBJECT (n) ? json_node_get_object (n)
+                                                  : NULL;
+}
+
+/**
  * load_file:
  * @self: the config to populate.
  * @path: path of the JSON file to read.
@@ -346,7 +367,7 @@ load_file (MkConfig *self, const char *path, GError **error)
         mk_config_set_default (self,
                                json_object_get_string_member_with_default (obj, "default", NULL));
 
-      JsonObject *insts = json_object_get_object_member (obj, "instances");
+      JsonObject *insts = object_member (obj, "instances");
       if (insts == NULL)
         {
           g_set_error (error, MK_CONFIG_ERROR, MK_CONFIG_ERROR_INVALID,
@@ -358,7 +379,7 @@ load_file (MkConfig *self, const char *path, GError **error)
       for (GList *l = members; l != NULL; l = l->next)
         {
           const char *name = l->data;
-          JsonObject *io = json_object_get_object_member (insts, name);
+          JsonObject *io = object_member (insts, name);
           if (io == NULL)
             {
               g_set_error (error, MK_CONFIG_ERROR, MK_CONFIG_ERROR_INVALID,
