@@ -21,10 +21,11 @@ unit_test_config_io_SOURCES = unit/test-config-io.c ../src/mk-config.c
 unit_test_history_SOURCES = unit/test-history.c ../src/mk-history.c
 unit_test_tools_SOURCES = unit/test-tools.c ../src/mk-tools.c \
                           ../src/mk-config.c unit/stub-kodi.c \
-                          unit/stub-history.c
+                          unit/stub-history.c ../src/mk-build-id.c
 unit_test_tools_handlers_SOURCES = unit/test-tools-handlers.c \
                                    ../src/mk-tools.c ../src/mk-config.c \
-                                   unit/stub-kodi-prog.c unit/stub-history.c
+                                   unit/stub-kodi-prog.c unit/stub-history.c \
+                                   ../src/mk-build-id.c
 
 # Functional tests. Driven by automake's test harness: each TESTS entry is run,
 # exit 0 = pass, 77 = skip (no Kodi / missing tool), anything else = fail.

@@ -1,0 +1,12 @@
+17. [x] Let an assistant detect that it is talking to a stale server binary.
+   The release version alone cannot tell builds apart (every build between
+   releases reports the same "0.3.0dev"), and serverInfo is not shown to the
+   model by clients such as Claude Code.
+   [x] 17.1. Build ID: capture `git describe --always --dirty` at build time;
+      fall back to the plain version for tarball builds without git.
+   [x] 17.2. Report the build ID in serverInfo.version.
+   [x] 17.3. Report it in the `instances get` reply.
+   [x] 17.4. Report it in the initialize `instructions`, which the client
+      shows to the model every session.
+   [x] 17.5. Keep it out of `nowplaying` (the most frequent call; it would
+      only repeat in every snapshot).

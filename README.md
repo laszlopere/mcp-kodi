@@ -76,7 +76,7 @@ boxes when `instance` is omitted).
 | Tool        | What it does |
 |-------------|--------------|
 | `history`   | List recently played items from the **local** playback log, written as a side effect of every playback-affecting call. Optional ISO-8601 `since`/`until` window plus app-side filters — `media`, `kind`, `artist`, free-text `match`, exact `id` — all AND-combined, with `limit`/`offset`/`order` paging and a `count`-only mode. Reads only the local log — no Kodi call, so it works even when no box is reachable. Omitted `instance` returns **all** boxes. |
-| `instances` | Read or modify the server's own instance config (`get`/`set`/`remove`). Makes no Kodi call; never returns stored passwords. |
+| `instances` | Read or modify the server's own instance config (`get`/`set`/`remove`). Makes no Kodi call; never returns stored passwords. Also reports the server's build ID (`build`), the same one shown in `serverInfo.version` and the session instructions, so an assistant can spot a stale binary. |
 | `rpc`       | **Escape hatch** — send a raw JSON-RPC method to Kodi and return its reply unchanged. Off by default; opt-in per instance (see below). |
 
 Most action tools return a small player-state snapshot — `{ "state":

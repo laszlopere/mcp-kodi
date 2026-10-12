@@ -23,6 +23,7 @@ Makefile.in
 
 # Build output
 /src/mcp-kodi
+/src/build-id.h
 
 # Test harness artifacts (automake `make check`)
 /tests/*.log

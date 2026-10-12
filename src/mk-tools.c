@@ -7,6 +7,7 @@
 #include "config.h"
 
 #include "mk-tools.h"
+#include "mk-build-id.h"
 
 #include "mk-history.h"
 
@@ -1440,10 +1441,12 @@ handler_volume (MkTools *self, const MkToolDef *def, JsonObject *args,
  * Credentials are deliberately reduced to the boolean `has_auth`: the password
  * is write-only and never leaves the server. `allow_rpc` is reported read-only
  * so the caller can see which boxes permit the `rpc` escape hatch, but it
- * cannot be changed here — only by hand-editing the config file.
+ * cannot be changed here — only by hand-editing the config file. `build` is
+ * the server's build ID (mk_build_id()), so a caller can tell whether the
+ * running binary matches the source it expects.
  *
  * @return a newly allocated object node
- *         `{ "default": <key>|null, "instances": [ … ] }`.
+ *         `{ "default": <key>|null, "instances": [ … ], "build": <id> }`.
  */
 static JsonNode *
 instances_list (MkTools *self)
@@ -1488,6 +1491,9 @@ instances_list (MkTools *self)
     }
   g_list_free (keys);
   json_builder_end_array (b);
+
+  json_builder_set_member_name (b, "build");
+  json_builder_add_string_value (b, mk_build_id ());
 
   json_builder_end_object (b);
   return json_builder_get_root (b);
@@ -5745,8 +5751,13 @@ out_schema_instances (MkTools *self)
                   "\"has_auth\", \"allow_rpc\" } — has_auth stands in for the "
                   "write-only password; allow_rpc is read-only here.",
                   "The configured instances, in sorted key order.");
+  prop_typed (b, "build", "string",
+              "Build ID of this MCP server binary (version plus git "
+              "describe); differs from the source tree's when the running "
+              "server is stale.");
 
-  static const char *const required[] = { "default", "instances", NULL };
+  static const char *const required[] = { "default", "instances", "build",
+                                          NULL };
   schema_end (b, required);
   return json_builder_get_root (b);
 }
@@ -6318,14 +6329,16 @@ static const MkToolDef mk_tool_defs[] = {
    * @param name|host|auth|scheme|insecure|default: instance fields for "set".
    * @return the resulting instance list (instances_list()): `{ "default": <key>,
    *         "instances": [ { "key", "name"?, "host", "scheme", "insecure",
-   *         "has_auth", "allow_rpc" } ] }`. `allow_rpc` is read-only here — it
-   *         can only be changed by hand-editing the config file.
+   *         "has_auth", "allow_rpc" } ], "build" }`. `allow_rpc` is read-only
+   *         here — it can only be changed by hand-editing the config file.
+   *         `build` is this server's build ID.
    */
   { "instances", "Read or modify the configured Kodi instances "
                  "(action: get/set/remove). Manages the MCP server's own "
                  "config, not a Kodi device. Returns { \"default\", "
                  "\"instances\": [ { \"key\", \"host\", \"scheme\", "
-                 "\"insecure\", \"has_auth\", \"allow_rpc\", … } ] }.",
+                 "\"insecure\", \"has_auth\", \"allow_rpc\", … } ], "
+                 "\"build\" }; build is this server's build ID.",
     schema_instances, handler_instances, NULL, out_schema_instances },
 
   /* ---- Search tools — resolve the library by name down to playable leaf

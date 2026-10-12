@@ -53,8 +53,8 @@ declare -A SOURCES=(
   [test-config]="test-config.c $src/mk-config.c"
   [test-config-io]="test-config-io.c $src/mk-config.c"
   [test-history]="test-history.c $src/mk-history.c"
-  [test-tools]="test-tools.c $src/mk-tools.c $src/mk-config.c stub-kodi.c stub-history.c"
-  [test-tools-handlers]="test-tools-handlers.c $src/mk-tools.c $src/mk-config.c stub-kodi-prog.c stub-history.c"
+  [test-tools]="test-tools.c $src/mk-tools.c $src/mk-config.c stub-kodi.c stub-history.c $src/mk-build-id.c"
+  [test-tools-handlers]="test-tools-handlers.c $src/mk-tools.c $src/mk-config.c stub-kodi-prog.c stub-history.c $src/mk-build-id.c"
 )
 
 # Deterministic order.

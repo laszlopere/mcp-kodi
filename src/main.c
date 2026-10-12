@@ -11,6 +11,7 @@
 
 #include <glib.h>
 
+#include "mk-build-id.h"
 #include "mk-config.h"
 #include "mk-kodi.h"
 #include "mk-mcp.h"
@@ -66,20 +67,20 @@ main (int argc, char **argv)
   g_autoptr (MkConfig) cfg = mk_config_load (NULL, &error);
   if (cfg == NULL)
     {
-      g_printerr ("%s %s: %s\n", PACKAGE_NAME, PACKAGE_VERSION, error->message);
+      g_printerr ("%s %s: %s\n", PACKAGE_NAME, mk_build_id (), error->message);
       return 1;
     }
 
   const char *default_name = mk_config_get_default (cfg);
   g_printerr ("%s %s — config loaded: %u instance(s), default=%s\n",
-              PACKAGE_NAME, PACKAGE_VERSION,
+              PACKAGE_NAME, mk_build_id (),
               mk_config_instance_count (cfg),
               default_name ? default_name : "(none yet)");
 
   g_autoptr (MkKodi) kodi = mk_kodi_new (cfg);
   g_autoptr (MkTools) tools = mk_tools_new (cfg, kodi);
 
-  g_printerr ("%s %s — %u tool(s) registered\n", PACKAGE_NAME, PACKAGE_VERSION,
+  g_printerr ("%s %s — %u tool(s) registered\n", PACKAGE_NAME, mk_build_id (),
               mk_tools_count (tools));
 
   g_autoptr (MkMcp) mcp = mk_mcp_new (tools);
@@ -97,10 +98,10 @@ main (int argc, char **argv)
     {
       g_timeout_add_seconds (poll_seconds, poll_trampoline, tools);
       g_printerr ("%s %s — history poll every %us\n", PACKAGE_NAME,
-                  PACKAGE_VERSION, poll_seconds);
+                  mk_build_id (), poll_seconds);
     }
 
-  g_printerr ("%s %s — listening on stdio\n", PACKAGE_NAME, PACKAGE_VERSION);
+  g_printerr ("%s %s — listening on stdio\n", PACKAGE_NAME, mk_build_id ());
   mk_stdio_run (stdio);
 
   return 0;

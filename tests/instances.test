@@ -106,6 +106,8 @@ eq "spare defaults allow_rpc:false" false  "$(g "$pb" '.instances[] | select(.ke
 is_true "living has_auth is true"  "$(j "$pb" '.instances[] | select(.key=="living") | .has_auth')"
 is_true "no raw auth is ever returned" \
         "$(j "$pb" '[.. | objects | has("auth")] | any | not')"
+is_true "get reports the server build ID" \
+        "$(j "$pb" '.build | type == "string" and length > 0')"
 
 # ===========================================================================
 # 3. set: add a new instance; a SEPARATE get proves it was persisted to disk.

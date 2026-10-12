@@ -10,7 +10,9 @@
 #   - tools/call without a string "name" is -32602, and an unknown tool name is
 #     -32602 naming the tool (a protocol error, unlike a failing tool, which is
 #     a normal result with isError:true);
-#   - the request id is echoed verbatim whatever its JSON type.
+#   - the request id is echoed verbatim whatever its JSON type;
+#   - initialize reports the build ID as serverInfo.version, repeats it in
+#     the instructions, and `instances get` reports the same one.
 # Malformed JSON itself (-32700) is parse_error.test's job.
 #
 # Each case pipes raw newline-delimited lines straight to the binary (the typed
@@ -122,5 +124,27 @@ is_true "string-id ping has a result" "$(j "$r" 'has("result")')"
 r=$(raw '{"jsonrpc":"2.0","id":null,"method":"ping"}')
 eq      "null id is a request, echoed" null "$(j "$r" '.id')"
 is_true "null-id ping has a result"    "$(j "$r" 'has("result")')"
+
+# ===========================================================================
+# 6. The build ID: serverInfo.version, the instructions, and `instances get`
+#    all name the same one, and in a git checkout it is the version plus the
+#    tree's `git describe` (the binary was just built from this tree).
+# ===========================================================================
+echo "-- build ID"
+r=$(raw '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' \
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"instances","arguments":{"action":"get"}}}')
+init=$(printf '%s\n' "$r" | jq -c 'select(.id == 1)')
+call=$(printf '%s\n' "$r" | jq -c 'select(.id == 2)')
+build=$(g "$init" '.result.serverInfo.version')
+is_true  "serverInfo.version is a non-empty string" \
+         "$(j "$init" '.result.serverInfo.version | type == "string" and length > 0')"
+contains "instructions name the build ID" "$build" \
+         "$(g "$init" '.result.instructions')"
+eq       "instances get reports the same build ID" "$build" \
+         "$(g "$call" '.result.content[0].text | fromjson | .build')"
+top=$(cd "$(dirname "$0")/.." && pwd)
+if [ -e "$top/.git" ] && d=$(git -C "$top" describe --always --dirty 2>/dev/null); then
+  eq "build ID ends in the tree's git describe" "+$d" "+${build#*+}"
+fi
 
 mk_tally "protocol functional test"

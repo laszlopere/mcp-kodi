@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include "mk-build-id.h"
 #include "mk-mcp.h"
 #include "mk-stdio.h"
 
@@ -142,7 +143,10 @@ negotiate_protocol (JsonObject *params)
  * @params: the request params, or NULL.
  *
  * Answers `initialize`: negotiated `protocolVersion`, `capabilities`
- * (`{ "tools": {} }`), and `serverInfo` (`{ name, version }`).
+ * (`{ "tools": {} }`), `serverInfo` (`{ name, version }`, the version being
+ * the build ID), and `instructions`. Clients such as Claude Code show
+ * `instructions` to the model every session but not serverInfo, so the build
+ * ID is repeated there for an assistant to spot a stale server binary.
  *
  * @return the response envelope; free with json_node_unref().
  */
@@ -169,8 +173,16 @@ handle_initialize (JsonNode *id, JsonObject *params)
   json_builder_set_member_name (b, "name");
   json_builder_add_string_value (b, PACKAGE_NAME);
   json_builder_set_member_name (b, "version");
-  json_builder_add_string_value (b, PACKAGE_VERSION);
+  json_builder_add_string_value (b, mk_build_id ());
   json_builder_end_object (b);
+
+  g_autofree char *instructions = g_strdup_printf (
+    "This is %s build %s. If a tool behaves unlike the source you are "
+    "looking at, compare this build ID with `git describe --always --dirty` "
+    "in the source tree: a mismatch means the running binary is stale.",
+    PACKAGE_NAME, mk_build_id ());
+  json_builder_set_member_name (b, "instructions");
+  json_builder_add_string_value (b, instructions);
 
   json_builder_end_object (b);
   return mk_jsonrpc_result (id, json_builder_get_root (b));

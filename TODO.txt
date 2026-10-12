@@ -582,19 +582,6 @@ inventory lives in KODI-API.txt; "KODI-API 12.x.y" points there.
         means ALBUM — songs cannot be matched by their own name (until
         8.4.1.5 landed).
 
-17. [ ] Let an assistant detect that it is talking to a stale server binary.
-   The release version alone cannot tell builds apart (every build between
-   releases reports the same "0.3.0dev"), and serverInfo is not shown to the
-   model by clients such as Claude Code.
-   [ ] 17.1. Build ID: capture `git describe --always --dirty` at build time;
-      fall back to the plain version for tarball builds without git.
-   [ ] 17.2. Report the build ID in serverInfo.version.
-   [ ] 17.3. Report it in the `instances get` reply.
-   [ ] 17.4. Report it in the initialize `instructions`, which the client
-      shows to the model every session.
-   [ ] 17.5. Keep it out of `nowplaying` (the most frequent call; it would
-      only repeat in every snapshot).
-
 [ ] 19 Play/queue a whole container in one call — playfile is one file,
     queue needs playback already running, so "play the album Animals" is
     playfile + N-1 queue calls (chatty, racy). Player.Open
