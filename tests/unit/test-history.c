@@ -27,6 +27,10 @@
  *   - 11.13 filters: media/kind exact (case-insensitive), artist and free-text
  *     `match` substrings (the latter spanning title/album/showtitle/label and
  *     artist), exact id, AND-combination of several, and offset/order paging.
+ *   - damaged logs: a corrupt or wrong-shape file is a hard error on read and
+ *     a warned, non-clobbering no-op on write; a zero-byte file is empty; an
+ *     uncreatable or read-only state directory makes record warn and return
+ *     FALSE rather than fail the caller.
  */
 
 #define MK_TEST_IMPL
@@ -35,6 +39,7 @@
 #include "mk-history.h"
 
 #include <glib/gstdio.h>
+#include <unistd.h>
 
 /* Mint a fresh temp dir and return the history.json path under it; the dir is
  * handed back via @out_dir so the case can clean it up. Both are owned by the
@@ -808,6 +813,166 @@ case_offset_and_order (void)
   cleanup (dir, path);
 }
 
+/* Counts the warnings mk_history_record() logs on its best-effort failure
+ * paths, and keeps them off the test output. */
+static int warnings_seen;
+
+static void
+count_warning (const char *domain, GLogLevelFlags level, const char *message,
+               gpointer data)
+{
+  (void) domain;
+  (void) level;
+  (void) message;
+  (void) data;
+  warnings_seen++;
+}
+
+/* A playing snapshot, for the cases that only need *something* to record. */
+static JsonNode *
+playing_snap (void)
+{
+  return snap ("{ \"state\": \"playing\", \"type\": \"audio\","
+               " \"media\": \"song\", \"id\": 7, \"file\": \"/m/x.mp3\" }");
+}
+
+/* Seed @json as the log, then assert both the read and the write path refuse
+ * it with @code — the write path *without* clobbering the file. */
+static void
+expect_bad_log (const char *json, int code)
+{
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+  seed (path, json);
+
+  /* read: a hard error naming the file, no result */
+  gint64 total = -1;
+  GError *err = NULL;
+  g_autoptr (JsonNode) out = read_basic (h, NULL, NULL, NULL, 0, &total, &err);
+  MK_CHECK (out == NULL);
+  MK_CHECK (g_error_matches (err, MK_HISTORY_ERROR, code));
+  MK_CHECK (err != NULL && strstr (err->message, path) != NULL);
+  g_clear_error (&err);
+
+  /* write: best-effort — warns, returns FALSE, and leaves the user's file
+   * exactly as it was rather than overwriting data it failed to understand */
+  g_autoptr (JsonNode) s = playing_snap ();
+  warnings_seen = 0;
+  guint hid = g_log_set_handler (NULL, G_LOG_LEVEL_WARNING, count_warning,
+                                 NULL);
+  MK_CHECK (!mk_history_record (h, "living", NULL, s));
+  g_log_remove_handler (NULL, hid);
+  MK_CHECK_INT_EQ (warnings_seen, 1);
+
+  g_autofree char *after = NULL;
+  MK_CHECK (g_file_get_contents (path, &after, NULL, NULL));
+  MK_CHECK_STR_EQ (after, json);
+
+  cleanup (dir, path);
+}
+
+static void
+case_corrupt_log_refused (void)
+{
+  /* Not JSON at all (e.g. a write torn by a crash on a non-atomic FS). */
+  expect_bad_log ("[ { \"at\": \"2026-01-01T00:00:00Z\", ", MK_HISTORY_ERROR_PARSE);
+}
+
+static void
+case_wrong_shape_log_refused (void)
+{
+  /* Valid JSON, but not the newest-first array the log must be. */
+  expect_bad_log ("{ \"entries\": [] }", MK_HISTORY_ERROR_INVALID);
+  expect_bad_log ("42", MK_HISTORY_ERROR_INVALID);
+}
+
+static void
+case_empty_log_is_empty (void)
+{
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+  /* A zero-byte file (e.g. touched by hand) is no entries, not an error, on
+   * both paths — and a record then writes the first entry over it. */
+  seed (path, "");
+
+  gint64 total = -1;
+  GError *err = NULL;
+  g_autoptr (JsonNode) out = read_basic (h, NULL, NULL, NULL, 0, &total, &err);
+  MK_CHECK (err == NULL);
+  MK_CHECK_INT_EQ (arr_len (out), 0);
+  MK_CHECK_INT_EQ (total, 0);
+
+  g_autoptr (JsonNode) s = playing_snap ();
+  MK_CHECK (mk_history_record (h, "living", NULL, s));
+  g_autoptr (JsonNode) again =
+    read_basic (h, NULL, NULL, NULL, 0, &total, &err);
+  MK_CHECK (err == NULL);
+  MK_CHECK_INT_EQ (total, 1);
+
+  g_clear_error (&err);
+  cleanup (dir, path);
+}
+
+static void
+case_record_unwritable_state_dir (void)
+{
+  char *dir, *path = make_history_path (&dir);
+
+  /* The log's parent "directory" is really a regular file, so it cannot be
+   * created: record must warn and return FALSE, not fail the caller. */
+  g_autofree char *blocker = g_build_filename (dir, "state", NULL);
+  seed (blocker, "not a directory");
+  g_autofree char *bad = g_build_filename (blocker, "history.json", NULL);
+  g_autoptr (MkHistory) h = mk_history_new (bad);
+
+  g_autoptr (JsonNode) s = playing_snap ();
+  warnings_seen = 0;
+  guint hid = g_log_set_handler (NULL, G_LOG_LEVEL_WARNING, count_warning,
+                                 NULL);
+  MK_CHECK (!mk_history_record (h, "living", NULL, s));
+  g_log_remove_handler (NULL, hid);
+  MK_CHECK_INT_EQ (warnings_seen, 1);
+
+  /* Reading a log under that path finds no file — zero entries, no error. */
+  gint64 total = -1;
+  GError *err = NULL;
+  g_autoptr (JsonNode) out = read_basic (h, NULL, NULL, NULL, 0, &total, &err);
+  MK_CHECK (err == NULL);
+  MK_CHECK_INT_EQ (total, 0);
+
+  g_clear_error (&err);
+  cleanup (dir, path);
+}
+
+static void
+case_record_unwritable_log_dir (void)
+{
+  /* Root ignores directory permissions; nothing to provoke. */
+  if (geteuid () == 0)
+    {
+      MK_CHECK (TRUE);
+      return;
+    }
+
+  char *dir, *path = make_history_path (&dir);
+  g_autoptr (MkHistory) h = mk_history_new (path);
+
+  /* The directory exists but is read-only: the sidecar lock file cannot be
+   * created, so record warns and returns FALSE without writing anything. */
+  MK_CHECK (g_chmod (dir, 0500) == 0);
+  g_autoptr (JsonNode) s = playing_snap ();
+  warnings_seen = 0;
+  guint hid = g_log_set_handler (NULL, G_LOG_LEVEL_WARNING, count_warning,
+                                 NULL);
+  MK_CHECK (!mk_history_record (h, "living", NULL, s));
+  g_log_remove_handler (NULL, hid);
+  MK_CHECK_INT_EQ (warnings_seen, 1);
+  MK_CHECK (!g_file_test (path, G_FILE_TEST_EXISTS));
+
+  g_chmod (dir, 0700);
+  cleanup (dir, path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -829,6 +994,11 @@ main (int argc, char **argv)
     { "filter-match-text",        case_filter_match_text },
     { "filter-id-and-combo",      case_filter_id_and_combination },
     { "offset-and-order",         case_offset_and_order },
+    { "corrupt-log-refused",      case_corrupt_log_refused },
+    { "wrong-shape-log-refused",  case_wrong_shape_log_refused },
+    { "empty-log-is-empty",       case_empty_log_is_empty },
+    { "record-unwritable-state",  case_record_unwritable_state_dir },
+    { "record-unwritable-logdir", case_record_unwritable_log_dir },
   };
   return mk_test_run (argc, argv, cases, G_N_ELEMENTS (cases));
 }

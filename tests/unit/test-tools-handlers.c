@@ -440,6 +440,208 @@ case_search_music_no_args (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* Run searchmedia with ARGS_JSON and return its parsed payload (caller frees),
+ * checking the call itself succeeded and was not a tool error. */
+static JsonNode *
+search_payload (MkTools *tools, const char *args_json)
+{
+  g_autoptr (JsonNode) an = args_node (args_json);
+  GError *error = NULL;
+  g_autoptr (JsonNode) res =
+    mk_tools_call (tools, "searchmedia", json_node_get_object (an), &error);
+  MK_CHECK (error == NULL);
+  g_clear_error (&error);
+  gboolean is_error = TRUE;
+  JsonNode *payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  MK_CHECK (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload));
+  return payload;
+}
+
+/* music + title + number, no artist: the album anchors the search, then the
+ * whole album is fetched unpaged and the track filter and the paging window are
+ * applied app-side — `total` counts the kept tracks, not the album's songs, and
+ * `limit` trims the rows (a two-disc album repeats track numbers). */
+static void
+case_search_music_album_track (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "AudioLibrary.GetAlbums",
+    "{ \"albums\": [ { \"albumid\": 20, \"label\": \"OK Computer\" } ],"
+    "  \"limits\": { \"total\": 1 } }");
+  stub_kodi_set_response (
+    "AudioLibrary.GetSongs",
+    "{ \"songs\": ["
+    "    { \"songid\": 30, \"title\": \"Airbag\", \"track\": 1,"
+    "      \"file\": \"/s/d1/01.flac\" },"
+    "    { \"songid\": 31, \"title\": \"Paranoid Android\", \"track\": 2,"
+    "      \"file\": \"/s/d1/02.flac\" },"
+    "    { \"songid\": 40, \"title\": \"Lift\", \"track\": 1,"
+    "      \"file\": \"/s/d2/01.flac\" } ],"
+    "  \"limits\": { \"total\": 3 } }");
+
+  /* one matching track */
+  g_autoptr (JsonNode) p1 = search_payload (
+    tools, "{ \"type\": \"music\", \"title\": \"ok computer\", \"number\": 2 }");
+  if (p1 != NULL && JSON_NODE_HOLDS_OBJECT (p1))
+    {
+      JsonObject *p = json_node_get_object (p1);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 1);
+      JsonArray *rows = json_object_get_array_member (p, "rows");
+      MK_CHECK_INT_EQ (json_array_get_length (rows), 1);
+      MK_CHECK_INT_EQ (json_object_get_int_member (
+                         json_array_get_object_element (rows, 0), "songid"),
+                       31);
+      JsonObject *r = json_object_get_object_member (p, "resolved");
+      MK_CHECK (r != NULL);
+      if (r != NULL)
+        MK_CHECK_INT_EQ (json_object_get_int_member (r, "albumid"), 20);
+    }
+  MK_CHECK (params_carry ("AudioLibrary.GetSongs", "\"albumid\":20"));
+  MK_CHECK (!called ("AudioLibrary.GetArtists"));
+
+  /* track 1 is on both discs: total 2, but limit 1 returns one row */
+  g_autoptr (JsonNode) p2 = search_payload (
+    tools, "{ \"type\": \"music\", \"title\": \"ok computer\", \"number\": 1,"
+           "  \"limit\": 1 }");
+  if (p2 != NULL && JSON_NODE_HOLDS_OBJECT (p2))
+    {
+      JsonObject *p = json_node_get_object (p2);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 2);
+      MK_CHECK_INT_EQ (
+        json_array_get_length (json_object_get_array_member (p, "rows")), 1);
+    }
+
+  free_tools (tools, cfg, kodi);
+}
+
+/* music + artist + title matching exactly ONE of the artist's albums, no track
+ * number: the songs are fetched paged straight from that albumid (Kodi's own
+ * `total`), with the artist echoed as the resolved container. */
+static void
+case_search_music_artist_one_album (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "AudioLibrary.GetArtists",
+    "{ \"artists\": [ { \"artistid\": 7, \"label\": \"Radiohead\" } ],"
+    "  \"limits\": { \"total\": 1 } }");
+  stub_kodi_set_response (
+    "AudioLibrary.GetAlbums",
+    "{ \"albums\": ["
+    "    { \"albumid\": 20, \"title\": \"OK Computer\" },"
+    "    { \"albumid\": 22, \"title\": \"Kid A\" } ],"
+    "  \"limits\": { \"total\": 2 } }");
+  stub_kodi_set_response (
+    "AudioLibrary.GetSongs",
+    "{ \"songs\": ["
+    "    { \"songid\": 30, \"title\": \"Airbag\", \"track\": 1,"
+    "      \"file\": \"/s/01.flac\" } ],"
+    "  \"limits\": { \"total\": 12 } }");
+
+  g_autoptr (JsonNode) pl = search_payload (
+    tools, "{ \"type\": \"music\", \"artist\": \"Radiohead\","
+           "  \"title\": \"ok comp\", \"limit\": 1 }");
+  if (pl != NULL && JSON_NODE_HOLDS_OBJECT (pl))
+    {
+      JsonObject *p = json_node_get_object (pl);
+      /* Kodi's total for the album, not the window */
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 12);
+      MK_CHECK_INT_EQ (
+        json_array_get_length (json_object_get_array_member (p, "rows")), 1);
+      MK_CHECK (!json_object_get_boolean_member_with_default (p, "approximate",
+                                                              FALSE));
+      JsonObject *r = json_object_get_object_member (p, "resolved");
+      MK_CHECK (r != NULL);
+      if (r != NULL)
+        MK_CHECK_INT_EQ (json_object_get_int_member (r, "artistid"), 7);
+    }
+  MK_CHECK (params_carry ("AudioLibrary.GetSongs", "\"albumid\":20"));
+  MK_CHECK (!params_carry ("AudioLibrary.GetSongs", "\"artistid\""));
+
+  free_tools (tools, cfg, kodi);
+}
+
+/* music + artist + title naming none of the artist's albums: a clean zero-total
+ * result (not an error), with no songs fetched at all. */
+static void
+case_search_music_artist_album_miss (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "AudioLibrary.GetArtists",
+    "{ \"artists\": [ { \"artistid\": 7, \"label\": \"Radiohead\" } ],"
+    "  \"limits\": { \"total\": 1 } }");
+  stub_kodi_set_response (
+    "AudioLibrary.GetAlbums",
+    "{ \"albums\": [ { \"albumid\": 22, \"title\": \"Kid A\" } ],"
+    "  \"limits\": { \"total\": 1 } }");
+
+  g_autoptr (JsonNode) pl = search_payload (
+    tools, "{ \"type\": \"music\", \"artist\": \"Radiohead\","
+           "  \"title\": \"Pablo Honey\" }");
+  if (pl != NULL && JSON_NODE_HOLDS_OBJECT (pl))
+    MK_CHECK_INT_EQ (json_object_get_int_member (json_node_get_object (pl),
+                                                 "total"),
+                     0);
+  MK_CHECK (!called ("AudioLibrary.GetSongs"));
+
+  free_tools (tools, cfg, kodi);
+}
+
+/* music + artist + number, no album: every song of the artist is fetched
+ * (artistid, unpaged), the track filter keeps the matching ones app-side, and
+ * no album lookup happens. */
+static void
+case_search_music_artist_track (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "AudioLibrary.GetArtists",
+    "{ \"artists\": [ { \"artistid\": 7, \"label\": \"Radiohead\" } ],"
+    "  \"limits\": { \"total\": 1 } }");
+  stub_kodi_set_response (
+    "AudioLibrary.GetSongs",
+    "{ \"songs\": ["
+    "    { \"songid\": 10, \"title\": \"Idioteque\", \"track\": 8,"
+    "      \"file\": \"/s/a/08.flac\" },"
+    "    { \"songid\": 11, \"title\": \"Airbag\", \"track\": 1,"
+    "      \"file\": \"/s/b/01.flac\" },"
+    "    { \"songid\": 12, \"title\": \"Videotape\", \"track\": 8,"
+    "      \"file\": \"/s/c/08.flac\" } ],"
+    "  \"limits\": { \"total\": 3 } }");
+
+  g_autoptr (JsonNode) pl = search_payload (
+    tools, "{ \"type\": \"music\", \"artist\": \"Radiohead\", \"number\": 8 }");
+  if (pl != NULL && JSON_NODE_HOLDS_OBJECT (pl))
+    {
+      JsonObject *p = json_node_get_object (pl);
+      MK_CHECK_INT_EQ (json_object_get_int_member (p, "total"), 2);
+      JsonArray *rows = json_object_get_array_member (p, "rows");
+      MK_CHECK_INT_EQ (json_array_get_length (rows), 2);
+      MK_CHECK_INT_EQ (json_object_get_int_member (
+                         json_array_get_object_element (rows, 1), "songid"),
+                       12);
+    }
+  MK_CHECK (params_carry ("AudioLibrary.GetSongs", "\"artistid\":7"));
+  MK_CHECK (!called ("AudioLibrary.GetAlbums"));
+
+  free_tools (tools, cfg, kodi);
+}
+
 /* movie + title + actor + director: still ONE GetMovies call, the three rules
  * and-combined into a single composite filter (§11.6.4.2). */
 static void
@@ -2917,6 +3119,240 @@ case_snapshot_av_streams_edges (void)
   free_tools (tools, cfg, kodi);
 }
 
+/* ---- player_state off-library reconcile ------------------------------------ */
+
+/* Program an active player of PTYPE whose Player.GetItem reports ITEM_JSON (the
+ * `item` object), then run nowplaying and return its parsed payload (caller
+ * frees), checking the call succeeded. */
+static JsonNode *
+nowplaying_with_item (MkTools *tools, const char *ptype, const char *item_json)
+{
+  g_autofree char *players =
+    g_strdup_printf ("[ { \"playerid\": 1, \"type\": \"%s\" } ]", ptype);
+  g_autofree char *item = g_strdup_printf ("{ \"item\": %s }", item_json);
+  stub_kodi_set_response ("Player.GetActivePlayers", players);
+  stub_kodi_set_response ("Player.GetProperties", "{ \"speed\": 1 }");
+  stub_kodi_set_response ("Player.GetItem", item);
+
+  GError *error = NULL;
+  g_autoptr (JsonNode) res = mk_tools_call (tools, "nowplaying", NULL, &error);
+  MK_CHECK (error == NULL);
+  g_clear_error (&error);
+  gboolean is_error = TRUE;
+  JsonNode *payload = envelope_payload (res, &is_error);
+  MK_CHECK (!is_error);
+  MK_CHECK (payload != NULL && JSON_NODE_HOLDS_OBJECT (payload));
+  return payload;
+}
+
+/* What Kodi reports for a video played by a path the library indexed under a
+ * different directory: type unknown, id -1, empty/sentinel enrichment. */
+#define OFF_LIBRARY_EPISODE                                                   \
+  "{ \"type\": \"unknown\", \"id\": -1, \"title\": \"\", \"showtitle\": \"\","\
+  "  \"season\": -1, \"episode\": -1,"                                         \
+  "  \"file\": \"/mnt/copy/Lower Decks/S04E01.mkv\" }"
+
+/* A unique basename match in the episode library stamps the real type/id onto
+ * the snapshot and grafts the episode's enrichment over Kodi's placeholders. The
+ * lookup filters on the basename only (the directories differ by definition),
+ * and stops at the first kind that matched. */
+static void
+case_reconcile_unique_episode (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "VideoLibrary.GetEpisodes",
+    "{ \"episodes\": [ { \"episodeid\": 4838, \"showtitle\": \"Lower Decks\","
+    "    \"season\": 4, \"episode\": 1, \"title\": \"Twovix\" } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 1, \"total\": 1 } }");
+
+  g_autoptr (JsonNode) pl =
+    nowplaying_with_item (tools, "video", OFF_LIBRARY_EPISODE);
+  JsonObject *np = pl != NULL ? state_item (json_node_get_object (pl)) : NULL;
+  MK_CHECK (np != NULL);
+  if (np != NULL)
+    {
+      MK_CHECK_STR_EQ (json_object_get_string_member (np, "media"), "episode");
+      MK_CHECK_INT_EQ (json_object_get_int_member (np, "id"), 4838);
+      MK_CHECK_STR_EQ (json_object_get_string_member (np, "title"), "Twovix");
+      MK_CHECK_STR_EQ (json_object_get_string_member (np, "showtitle"),
+                       "Lower Decks");
+      MK_CHECK_INT_EQ (json_object_get_int_member (np, "season"), 4);
+      MK_CHECK_INT_EQ (json_object_get_int_member (np, "episode"), 1);
+      /* the played path is kept as-is, not swapped for the library's */
+      MK_CHECK_STR_EQ (json_object_get_string_member (np, "file"),
+                       "/mnt/copy/Lower Decks/S04E01.mkv");
+    }
+  MK_CHECK (params_carry ("VideoLibrary.GetEpisodes",
+                          "{\"field\":\"filename\",\"operator\":\"is\","
+                          "\"value\":\"S04E01.mkv\"}"));
+  MK_CHECK (!params_carry ("VideoLibrary.GetEpisodes", "/mnt/copy"));
+  MK_CHECK (!called ("VideoLibrary.GetMovies"));
+  MK_CHECK (!called ("VideoLibrary.GetMusicVideos"));
+
+  free_tools (tools, cfg, kodi);
+}
+
+/* No episode carries the basename (total 0), so the lookup falls through to the
+ * movie library, where the unique match wins. */
+static void
+case_reconcile_falls_through_to_movie (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response ("VideoLibrary.GetEpisodes",
+                          "{ \"limits\": { \"start\": 0, \"end\": 0,"
+                          "  \"total\": 0 } }");
+  stub_kodi_set_response (
+    "VideoLibrary.GetMovies",
+    "{ \"movies\": [ { \"movieid\": 77, \"title\": \"Arrival\" } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 1, \"total\": 1 } }");
+
+  g_autoptr (JsonNode) pl = nowplaying_with_item (
+    tools, "video",
+    "{ \"type\": \"unknown\", \"id\": -1, \"title\": \"\","
+    "  \"file\": \"/dl/Arrival.2016.mkv\" }");
+  JsonObject *np = pl != NULL ? state_item (json_node_get_object (pl)) : NULL;
+  MK_CHECK (np != NULL);
+  if (np != NULL)
+    {
+      MK_CHECK_STR_EQ (json_object_get_string_member (np, "media"), "movie");
+      MK_CHECK_INT_EQ (json_object_get_int_member (np, "id"), 77);
+      MK_CHECK_STR_EQ (json_object_get_string_member (np, "title"), "Arrival");
+      /* a movie carries no episode fields */
+      MK_CHECK (!json_object_has_member (np, "showtitle"));
+    }
+  MK_CHECK (called ("VideoLibrary.GetEpisodes"));
+  MK_CHECK (called ("VideoLibrary.GetMovies"));
+  MK_CHECK (!called ("VideoLibrary.GetMusicVideos"));
+
+  free_tools (tools, cfg, kodi);
+}
+
+/* A basename shared by two library rows is ambiguous: better unknown than
+ * mislabelled. Every kind is tried, none matches uniquely, and the snapshot
+ * keeps Kodi's unknown/-1 with the sentinel fields still dropped. Also covers a
+ * reply claiming total 1 but carrying no rows array — skipped, not trusted. */
+static void
+case_reconcile_ambiguous_left_unknown (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_response (
+    "VideoLibrary.GetEpisodes",
+    "{ \"episodes\": ["
+    "    { \"episodeid\": 1, \"showtitle\": \"A\", \"title\": \"Pilot\" },"
+    "    { \"episodeid\": 2, \"showtitle\": \"B\", \"title\": \"Pilot\" } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 2, \"total\": 2 } }");
+  stub_kodi_set_response ("VideoLibrary.GetMovies",
+                          "{ \"limits\": { \"start\": 0, \"end\": 1,"
+                          "  \"total\": 1 } }");
+  stub_kodi_set_response ("VideoLibrary.GetMusicVideos",
+                          "{ \"musicvideos\": [],"
+                          "  \"limits\": { \"start\": 0, \"end\": 0,"
+                          "  \"total\": 0 } }");
+
+  g_autoptr (JsonNode) pl = nowplaying_with_item (
+    tools, "video",
+    "{ \"type\": \"unknown\", \"id\": -1, \"title\": \"\","
+    "  \"showtitle\": \"\", \"season\": -1, \"episode\": -1,"
+    "  \"file\": \"/x/pilot.mkv\" }");
+  JsonObject *np = pl != NULL ? state_item (json_node_get_object (pl)) : NULL;
+  MK_CHECK (np != NULL);
+  if (np != NULL)
+    {
+      MK_CHECK_STR_EQ (json_object_get_string_member (np, "media"), "unknown");
+      MK_CHECK_INT_EQ (json_object_get_int_member (np, "id"), -1);
+      MK_CHECK (!json_object_has_member (np, "showtitle"));
+      MK_CHECK (!json_object_has_member (np, "season"));
+    }
+  MK_CHECK (called ("VideoLibrary.GetEpisodes"));
+  MK_CHECK (called ("VideoLibrary.GetMovies"));
+  MK_CHECK (called ("VideoLibrary.GetMusicVideos"));
+
+  free_tools (tools, cfg, kodi);
+}
+
+/* A failed library lookup is swallowed, never failing the snapshot: episodes
+ * and movies both error out, and the music-video kind still gets its turn and
+ * matches, carrying its own enrichment (title + artist). */
+static void
+case_reconcile_lookup_failure_skipped (void)
+{
+  MkConfig *cfg;
+  MkKodi *kodi;
+  MkTools *tools = make_tools (&cfg, &kodi);
+
+  stub_kodi_set_error ("VideoLibrary.GetEpisodes");
+  stub_kodi_set_error ("VideoLibrary.GetMovies");
+  stub_kodi_set_response (
+    "VideoLibrary.GetMusicVideos",
+    "{ \"musicvideos\": [ { \"musicvideoid\": 5, \"title\": \"Karma Police\","
+    "    \"artist\": [ \"Radiohead\" ] } ],"
+    "  \"limits\": { \"start\": 0, \"end\": 1, \"total\": 1 } }");
+
+  g_autoptr (JsonNode) pl = nowplaying_with_item (
+    tools, "video",
+    "{ \"type\": \"unknown\", \"id\": -1, \"title\": \"\","
+    "  \"file\": \"/mv/karma.mp4\" }");
+  JsonObject *np = pl != NULL ? state_item (json_node_get_object (pl)) : NULL;
+  MK_CHECK (np != NULL);
+  if (np != NULL)
+    {
+      MK_CHECK_STR_EQ (json_object_get_string_member (np, "media"),
+                       "musicvideo");
+      MK_CHECK_INT_EQ (json_object_get_int_member (np, "id"), 5);
+      MK_CHECK_STR_EQ (json_object_get_string_member (np, "title"),
+                       "Karma Police");
+      MK_CHECK (json_object_has_member (np, "artist"));
+    }
+
+  free_tools (tools, cfg, kodi);
+}
+
+/* The reconcile is a no-op — not a single library lookup — when Kodi already
+ * classified the item, when the player is audio (out of scope), when the item
+ * has no file, and when the file has no usable basename ("/"). */
+static void
+case_reconcile_skips (void)
+{
+  static const struct
+  {
+    const char *ptype;
+    const char *item;
+  } skip[] = {
+    { "video", "{ \"type\": \"movie\", \"id\": 7, \"title\": \"M\","
+               "  \"file\": \"/v/m.mkv\" }" },
+    { "audio", "{ \"type\": \"unknown\", \"id\": -1,"
+               "  \"file\": \"/s/a.flac\" }" },
+    { "video", "{ \"type\": \"unknown\", \"id\": -1, \"file\": \"\" }" },
+    { "video", "{ \"type\": \"unknown\", \"id\": -1 }" },
+    { "video", "{ \"type\": \"unknown\", \"id\": -1, \"file\": \"/\" }" },
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (skip); i++)
+    {
+      MkConfig *cfg;
+      MkKodi *kodi;
+      MkTools *tools = make_tools (&cfg, &kodi);
+
+      g_autoptr (JsonNode) pl =
+        nowplaying_with_item (tools, skip[i].ptype, skip[i].item);
+      MK_CHECK (!called ("VideoLibrary.GetEpisodes"));
+      MK_CHECK (!called ("VideoLibrary.GetMovies"));
+      MK_CHECK (!called ("VideoLibrary.GetMusicVideos"));
+
+      free_tools (tools, cfg, kodi);
+    }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2927,6 +3363,10 @@ main (int argc, char **argv)
     { "search-music-song-only",  case_search_music_song_only },
     { "search-music-song-artist", case_search_music_song_artist },
     { "search-music-no-args",    case_search_music_no_args },
+    { "search-music-album-track", case_search_music_album_track },
+    { "search-music-artist-one-album", case_search_music_artist_one_album },
+    { "search-music-artist-album-miss", case_search_music_artist_album_miss },
+    { "search-music-artist-track", case_search_music_artist_track },
     { "search-movie-person",     case_search_movie_person },
     { "search-movie-actor-only", case_search_movie_actor_only },
     { "search-tv-person",        case_search_tv_person },
@@ -2980,6 +3420,11 @@ main (int argc, char **argv)
     { "poll-history-idle",       case_poll_history_idle },
     { "snapshot-av-streams",     case_snapshot_av_streams },
     { "snapshot-av-streams-edges", case_snapshot_av_streams_edges },
+    { "reconcile-unique-episode", case_reconcile_unique_episode },
+    { "reconcile-falls-through-to-movie", case_reconcile_falls_through_to_movie },
+    { "reconcile-ambiguous-left-unknown", case_reconcile_ambiguous_left_unknown },
+    { "reconcile-lookup-failure-skipped", case_reconcile_lookup_failure_skipped },
+    { "reconcile-skips",         case_reconcile_skips },
   };
   return mk_test_run (argc, argv, cases, G_N_ELEMENTS (cases));
 }
